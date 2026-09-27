@@ -1,0 +1,16 @@
+{
+  "id": "notify.console",
+  "kind": "notify",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "notify.console",
+  "accepts": {
+    "subject": "string",
+    "body_markdown": "string",
+    "priority": { "type": "string", "optional": true }
+  },
+  "produces": { "delivered_at": "number" },
+  "cost": { "money_usd": 0, "time_ms": 1 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Prints to stdout. Always available. Used as the fallback notify backend when no other channel is configured."
+}

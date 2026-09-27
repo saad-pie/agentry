@@ -1,0 +1,17 @@
+{
+  "id": "discovery.github_search",
+  "kind": "discovery",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "discovery.github_search",
+  "accepts": {
+    "query": "object",
+    "limit": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "candidates": "array<object>"
+  },
+  "cost": { "money_usd": 0, "time_ms": 800 },
+  "limits": { "rpm": 30, "rpd": 5000, "authenticated_rpm": 30, "authenticated_rpd": 5000 },
+  "source": "seeded:agentry",
+  "notes": "Uses GITHUB_TOKEN if available (raises rate limit to 5000/hr). Handler not yet implemented — will land in batch 4."
+}

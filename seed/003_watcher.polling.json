@@ -1,0 +1,18 @@
+{
+  "id": "watcher.polling",
+  "kind": "watcher",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "watcher.polling",
+  "accepts": {
+    "source": "string",
+    "query": "object",
+    "interval_ms": "number",
+    "dedupe_key": "string",
+    "on_new": "string"
+  },
+  "produces": { "watch_id": "string", "state": "object" },
+  "cost": { "time_ms": 10 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Creates a watch_instance node and registers it with the runtime scheduler. Poll interval is a hint — the source's own rate limits win."
+}

@@ -1,0 +1,15 @@
+{
+  "id": "discovery.web_search",
+  "kind": "discovery",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "discovery.web_search",
+  "accepts": {
+    "query": "string",
+    "limit": { "type": "number", "optional": true }
+  },
+  "produces": { "candidates": "array<object>" },
+  "cost": { "money_usd": 0, "time_ms": 1200 },
+  "limits": { "rpd": 100 },
+  "source": "seeded:agentry",
+  "notes": "Requires GOOGLE_CSE_KEY and GOOGLE_CSE_CX. 100 queries/day on the free tier. Handler not yet implemented — will land in batch 4."
+}

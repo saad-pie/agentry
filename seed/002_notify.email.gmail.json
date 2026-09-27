@@ -1,0 +1,17 @@
+{
+  "id": "notify.email.gmail",
+  "kind": "notify",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "notify.email.gmail",
+  "accepts": {
+    "subject": "string",
+    "body_markdown": "string",
+    "to": "string",
+    "priority": { "type": "string", "optional": true }
+  },
+  "produces": { "message_id": "string", "sent_at": "number" },
+  "cost": { "money_usd": 0, "time_ms": 2000 },
+  "limits": { "rpm": 60, "rpd": 500 },
+  "source": "seeded:human",
+  "notes": "OAuth 2.0, gmail.send scope only. Requires GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_FROM env vars. Handler not yet implemented."
+}

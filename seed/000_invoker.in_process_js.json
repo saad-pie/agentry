@@ -1,0 +1,11 @@
+{
+  "id": "invoker.in_process_js",
+  "kind": "invoker",
+  "invoked_via": "invoker.in_process_js",
+  "accepts": { "capability_id": "string", "input": "object" },
+  "produces": { "output": "any", "cost": "object" },
+  "cost": { "time_ms": 0 },
+  "limits": { "rpm": null, "rpd": null },
+  "source": "seeded:agentry",
+  "notes": "Ground truth. Handlers are registered by id via registerHandler(). Every other invoker ultimately delegates here or to another process."
+}
