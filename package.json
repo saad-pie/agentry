@@ -1,15 +1,36 @@
 {
   "name": "agentry",
   "version": "0.1.0",
+  "description": "A capability graph the agent grows itself. Append-only. Observable. Self-extending.",
   "type": "module",
   "main": "src/index.mjs",
   "exports": {
     ".": "./src/index.mjs",
     "./errors": "./src/errors.mjs",
-    "./graph": "./src/graph.mjs"
+    "./graph": "./src/graph.mjs",
+    "./events": "./src/events.mjs"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src/",
+    "seed/",
+    "README.md"
+  ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "node --check src/*.mjs"
+  },
+  "keywords": [
+    "agent",
+    "capability-graph",
+    "self-improving",
+    "append-only"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saad-pie/agentry.git"
   }
 }
