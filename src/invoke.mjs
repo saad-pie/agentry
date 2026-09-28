@@ -46,6 +46,7 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
   if (!cap) {
     const err = errors.invalidCapability(capabilityId);
     events.emit("invoke.failed", { capability_id: capabilityId, code: err.code, task_id: context.task_id });
+    await observeGap(deps, { capabilityId, error: err, context });
     return { ...fail(err), ms: Date.now() - startedAt };
   }
 
@@ -59,6 +60,7 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
       code: err.code,
       task_id: context.task_id,
     });
+    await observeGap(deps, { capabilityId, error: err, context });
     return { ...fail(err), ms: Date.now() - startedAt };
   }
 
@@ -122,5 +124,33 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
     ms,
   });
 
+  // 7. If it failed, record it as a potential capability gap. This is the
+  // wiring that lets the discovery loop learn about what the graph lacks.
+  // Done lazily to avoid a circular import at module load time.
+  if (!result.ok) {
+    await observeGap(deps, { capabilityId, error: result.error, context });
+  }
+
   return { ...result, ms };
+}
+
+/**
+ * Record a failed invocation as a capability gap, if the failure is
+ * gap-shaped. Best-effort — never breaks the invoke.
+ */
+async function observeGap(deps, { capabilityId, error, context }) {
+  if (!error) return;
+  try {
+    const { observeFailure } = await import("./handlers/agentry.capability_gap.mjs");
+    observeFailure(deps, {
+      capability_id: capabilityId,
+      error,
+      task_id: context?.task_id ?? null,
+    });
+  } catch (e) {
+    deps.events?.emit("invoke.gap_observe_failed", {
+      capability_id: capabilityId,
+      error: e.message,
+    });
+  }
 }

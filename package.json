@@ -1,33 +1,25 @@
 {
   "name": "agentry",
-  "version": "0.1.0",
+  "version": "0.6.4",
   "description": "A capability graph the agent grows itself. Append-only. Observable. Self-extending.",
   "type": "module",
   "main": "src/index.mjs",
+  "bin": {
+    "agentry": "bin/agentry.mjs"
+  },
   "exports": {
     ".": "./src/index.mjs",
     "./errors": "./src/errors.mjs",
     "./graph": "./src/graph.mjs",
     "./events": "./src/events.mjs"
   },
-  "engines": {
-    "node": ">=20"
-  },
-  "files": [
-    "src/",
-    "seed/",
-    "README.md"
-  ],
+  "engines": { "node": ">=20" },
+  "files": ["src/", "bin/", "seed/", "README.md"],
   "scripts": {
     "test": "node --test",
-    "lint": "node --check src/*.mjs"
+    "lint": "node --check src/*.mjs bin/*.mjs"
   },
-  "keywords": [
-    "agent",
-    "capability-graph",
-    "self-improving",
-    "append-only"
-  ],
+  "keywords": ["agent", "capability-graph", "self-improving", "append-only"],
   "license": "MIT",
   "repository": {
     "type": "git",
