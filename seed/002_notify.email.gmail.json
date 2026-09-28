@@ -6,7 +6,7 @@
   "accepts": {
     "subject": "string",
     "body_markdown": "string",
-    "to": "string",
+    "to": { "type": "string", "optional": true },
     "priority": { "type": "string", "optional": true }
   },
   "produces": { "message_id": "string", "sent_at": "number" },
