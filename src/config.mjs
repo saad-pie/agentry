@@ -43,6 +43,7 @@ export function loadConfig(overrides = {}) {
       clientSecret: env("GMAIL_CLIENT_SECRET", null),
       refreshToken: env("GMAIL_REFRESH_TOKEN", null),
       from: env("GMAIL_FROM", null),
+      to: env("GMAIL_TO", null),
     },
 
     // GitHub (discovery source)
