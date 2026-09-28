@@ -1,0 +1,24 @@
+{
+  "id": "llm.openai_compat",
+  "kind": "llm",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "llm.openai_compat",
+  "accepts": {
+    "model": "string",
+    "messages": "array",
+    "temperature": { "type": "number", "optional": true },
+    "max_tokens": { "type": "number", "optional": true },
+    "response_format": { "type": "object", "optional": true },
+    "timeout_ms": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "content": "string",
+    "model": "string",
+    "finish_reason": "string|null",
+    "usage": "object"
+  },
+  "cost": { "money_usd": 0 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "OpenAI-compatible chat completions. Model chosen per-call by the caller."
+}
