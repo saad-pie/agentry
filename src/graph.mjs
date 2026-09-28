@@ -7,8 +7,13 @@
 //   - No mutations. To change a node, append a new line with a bumped version.
 //   - Delete is not a thing. Mark `retired_at` and stop selecting it.
 //   - Rebuild from disk on every read. Cheap at our scale. Always correct.
+//   - The graph owns exactly six fields on a node: id, kind, version,
+//     discovered_at, updated_at, retired_at. Every other field belongs to
+//     the caller and is preserved verbatim. This is what makes capabilities
+//     open-ended — a gap node can carry `hits`, a watch node can carry
+//     `seen_ids`, and the graph doesn't need to know about either.
 
-import { appendFileSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { errors } from "./errors.mjs";
 
@@ -74,29 +79,55 @@ export class CapabilityGraph {
   }
 
   /**
-   * Add or update a capability. Bumps version automatically if the id exists.
-   * Returns the stored node.
+   * Add or update a capability.
+   *
+   * Graph-owned fields (always set by this method, never by the caller in
+   * a way that can be silently overwritten by a spread):
+   *   id, kind, version, discovered_at, updated_at
+   *
+   * Standard fields with defaults (preserved if set, else defaulted):
+   *   accepts, produces, cost, limits, reliability, invoked_via, source,
+   *   retired_at, notes
+   *
+   * Everything else the caller passes is preserved verbatim. That's how
+   * kind-specific fields (wanted_kind, hits, seen_ids, ...) survive.
+   *
+   * Bumps `version` automatically if the id already exists.
    */
   putCapability(cap) {
     if (!cap?.id) throw errors.invalidCapability("<no id>", { reason: "id required" });
     const existing = this.getCapability(cap.id);
     const now = Date.now();
+
+    // Order matters:
+    //   1. Start from the existing node so kind-specific fields survive.
+    //   2. Overlay the caller's fields.
+    //   3. Force graph-owned fields to their correct values.
+    //   4. Apply defaults only where nothing has been set anywhere.
     const node = {
+      // (1) preserve existing
+      ...(existing || {}),
+      // (2) overlay caller
+      ...cap,
+      // (3) graph-owned fields always win
       id: cap.id,
       kind: cap.kind || existing?.kind || "unknown",
       version: (existing?.version || 0) + 1,
+      discovered_at: existing?.discovered_at ?? now,
+      updated_at: now,
+      // (4) defaults only where nothing is set
       accepts: cap.accepts ?? existing?.accepts ?? null,
       produces: cap.produces ?? existing?.produces ?? null,
       cost: cap.cost ?? existing?.cost ?? {},
       limits: cap.limits ?? existing?.limits ?? {},
-      reliability: cap.reliability ?? existing?.reliability ?? { success_rate: null, p50_ms: null, p99_ms: null },
+      reliability: cap.reliability ?? existing?.reliability
+        ?? { success_rate: null, p50_ms: null, p99_ms: null },
       invoked_via: cap.invoked_via ?? existing?.invoked_via ?? null,
       source: cap.source ?? existing?.source ?? "unknown",
       notes: cap.notes ?? existing?.notes ?? null,
-      discovered_at: existing?.discovered_at ?? now,
-      updated_at: now,
-      retired_at: cap.retired_at ?? null,
+      retired_at: cap.retired_at ?? existing?.retired_at ?? null,
     };
+
     this._append(this.capsFile, node);
     return node;
   }
@@ -105,7 +136,13 @@ export class CapabilityGraph {
   retireCapability(id, reason = null) {
     const existing = this.getCapability(id);
     if (!existing) throw errors.invalidCapability(id);
-    const node = { ...existing, version: existing.version + 1, retired_at: Date.now(), retired_reason: reason, updated_at: Date.now() };
+    const node = {
+      ...existing,
+      version: existing.version + 1,
+      retired_at: Date.now(),
+      retired_reason: reason,
+      updated_at: Date.now(),
+    };
     this._append(this.capsFile, node);
     return node;
   }
