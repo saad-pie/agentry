@@ -14,15 +14,10 @@ import { registerInvoker } from "../invoke.mjs";
 
 /**
  * A handler is: async (input, ctx) → { output, cost? } | throws
- * The ctx has { config, graph, events, task_id, tenant, capability }.
+ * The ctx has { config, graph, events, invoke, task_id, tenant, capability }.
  */
 const HANDLERS = new Map();
 
-/**
- * Register a JS handler by id.
- * The id should match the capability's id, so "capability X runs handler X".
- * Alternatively, a capability can carry a `handler` field naming a different id.
- */
 export function registerHandler(id, fn) {
   if (typeof fn !== "function") throw errors.internal(`handler ${id} must be a function`);
   HANDLERS.set(id, fn);
@@ -60,14 +55,22 @@ async function inProcessJsInvoker(cap, input, context) {
   // We do NOT enforce JSON Schema yet — that comes when we have a schema kind.
   if (cap.accepts && typeof cap.accepts === "object" && !Array.isArray(cap.accepts)) {
     for (const key of Object.keys(cap.accepts)) {
-      if (input[key] === undefined && !cap.accepts[key]?.optional) {
+      const spec = cap.accepts[key];
+      const optional = spec && typeof spec === "object" && spec.optional === true;
+      if (input[key] === undefined && !optional) {
         throw errors.invalidSpec(cap.id, `missing required input: ${key}`);
       }
     }
   }
 
   const started = Date.now();
-  const raw = await fn(input, { ...context, capability: cap });
+  // Pass invoke down so composite handlers can call other capabilities
+  // through the same dispatch boundary. Set by invoke.mjs in step 4.
+  const raw = await fn(input, {
+    ...context,
+    capability: cap,
+    invoke: context.invoke || null,
+  });
   const ms = Date.now() - started;
 
   // Handler may return { output, cost } or just output.

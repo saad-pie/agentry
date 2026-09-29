@@ -1,0 +1,24 @@
+{
+  "id": "agentry.proposal",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.proposal",
+  "accepts": {
+    "gap": "object",
+    "candidates": "array",
+    "notify": { "type": "string", "optional": true },
+    "propose_llm": { "type": "string", "optional": true },
+    "fallback_llm": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "proposal_id": "string",
+    "gap_id": "string",
+    "candidates_reviewed": "number",
+    "recommended_id": "string|null",
+    "notified": "boolean"
+  },
+  "cost": { "money_usd": 0, "time_ms": 5000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Analyzes candidates with an LLM, sends a proposal email with per-candidate approve/reject URLs. Does not adopt."
+}

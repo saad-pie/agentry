@@ -76,7 +76,19 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
   // 4. Dispatch
   let result;
   try {
-    const raw = await invokerFn(cap, input, { ...context, config: deps.config, graph, events });
+    const raw = await invokerFn(cap, input, {
+      ...context,
+      config: deps.config,
+      graph,
+      events,
+      // Self-reference so composite handlers (proposal, task, ...) can
+      // invoke other capabilities through the same boundary.
+      invoke: (otherCapId, otherInput, otherCtx = {}) =>
+        invoke(deps, otherCapId, otherInput, {
+          ...otherCtx,
+          task_id: otherCtx.task_id ?? context.task_id,
+        }),
+    });
     result = { ...ok(raw?.output ?? raw), cost: raw?.cost ?? {} };
   } catch (e) {
     // Any throw becomes a structured error. Never leak raw exceptions up.
@@ -124,9 +136,7 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
     ms,
   });
 
-  // 7. If it failed, record it as a potential capability gap. This is the
-  // wiring that lets the discovery loop learn about what the graph lacks.
-  // Done lazily to avoid a circular import at module load time.
+  // 7. If it failed, record it as a potential capability gap.
   if (!result.ok) {
     await observeGap(deps, { capabilityId, error: result.error, context });
   }
