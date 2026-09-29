@@ -1,0 +1,15 @@
+{
+  "id": "agentry.approval_http",
+  "kind": "service",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.approval_http",
+  "accepts": {
+    "port": { "type": "number", "optional": true },
+    "host": { "type": "string", "optional": true }
+  },
+  "produces": { "started": "boolean", "host": "string", "port": "number" },
+  "cost": { "money_usd": 0, "time_ms": 0 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "HTTP endpoint at /agentry/* that records approve/reject decisions on pending proposals. Not a capability that produces anything — it's a long-running service. Started by the runtime, not invoked per-call."
+}
