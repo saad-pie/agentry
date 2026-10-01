@@ -1,0 +1,24 @@
+{
+  "id": "agentry.reason",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.reason",
+  "accepts": {
+    "failure": "string",
+    "intent": { "type": "string", "optional": true },
+    "attempted": { "type": "array", "optional": true },
+    "workspace_id": { "type": "string", "optional": true },
+    "session_id": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "analysis": "string",
+    "missing": "object|null",
+    "immediate_action": "string",
+    "suggestions": "array",
+    "gap_recorded": "string|null"
+  },
+  "cost": { "money_usd": 0, "time_ms": 2500 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Reasons about a harness failure. Records a gap if a capability is missing. Fast — uses llm.openai_compat, not agent.dsh."
+}
