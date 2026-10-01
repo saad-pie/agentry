@@ -1,66 +1,41 @@
 // agentry/src/handlers/agent.dsh_poll.mjs
-// Polls a task submitted via agent.dsh until it completes or times out.
-//
-// Uses the user apiKey (not the admin token) because business endpoints
-// authenticate with per-user keys. The user is the same one agent.dsh creates.
+// Polls a task submitted via agent.dsh until status becomes "done".
+// From the API docs: status is either "running" or "done", result is in `output`.
 
 const BASE_URL = process.env.DSH_BASE_URL || "http://127.0.0.1:7861";
 const ADMIN_TOKEN = process.env.DSH_ADMIN_TOKEN || "dsh-admin-2024";
 const AGENTRY_USER_NAME = process.env.DSH_USER_NAME || "agentry";
-const AGENTRY_USER_EMAIL = process.env.DSH_USER_EMAIL || "agentry@local";
 
 function adminHeaders() {
-  return {
-    "authorization": `Bearer ${ADMIN_TOKEN}`,
-    "x-api-key": ADMIN_TOKEN,
-    "content-type": "application/json",
-  };
+  return { "x-api-key": ADMIN_TOKEN, "content-type": "application/json" };
 }
-
 function userHeaders(apiKey) {
-  return {
-    "authorization": `Bearer ${apiKey}`,
-    "x-api-key": apiKey,
-    "content-type": "application/json",
-  };
+  return { "x-api-key": apiKey, "content-type": "application/json" };
 }
 
-// ---- cached user apiKey (shared pattern with agent.dsh.mjs) ----
 let _userApiKey = null;
 
-// Ensure the agentry user exists, return its apiKey.
 async function ensureUser() {
   if (_userApiKey) return _userApiKey;
 
-  // Try list
   try {
     const res = await fetch(`${BASE_URL}/api/dsh/users`, {
       headers: adminHeaders(),
       signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : (data.users || data.items || []);
-      const existing = list.find(u =>
-        u.name === AGENTRY_USER_NAME || u.email === AGENTRY_USER_EMAIL
-      );
-      if (existing) {
-        _userApiKey = existing.apiKey || existing.api_key;
-        if (_userApiKey) return _userApiKey;
+      const list = await res.json();
+      if (Array.isArray(list)) {
+        const existing = list.find(u => u.name === AGENTRY_USER_NAME);
+        if (existing?.apiKey) { _userApiKey = existing.apiKey; return _userApiKey; }
       }
     }
-  } catch (e) {
-    // fall through
-  }
+  } catch { /* fall through */ }
 
-  // Create
   const res = await fetch(`${BASE_URL}/api/dsh/users`, {
     method: "POST",
     headers: adminHeaders(),
-    body: JSON.stringify({
-      name: AGENTRY_USER_NAME,
-      email: AGENTRY_USER_EMAIL,
-    }),
+    body: JSON.stringify({ name: AGENTRY_USER_NAME }),
     signal: AbortSignal.timeout(10000),
   });
   if (!res.ok) {
@@ -68,10 +43,10 @@ async function ensureUser() {
     throw new Error(`agent.dsh_poll: user creation failed HTTP ${res.status} — ${text.slice(0, 300)}`);
   }
   const data = await res.json();
-  _userApiKey = data.apiKey || data.api_key || data.user?.apiKey;
-  if (!_userApiKey) {
-    throw new Error(`agent.dsh_poll: user creation returned no apiKey — ${JSON.stringify(data).slice(0, 300)}`);
+  if (!data.apiKey) {
+    throw new Error(`agent.dsh_poll: no apiKey in user creation response — ${JSON.stringify(data).slice(0, 300)}`);
   }
+  _userApiKey = data.apiKey;
   return _userApiKey;
 }
 
@@ -101,19 +76,19 @@ export default async function agentDshPoll(input, ctx) {
     }
 
     const data = await res.json();
-    lastStatus = data.status || data.state;
+    lastStatus = data.status;
 
-    // Terminal states
-    const done = ["completed", "done", "success", "succeeded", "finished", "error", "failed", "cancelled"];
-    if (lastStatus && done.includes(String(lastStatus).toLowerCase())) {
+    // Docs: status is "running" or "done". Only "done" is terminal.
+    if (lastStatus === "done") {
       return {
         output: {
           task_id,
-          status: lastStatus,
+          status: "done",
           final: true,
-          result: data.result ?? data.output ?? data.message ?? null,
-          error: data.error ?? null,
-          raw: data,
+          output: data.output ?? null,
+          messages: data.messages ?? null,
+          session_id: data.sessionId ?? null,
+          workspace_id: data.workspaceId ?? null,
         },
         cost: { time_ms: Date.now() - started, http_calls: 1 },
       };
@@ -127,7 +102,7 @@ export default async function agentDshPoll(input, ctx) {
       task_id,
       status: lastStatus || "timeout",
       final: false,
-      note: `Did not reach a terminal state within ${max_wait_ms}ms`,
+      note: `Did not reach "done" within ${max_wait_ms}ms`,
     },
     cost: { time_ms: Date.now() - started },
   };
