@@ -2,12 +2,14 @@
 // Talks to the DeepSeek Harness business API (dsh-api-gateway plugin).
 //
 // Submits a task to the harness and returns the task id. The task runs
-// asynchronously on the harness; use agent.dsh.poll to wait for the result.
+// asynchronously on the harness; use agent.dsh_poll to wait for the result.
 //
 // Config:
-//   DSH_BASE_URL   — default http://127.0.0.1:7861
-//   DSH_ADMIN_TOKEN — default dsh-admin-2024
-//   DSH_WORKSPACE  — the workspace id to submit into (created on first use)
+//   DSH_BASE_URL        — default http://127.0.0.1:7861
+//   DSH_ADMIN_TOKEN     — default dsh-admin-2024
+//   DSH_WORKSPACE_PATH  — filesystem path used for the default workspace
+//                         (default: /tmp/home/.dsh/agentry-workspaces/agentry-default)
+//   DSH_WORKSPACE       — workspace id to submit into (created on first use)
 
 const BASE_URL = process.env.DSH_BASE_URL || "http://127.0.0.1:7861";
 const ADMIN_TOKEN = process.env.DSH_ADMIN_TOKEN || "dsh-admin-2024";
@@ -21,11 +23,18 @@ function authHeaders() {
 }
 
 // Ensure a workspace exists. Idempotent: creates on first call, reuses after.
+//
+// The gateway's POST /api/dsh/workspaces requires a `path` field — a
+// filesystem location the workspace roots at. We put it under $DSH_HOME so
+// the autosave loop carries it across restarts.
 let _workspaceId = null;
 async function ensureWorkspace(name = "agentry-default") {
   if (_workspaceId) return _workspaceId;
 
-  // Try to list workspaces first
+  const workspacePath = process.env.DSH_WORKSPACE_PATH
+    || `/tmp/home/.dsh/agentry-workspaces/${name}`;
+
+  // Try to list workspaces first (some gateway versions expose GET)
   try {
     const res = await fetch(`${BASE_URL}/api/dsh/workspaces`, {
       headers: authHeaders(),
@@ -33,10 +42,13 @@ async function ensureWorkspace(name = "agentry-default") {
     });
     if (res.ok) {
       const data = await res.json();
-      const list = data.workspaces || data.items || [];
-      const existing = list.find(w => w.name === name || w.slug === name);
+      const list = Array.isArray(data) ? data
+        : (data.workspaces || data.items || []);
+      const existing = list.find(w =>
+        w.name === name || w.slug === name || w.path === workspacePath
+      );
       if (existing) {
-        _workspaceId = existing.id || existing.slug;
+        _workspaceId = existing.id || existing.slug || existing.name;
         return _workspaceId;
       }
     }
@@ -44,21 +56,23 @@ async function ensureWorkspace(name = "agentry-default") {
     // List failed, fall through to create
   }
 
-  // Create
+  // Create. The gateway requires `path` and expects `name` for identification.
   const res = await fetch(`${BASE_URL}/api/dsh/workspaces`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ name, slug: name }),
+    body: JSON.stringify({ name, path: workspacePath }),
     signal: AbortSignal.timeout(10000),
   });
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`agent.dsh: workspace creation failed HTTP ${res.status} — ${text.slice(0, 200)}`);
+    throw new Error(`agent.dsh: workspace creation failed HTTP ${res.status} — ${text.slice(0, 300)}`);
   }
+
   const data = await res.json();
-  _workspaceId = data.id || data.slug || data.workspace?.id;
+  _workspaceId = data.id || data.slug || data.name || data.workspace?.id;
   if (!_workspaceId) {
-    throw new Error(`agent.dsh: workspace creation returned no id — ${JSON.stringify(data).slice(0, 200)}`);
+    throw new Error(`agent.dsh: workspace creation returned no id — ${JSON.stringify(data).slice(0, 300)}`);
   }
   return _workspaceId;
 }
@@ -94,7 +108,7 @@ export default async function agentDsh(input, ctx) {
   const data = await res.json();
   const taskId = data.id || data.taskId || data.task_id;
   if (!taskId) {
-    throw new Error(`agent.dsh: submit returned no task id — ${JSON.stringify(data).slice(0, 200)}`);
+    throw new Error(`agent.dsh: submit returned no task id — ${JSON.stringify(data).slice(0, 300)}`);
   }
 
   return {
