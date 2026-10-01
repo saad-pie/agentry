@@ -11,6 +11,8 @@
 //                         (default: /tmp/home/.dsh/agentry-workspaces/agentry-default)
 //   DSH_WORKSPACE       — workspace id to submit into (created on first use)
 
+import { mkdirSync } from "node:fs";
+
 const BASE_URL = process.env.DSH_BASE_URL || "http://127.0.0.1:7861";
 const ADMIN_TOKEN = process.env.DSH_ADMIN_TOKEN || "dsh-admin-2024";
 
@@ -24,15 +26,23 @@ function authHeaders() {
 
 // Ensure a workspace exists. Idempotent: creates on first call, reuses after.
 //
-// The gateway's POST /api/dsh/workspaces requires a `path` field — a
-// filesystem location the workspace roots at. We put it under $DSH_HOME so
-// the autosave loop carries it across restarts.
+// The gateway calls realpath() on the given path, which fails if the
+// directory doesn't exist. So we mkdir -p it first, then ask the gateway to
+// claim it.
 let _workspaceId = null;
 async function ensureWorkspace(name = "agentry-default") {
   if (_workspaceId) return _workspaceId;
 
   const workspacePath = process.env.DSH_WORKSPACE_PATH
     || `/tmp/home/.dsh/agentry-workspaces/${name}`;
+
+  // The gateway does realpath() on the path, which fails if it doesn't
+  // exist. Create the directory before we ask the gateway to claim it.
+  try {
+    mkdirSync(workspacePath, { recursive: true });
+  } catch (e) {
+    throw new Error(`agent.dsh: cannot create workspace dir ${workspacePath} — ${e.message}`);
+  }
 
   // Try to list workspaces first (some gateway versions expose GET)
   try {
