@@ -1,0 +1,20 @@
+{
+  "id": "agent.dsh",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agent.dsh",
+  "accepts": {
+    "prompt": "string",
+    "workspace": { "type": "string", "optional": true },
+    "timeout_ms": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "task_id": "string",
+    "workspace": "string",
+    "submitted_at": "number"
+  },
+  "cost": { "money_usd": 0, "time_ms": 500 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Submits a task to the DeepSeek Harness business API. Returns a task id; does not wait for the result. Use agent.dsh_poll to wait."
+}

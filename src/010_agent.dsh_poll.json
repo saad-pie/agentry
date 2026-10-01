@@ -1,0 +1,21 @@
+{
+  "id": "agent.dsh_poll",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agent.dsh_poll",
+  "accepts": {
+    "task_id": "string",
+    "max_wait_ms": { "type": "number", "optional": true },
+    "poll_interval_ms": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "task_id": "string",
+    "status": "string",
+    "final": "boolean",
+    "result": "any"
+  },
+  "cost": { "money_usd": 0, "time_ms": 2000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Polls a task submitted via agent.dsh until completion or timeout."
+}
