@@ -31,6 +31,18 @@ export class CapabilityGraph {
     this._cache = null;
   }
 
+  // ---------- cache ----------
+  /**
+   * Clear the in-memory cache so the next read re-reads from disk.
+   * Needed because multiple processes (the MCP server, the discovery
+   * loop, the CLI) share the same JSONL files. When one process writes
+   * a node, the others still hold stale in-memory snapshots until they
+   * invalidate.
+   */
+  invalidateCache() {
+    this._cache = null;
+  }
+
   // ---------- low-level: append + read ----------
   _append(file, obj) {
     appendFileSync(file, JSON.stringify(obj) + "\n");

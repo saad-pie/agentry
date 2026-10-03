@@ -81,6 +81,17 @@ export async function tick(deps, opts = {}) {
     maxPerTick = MAX_WATCHES_PER_TICK,
   } = opts;
 
+  // Force the graph to re-read capabilities.jsonl from disk so we see
+  // gaps written by other processes. The MCP server runs as a separate
+  // Node process and writes to the same file — without this, the
+  // discovery loop's in-memory cache stays stale and reports gaps: 0
+  // even after a gap was successfully recorded.
+  if (typeof graph.invalidateCache === "function") {
+    graph.invalidateCache();
+  } else if ("_cache" in graph) {
+    graph._cache = null;
+  }
+
   const gaps = liveGaps(graph);
   if (!gaps.length) {
     events.emit("discovery.no_gaps");
