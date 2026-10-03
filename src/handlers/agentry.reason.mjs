@@ -11,7 +11,7 @@
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
-const REASONING_MODEL = process.env.AGENTRY_REASON_MODEL || "gemini-2.5-flash";
+const REASONING_MODEL = process.env.AGENTRY_REASON_MODEL || "space-bunny-alpha:free";
 
 function systemPrompt() {
   return `You are agentry, the reasoning layer behind an autonomous agent system.
