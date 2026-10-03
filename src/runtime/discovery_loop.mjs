@@ -54,12 +54,20 @@ function defaultPolicy(gap) {
   };
 }
 
-// Watch interval for gap-driven watches. 6 hours is a good default —
-// often enough to notice new repos, rare enough not to spam you.
-const GAP_WATCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Watch interval for gap-driven watches.
+//
+// Default is 6 hours: often enough to notice new repos, rare enough not
+// to spam you. Override with AGENTRY_GAP_WATCH_INTERVAL_MS for testing.
+const GAP_WATCH_INTERVAL_MS = Number(
+  process.env.AGENTRY_GAP_WATCH_INTERVAL_MS || 6 * 60 * 60 * 1000
+);
 
 // Dedupe key for GitHub search results.
-const GAP_WATCH_DEDUPE_KEY = "full_name";
+//
+// discovery.github_search emits `id` (= repo.full_name) on every candidate.
+// Use that — it's stable and present. `full_name` is NOT a field on the
+// emitted candidate, so using it silently dropped every result.
+const GAP_WATCH_DEDUPE_KEY = "id";
 
 // Which notify capability to fire on new candidates.
 const DEFAULT_NOTIFY = "notify.email.gmail";
@@ -71,6 +79,14 @@ const MAX_WATCHES_PER_TICK = 3;
 /**
  * One pass of the loop.
  * Returns a summary of what it did. Never throws.
+ *
+ * Return shape is always:
+ *   { gaps, uncovered, watched, created }
+ * where:
+ *   gaps      — total live gap nodes
+ *   uncovered — gaps with no watch yet
+ *   watched   — live watch_instance nodes in the graph (cross-process truth)
+ *   created   — watches created on THIS tick (array of {gap_id, watch_id, source})
  */
 export async function tick(deps, opts = {}) {
   const { graph, events } = deps;
@@ -82,36 +98,47 @@ export async function tick(deps, opts = {}) {
   } = opts;
 
   // Force the graph to re-read capabilities.jsonl from disk so we see
-  // gaps written by other processes. The MCP server runs as a separate
-  // Node process and writes to the same file — without this, the
-  // discovery loop's in-memory cache stays stale and reports gaps: 0
-  // even after a gap was successfully recorded.
+  // nodes written by other processes (the MCP server, the approval
+  // server). Without this, the discovery loop's in-memory cache stays
+  // stale and reports gaps: 0 even after a gap was successfully recorded.
   if (typeof graph.invalidateCache === "function") {
     graph.invalidateCache();
   } else if ("_cache" in graph) {
     graph._cache = null;
   }
 
+  // Count live watches from the graph — the only cross-process source
+  // of truth. Do this before the early returns so every path can report
+  // an honest number. This is what makes the log line truthful.
+  let watchedCount = 0;
+  for (const cap of graph.capabilities().values()) {
+    if (cap.kind === "watch_instance" && !cap.retired_at) watchedCount++;
+  }
+
   const gaps = liveGaps(graph);
   if (!gaps.length) {
     events.emit("discovery.no_gaps");
-    return { gaps: 0, watched: 0 };
+    return { gaps: 0, uncovered: 0, watched: watchedCount, created: [] };
   }
 
-  // Which gaps already have a watch? Watch nodes reference their gap via
-  // `reason` — we use the format "gap:<id>" as a convention.
-  const coveredGapKeys = new Set();
+  // Which gaps already have a watch?
+  //
+  // The convention: a watch's `reason` is exactly the gap's id (which
+  // itself is the string "gap:<wanted_id>"). We match by equality, not
+  // by prefix arithmetic — the previous "slice(4)" approach was fragile
+  // and produced "gap:gap:bua.browser" in the wild.
+  const coveredGapIds = new Set();
   for (const cap of graph.capabilities().values()) {
     if (cap.kind !== "watch_instance") continue;
-    if (typeof cap.reason === "string" && cap.reason.startsWith("gap:")) {
-      coveredGapKeys.add(cap.reason.slice(4));
+    if (typeof cap.reason === "string" && cap.reason.length > 0) {
+      coveredGapIds.add(cap.reason);
     }
   }
 
-  const uncovered = gaps.filter(g => !coveredGapKeys.has(g.id));
+  const uncovered = gaps.filter(g => !coveredGapIds.has(g.id));
   if (!uncovered.length) {
     events.emit("discovery.all_gaps_covered", { gaps: gaps.length });
-    return { gaps: gaps.length, watched: 0 };
+    return { gaps: gaps.length, uncovered: 0, watched: watchedCount, created: [] };
   }
 
   const batch = uncovered.slice(0, maxPerTick);
@@ -144,9 +171,10 @@ export async function tick(deps, opts = {}) {
       interval_ms: intervalMs,
       dedupe_key: dedupeKey,
       on_new: notify,
-      // Reason is the link back to the gap. The runtime uses this
-      // to know which gaps are already watched.
-      reason: `gap:${gap.id}`,
+      // `gap.id` already has the "gap:" prefix. Set reason to the gap's
+      // full id so coveredGapIds can match by equality. Do NOT add
+      // another "gap:" here — that's how "gap:gap:bua.browser" happened.
+      reason: gap.id,
     };
 
     try {
@@ -180,8 +208,14 @@ export async function tick(deps, opts = {}) {
   events.emit("discovery.tick_summary", {
     gaps: gaps.length,
     uncovered: uncovered.length,
+    watched: watchedCount,
     created: created.length,
   });
 
-  return { gaps: gaps.length, uncovered: uncovered.length, created };
+  return {
+    gaps: gaps.length,
+    uncovered: uncovered.length,
+    watched: watchedCount,
+    created,
+  };
 }
