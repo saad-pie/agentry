@@ -2,16 +2,18 @@
 // The discovery loop.
 //
 // Every N seconds:
-//   1. Read the live capability gaps from the graph.
-//   2. For each gap without a corresponding watch, create one on a
+//   1. Turn un-analyzed watch_results into proposals. (v0.11.0)
+//   2. Turn decided proposals into adopted capabilities. (v0.11.0)
+//   3. Read the live capability gaps from the graph.
+//   4. For each gap without a corresponding watch, create one on a
 //      discovery source. Pick the source by gap kind.
-//   3. Watch polling is handled by the runtime (watcher.polling + runtime.tick).
-//      On new candidates, the watch fires its on_new capability — a notify.
-//   4. Loop.
+//   5. Watch polling is handled by the runtime (watcher.polling + runtime.tick).
+//      On new candidates, the watch fires its on_new capability — a notify,
+//      AND writes a watch_result node for pass 1 to pick up next tick.
+//   6. Loop.
 //
-// It does NOT adopt capabilities. It reports them. Adoption is a separate,
-// human-gated step. This keeps the discovery loop boring and safe while we
-// learn what kind of things it finds.
+// Adoption is human-gated: the loop only adopts a proposal whose state
+// is "decided" (every candidate has a recorded approve/reject decision).
 
 import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 
@@ -81,12 +83,14 @@ const MAX_WATCHES_PER_TICK = 3;
  * Returns a summary of what it did. Never throws.
  *
  * Return shape is always:
- *   { gaps, uncovered, watched, created }
+ *   { gaps, uncovered, watched, created, proposals, adopted }
  * where:
  *   gaps      — total live gap nodes
  *   uncovered — gaps with no watch yet
  *   watched   — live watch_instance nodes in the graph (cross-process truth)
  *   created   — watches created on THIS tick (array of {gap_id, watch_id, source})
+ *   proposals — proposals created on THIS tick
+ *   adopted   — capabilities adopted on THIS tick
  */
 export async function tick(deps, opts = {}) {
   const { graph, events } = deps;
@@ -107,6 +111,115 @@ export async function tick(deps, opts = {}) {
     graph._cache = null;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Pass 1: un-analyzed watch_results → proposals
+  //
+  // pollWatch writes a `watch_result` node when a poll yields fresh
+  // candidates. This pass turns each one into a proposal (LLM analysis
+  // + email with approve/reject URLs) exactly once. On success the
+  // node is stamped with `analyzed_at` so we don't repropose.
+  // ─────────────────────────────────────────────────────────────
+  let proposalsCreated = 0;
+  for (const node of graph.capabilities().values()) {
+    if (node.kind !== "watch_result") continue;
+    if (node.analyzed_at || node.retired_at) continue;
+
+    const gap = node.gap_id ? graph.getCapability(node.gap_id) : null;
+    if (!gap) {
+      events.emit("discovery.watch_result_no_gap", {
+        watch_result_id: node.id,
+        gap_id: node.gap_id,
+      });
+      // Stamp it so we don't retry forever on an orphan.
+      graph.putCapability({
+        id: node.id,
+        kind: "watch_result",
+        analyzed_at: Date.now(),
+        analysis_skipped_reason: "gap_not_found",
+      });
+      continue;
+    }
+
+    try {
+      const res = await deps.invoke("agentry.proposal", {
+        gap,
+        candidates: node.candidates || [],
+        notify,
+      }, { tenant: "local", by: "discovery_loop" });
+
+      if (res.ok) {
+        proposalsCreated++;
+        events.emit("discovery.proposal_created", {
+          watch_result_id: node.id,
+          gap_id: gap.id,
+          proposal_id: res.output.proposal_id,
+        });
+        graph.putCapability({
+          id: node.id,
+          kind: "watch_result",
+          analyzed_at: Date.now(),
+          proposal_id: res.output.proposal_id,
+        });
+      } else {
+        events.emit("discovery.proposal_failed", {
+          watch_result_id: node.id,
+          code: res.error.code,
+          message: res.error.message,
+        });
+      }
+    } catch (e) {
+      events.emit("discovery.proposal_threw", {
+        watch_result_id: node.id,
+        error: e.message,
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Pass 2: decided proposals → adoption
+  //
+  // A proposal becomes "decided" when every candidate has an
+  // approve/reject decision recorded by the approval HTTP handler.
+  // This pass reads those decisions and grows the graph: each
+  // approved candidate becomes a live capability node; the gap and
+  // its watches are retired.
+  // ─────────────────────────────────────────────────────────────
+  let adopted = 0;
+  for (const node of graph.capabilities().values()) {
+    if (node.kind !== "proposal") continue;
+    if (node.state !== "decided") continue;
+    if (node.adopted_at) continue;
+
+    try {
+      const res = await deps.invoke("agentry.adopt", {
+        proposal_id: node.id,
+      }, { tenant: "local", by: "discovery_loop" });
+
+      if (res.ok) {
+        adopted += (res.output.adopted || []).length;
+        events.emit("discovery.adoption_completed", {
+          proposal_id: node.id,
+          adopted: res.output.adopted,
+        });
+      } else {
+        events.emit("discovery.adoption_failed", {
+          proposal_id: node.id,
+          code: res.error.code,
+          message: res.error.message,
+        });
+      }
+    } catch (e) {
+      events.emit("discovery.adoption_threw", {
+        proposal_id: node.id,
+        error: e.message,
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Pass 3: gaps → watches (the original loop)
+  // ─────────────────────────────────────────────────────────────
+
   // Count live watches from the graph — the only cross-process source
   // of truth. Do this before the early returns so every path can report
   // an honest number. This is what makes the log line truthful.
@@ -118,7 +231,10 @@ export async function tick(deps, opts = {}) {
   const gaps = liveGaps(graph);
   if (!gaps.length) {
     events.emit("discovery.no_gaps");
-    return { gaps: 0, uncovered: 0, watched: watchedCount, created: [] };
+    return {
+      gaps: 0, uncovered: 0, watched: watchedCount, created: [],
+      proposals: proposalsCreated, adopted,
+    };
   }
 
   // Which gaps already have a watch?
@@ -138,7 +254,10 @@ export async function tick(deps, opts = {}) {
   const uncovered = gaps.filter(g => !coveredGapIds.has(g.id));
   if (!uncovered.length) {
     events.emit("discovery.all_gaps_covered", { gaps: gaps.length });
-    return { gaps: gaps.length, uncovered: 0, watched: watchedCount, created: [] };
+    return {
+      gaps: gaps.length, uncovered: 0, watched: watchedCount, created: [],
+      proposals: proposalsCreated, adopted,
+    };
   }
 
   const batch = uncovered.slice(0, maxPerTick);
@@ -210,6 +329,8 @@ export async function tick(deps, opts = {}) {
     uncovered: uncovered.length,
     watched: watchedCount,
     created: created.length,
+    proposals: proposalsCreated,
+    adopted,
   });
 
   return {
@@ -217,5 +338,7 @@ export async function tick(deps, opts = {}) {
     uncovered: uncovered.length,
     watched: watchedCount,
     created,
+    proposals: proposalsCreated,
+    adopted,
   };
 }

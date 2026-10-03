@@ -95,6 +95,30 @@ export async function pollWatch(deps, watch) {
     error: errorMsg, ms: Date.now() - startedAt,
   });
 
+  // Persist fresh candidates as a `watch_result` node so the discovery
+  // loop can turn them into a proposal on its next tick. The watch node
+  // itself only carries seen_ids (dedupe keys); the actual candidate
+  // objects need a home, and this is it. Append-only: every poll with
+  // fresh results creates a new node.
+  if (fresh.length > 0) {
+    const resultId = `watch_result:${watch.id}:${Date.now()}`;
+    graph.putCapability({
+      id: resultId,
+      kind: "watch_result",
+      watch_id: watch.id,
+      gap_id: watch.reason && watch.reason.startsWith("gap:") ? watch.reason : null,
+      source: watch.source,
+      candidates: fresh.map(f => f.candidate),
+      created_at: Date.now(),
+    });
+    events.emit("watch.result_recorded", {
+      watch_result_id: resultId,
+      watch_id: watch.id,
+      gap_id: watch.reason && watch.reason.startsWith("gap:") ? watch.reason : null,
+      candidates: fresh.length,
+    });
+  }
+
   let notified = 0;
   for (const { candidate } of fresh) {
     try {

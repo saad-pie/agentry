@@ -1,0 +1,21 @@
+{
+  "id": "agentry.adopt",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.adopt",
+  "accepts": {
+    "proposal_id": "string",
+    "notify": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "adopted": "array<{candidate_id, capability_id, kind}>",
+    "retired_gap": "string|null",
+    "retired_watches": "array<string>",
+    "notified": "boolean",
+    "reason": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 3000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Reads a decided proposal, writes each approved candidate as a live capability node, retires the gap and its watches, sends a follow-up email. Idempotent via adopted_at. This is how the graph grows."
+}
