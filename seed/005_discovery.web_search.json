@@ -7,9 +7,12 @@
     "query": "string",
     "limit": { "type": "number", "optional": true }
   },
-  "produces": { "candidates": "array<object>" },
-  "cost": { "money_usd": 0, "time_ms": 1200 },
-  "limits": { "rpd": 100 },
+  "produces": {
+    "candidates": "array<object>",
+    "meta": "object"
+  },
+  "cost": { "money_usd": 0, "time_ms": 2000 },
+  "limits": {},
   "source": "seeded:agentry",
-  "notes": "Requires GOOGLE_CSE_KEY and GOOGLE_CSE_CX. 100 queries/day on the free tier. Handler not yet implemented — will land in batch 4."
+  "notes": "Searches the open web via a self-hosted SearXNG instance. Reads SEARXNG_URL env (default http://127.0.0.1:8080). SearXNG fans out to Google, DuckDuckGo, Brave, Wikipedia, GitHub, StackOverflow, arxiv and aggregates the results. No API key, no quota. Candidates carry kind=web_result, id=URL, description=result snippet, and null GitHub-specific fields so the proposal prompt can handle both candidate kinds uniformly."
 }

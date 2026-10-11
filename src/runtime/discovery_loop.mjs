@@ -1,96 +1,105 @@
 // agentry/src/runtime/discovery_loop.mjs
-// The discovery loop.
 //
-// Every N seconds:
-//   1. Turn un-analyzed watch_results into proposals. (v0.11.0)
-//   2. Turn decided proposals into adopted capabilities. (v0.11.0)
-//   3. Read the live capability gaps from the graph.
-//   4. For each gap without a corresponding watch, create one on a
-//      discovery source. Pick the source by gap kind.
-//   5. Watch polling is handled by the runtime (watcher.polling + runtime.tick).
-//      On new candidates, the watch fires its on_new capability — a notify,
-//      AND writes a watch_result node for pass 1 to pick up next tick.
-//   6. Loop.
+// The discovery loop. Three passes per tick:
+//   1. Un-analyzed watch_results → proposals
+//   2. Decided proposals → adopted capabilities
+//   3. Gaps → watches (one watch per (gap, source) pair)
 //
-// Adoption is human-gated: the loop only adopts a proposal whose state
-// is "decided" (every candidate has a recorded approve/reject decision).
+// Adoption is human-gated: the loop only adopts a proposal whose
+// state is "decided" (every candidate has a recorded decision).
 
 import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 
-// Which discovery source to use for which gap kind.
-// This is policy, not mechanism. When we have more sources, add rows.
-// A gap without a matching row simply doesn't get a watch — the loop
-// records that and moves on.
-const SOURCE_BY_KIND = {
-  bua:  { source: "discovery.github_search", query: (gap) => ({
-    q: `${gap.wanted_kind} browser automation language:typescript`,
-    sort: "stars", order: "desc",
-  }) },
-  cua:  { source: "discovery.github_search", query: (gap) => ({
-    q: `${gap.wanted_kind} computer use agent language:python`,
-    sort: "stars", order: "desc",
-  }) },
-  mua:  { source: "discovery.github_search", query: (gap) => ({
-    q: `${gap.wanted_kind} mobile automation language:typescript`,
-    sort: "stars", order: "desc",
-  }) },
-  memory: { source: "discovery.github_search", query: (gap) => ({
-    q: `${gap.wanted_kind} vector database memory language:python`,
-    sort: "stars", order: "desc",
-  }) },
-  tool: { source: "discovery.github_search", query: (gap) => ({
-    q: `${gap.wanted_kind} cli tool language:typescript`,
-    sort: "stars", order: "desc",
-  }) },
+// ─── Per-kind source policy. Each gap kind maps to an ARRAY of sources.
+// Every source becomes its own watch, so one gap triggers GitHub search
+// AND web search in parallel. Both can independently produce candidates
+// and proposals.
+
+const SOURCES_BY_KIND = {
+  bua: [
+    { source: "discovery.github_search", query: () => ({
+        q: `"browser automation" OR playwright OR puppeteer OR "browser-use" OR "chrome devtools" stars:>5`,
+        sort: "stars", order: "desc",
+      }) },
+    { source: "discovery.web_search", query: () =>
+        `best open source browser automation library 2026 playwright alternatives` },
+  ],
+  cua: [
+    { source: "discovery.github_search", query: () => ({
+        q: `"computer use" OR "gui agent" OR "screen agent" OR "desktop automation" stars:>5`,
+        sort: "stars", order: "desc",
+      }) },
+    { source: "discovery.web_search", query: () =>
+        `best open source computer use agent 2026 desktop automation` },
+  ],
+  mua: [
+    { source: "discovery.github_search", query: () => ({
+        q: `"mobile automation" OR appium OR "android automation" OR "ios automation" stars:>5`,
+        sort: "stars", order: "desc",
+      }) },
+    { source: "discovery.web_search", query: () =>
+        `best open source mobile automation framework 2026 android ios` },
+  ],
+  memory: [
+    { source: "discovery.github_search", query: () => ({
+        q: `"agent memory" OR "vector database" OR "semantic memory" OR qdrant OR chroma stars:>5`,
+        sort: "stars", order: "desc",
+      }) },
+    { source: "discovery.web_search", query: () =>
+        `best open source agent memory layer 2026 vector store` },
+  ],
+  tool: [
+    { source: "discovery.github_search", query: (gap) => ({
+        q: `${gap.wanted_id || gap.wanted_kind} stars:>5`,
+        sort: "stars", order: "desc",
+      }) },
+    { source: "discovery.web_search", query: (gap) =>
+        `open source ${gap.wanted_id || gap.wanted_kind} tool 2026` },
+  ],
 };
 
-// Default: if a gap has a wanted_kind we don't have a policy for,
-// fall back to a general GitHub search on the wanted id.
-function defaultPolicy(gap) {
-  return {
-    source: "discovery.github_search",
-    query: () => ({
-      q: gap.wanted_id || gap.wanted_kind || "agent capability",
-      sort: "stars", order: "desc",
-    }),
-  };
+// Fallback policy: two generic sources based on the gap's wanted id.
+function defaultSources(gap) {
+  const subject = gap.wanted_id || gap.wanted_kind || "agent capability";
+  return [
+    { source: "discovery.github_search", query: () => ({
+        q: `${subject} stars:>5`,
+        sort: "stars", order: "desc",
+      }) },
+    { source: "discovery.web_search", query: () =>
+        `best open source ${subject} 2026` },
+  ];
 }
 
 // Watch interval for gap-driven watches.
-//
-// Default is 6 hours: often enough to notice new repos, rare enough not
-// to spam you. Override with AGENTRY_GAP_WATCH_INTERVAL_MS for testing.
+// Default 6h — override with AGENTRY_GAP_WATCH_INTERVAL_MS for testing.
 const GAP_WATCH_INTERVAL_MS = Number(
   process.env.AGENTRY_GAP_WATCH_INTERVAL_MS || 6 * 60 * 60 * 1000
 );
 
-// Dedupe key for GitHub search results.
-//
-// discovery.github_search emits `id` (= repo.full_name) on every candidate.
-// Use that — it's stable and present. `full_name` is NOT a field on the
-// emitted candidate, so using it silently dropped every result.
+// Dedupe key: candidate.id is stable for both sources.
+//   - github_search emits id = repo.full_name
+//   - web_search    emits id = result URL
 const GAP_WATCH_DEDUPE_KEY = "id";
 
-// Which notify capability to fire on new candidates.
 const DEFAULT_NOTIFY = "notify.email.gmail";
 
-// Bound on how many watches we create per tick.
-// Prevents a burst of gaps from creating a burst of watches.
-const MAX_WATCHES_PER_TICK = 3;
+// Bound on watches created per tick. Since one gap now spawns multiple
+// watches, this is the total across all gaps on a single tick.
+const MAX_WATCHES_PER_TICK = 6;
+
+// Composite reason separator. `<gap.id>::<source>`.
+const REASON_SEP = "::";
+
+function compositeReason(gapId, sourceId) {
+  return `${gapId}${REASON_SEP}${sourceId}`;
+}
 
 /**
- * One pass of the loop.
- * Returns a summary of what it did. Never throws.
+ * One pass of the loop. Never throws.
  *
- * Return shape is always:
+ * Return shape:
  *   { gaps, uncovered, watched, created, proposals, adopted }
- * where:
- *   gaps      — total live gap nodes
- *   uncovered — gaps with no watch yet
- *   watched   — live watch_instance nodes in the graph (cross-process truth)
- *   created   — watches created on THIS tick (array of {gap_id, watch_id, source})
- *   proposals — proposals created on THIS tick
- *   adopted   — capabilities adopted on THIS tick
  */
 export async function tick(deps, opts = {}) {
   const { graph, events } = deps;
@@ -101,10 +110,8 @@ export async function tick(deps, opts = {}) {
     maxPerTick = MAX_WATCHES_PER_TICK,
   } = opts;
 
-  // Force the graph to re-read capabilities.jsonl from disk so we see
-  // nodes written by other processes (the MCP server, the approval
-  // server). Without this, the discovery loop's in-memory cache stays
-  // stale and reports gaps: 0 even after a gap was successfully recorded.
+  // Cross-process: re-read capabilities.jsonl so we see nodes written
+  // by the MCP server / approval server / other processes.
   if (typeof graph.invalidateCache === "function") {
     graph.invalidateCache();
   } else if ("_cache" in graph) {
@@ -113,11 +120,6 @@ export async function tick(deps, opts = {}) {
 
   // ─────────────────────────────────────────────────────────────
   // Pass 1: un-analyzed watch_results → proposals
-  //
-  // pollWatch writes a `watch_result` node when a poll yields fresh
-  // candidates. This pass turns each one into a proposal (LLM analysis
-  // + email with approve/reject URLs) exactly once. On success the
-  // node is stamped with `analyzed_at` so we don't repropose.
   // ─────────────────────────────────────────────────────────────
   let proposalsCreated = 0;
   for (const node of graph.capabilities().values()) {
@@ -130,7 +132,6 @@ export async function tick(deps, opts = {}) {
         watch_result_id: node.id,
         gap_id: node.gap_id,
       });
-      // Stamp it so we don't retry forever on an orphan.
       graph.putCapability({
         id: node.id,
         kind: "watch_result",
@@ -152,6 +153,7 @@ export async function tick(deps, opts = {}) {
         events.emit("discovery.proposal_created", {
           watch_result_id: node.id,
           gap_id: gap.id,
+          source: node.source || null,
           proposal_id: res.output.proposal_id,
         });
         graph.putCapability({
@@ -177,12 +179,6 @@ export async function tick(deps, opts = {}) {
 
   // ─────────────────────────────────────────────────────────────
   // Pass 2: decided proposals → adoption
-  //
-  // A proposal becomes "decided" when every candidate has an
-  // approve/reject decision recorded by the approval HTTP handler.
-  // This pass reads those decisions and grows the graph: each
-  // approved candidate becomes a live capability node; the gap and
-  // its watches are retired.
   // ─────────────────────────────────────────────────────────────
   let adopted = 0;
   for (const node of graph.capabilities().values()) {
@@ -217,12 +213,10 @@ export async function tick(deps, opts = {}) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Pass 3: gaps → watches (the original loop)
+  // Pass 3: gaps → watches
   // ─────────────────────────────────────────────────────────────
 
-  // Count live watches from the graph — the only cross-process source
-  // of truth. Do this before the early returns so every path can report
-  // an honest number. This is what makes the log line truthful.
+  // Count live watches from the graph (cross-process truth).
   let watchedCount = 0;
   for (const cap of graph.capabilities().values()) {
     if (cap.kind === "watch_instance" && !cap.retired_at) watchedCount++;
@@ -237,96 +231,106 @@ export async function tick(deps, opts = {}) {
     };
   }
 
-  // Which gaps already have a watch?
-  //
-  // The convention: a watch's `reason` is exactly the gap's id (which
-  // itself is the string "gap:<wanted_id>"). We match by equality, not
-  // by prefix arithmetic — the previous "slice(4)" approach was fragile
-  // and produced "gap:gap:bua.browser" in the wild.
-  const coveredGapIds = new Set();
+  // Which (gap, source) pairs already have a watch?
+  // reason is `<gap.id>::<source>`. Match by equality on the composite.
+  const coveredWatchKeys = new Set();
   for (const cap of graph.capabilities().values()) {
     if (cap.kind !== "watch_instance") continue;
     if (typeof cap.reason === "string" && cap.reason.length > 0) {
-      coveredGapIds.add(cap.reason);
+      coveredWatchKeys.add(cap.reason);
     }
   }
 
-  const uncovered = gaps.filter(g => !coveredGapIds.has(g.id));
-  if (!uncovered.length) {
-    events.emit("discovery.all_gaps_covered", { gaps: gaps.length });
-    return {
-      gaps: gaps.length, uncovered: 0, watched: watchedCount, created: [],
-      proposals: proposalsCreated, adopted,
-    };
-  }
-
-  const batch = uncovered.slice(0, maxPerTick);
+  // A gap is "uncovered" if at least one of its source pairs has no watch.
+  let uncoveredCount = 0;
   const created = [];
+  let createdThisTick = 0;
 
-  for (const gap of batch) {
-    const policy = SOURCE_BY_KIND[gap.wanted_kind] || defaultPolicy(gap);
+  for (const gap of gaps) {
+    const sources = SOURCES_BY_KIND[gap.wanted_kind] || defaultSources(gap);
+    let gapHasAnyUncovered = false;
 
-    // Sanity: the discovery source and notify target must exist.
-    if (!graph.getCapability(policy.source)) {
-      events.emit("discovery.source_missing", {
-        gap_id: gap.id,
-        wanted_source: policy.source,
-      });
-      continue;
+    for (const policy of sources) {
+      const key = compositeReason(gap.id, policy.source);
+      if (!coveredWatchKeys.has(key)) {
+        gapHasAnyUncovered = true;
+        break;
+      }
     }
-    if (!graph.getCapability(notify)) {
-      events.emit("discovery.notify_missing", {
-        gap_id: gap.id,
-        wanted_notify: notify,
-      });
-      continue;
-    }
+    if (gapHasAnyUncovered) uncoveredCount++;
 
-    const query = typeof policy.query === "function" ? policy.query(gap) : policy.query;
+    for (const policy of sources) {
+      if (createdThisTick >= maxPerTick) break;
 
-    const spec = {
-      source: policy.source,
-      query,
-      interval_ms: intervalMs,
-      dedupe_key: dedupeKey,
-      on_new: notify,
-      // `gap.id` already has the "gap:" prefix. Set reason to the gap's
-      // full id so coveredGapIds can match by equality. Do NOT add
-      // another "gap:" here — that's how "gap:gap:bua.browser" happened.
-      reason: gap.id,
-    };
+      const watchKey = compositeReason(gap.id, policy.source);
+      if (coveredWatchKeys.has(watchKey)) continue;
 
-    try {
-      const res = await deps.invoke("watcher.polling", spec, {
-        tenant: "local",
-        by: "discovery_loop",
-      });
-      if (res.ok) {
-        created.push({ gap_id: gap.id, watch_id: res.output.watch_id, source: policy.source });
-        events.emit("discovery.watch_created", {
+      if (!graph.getCapability(policy.source)) {
+        events.emit("discovery.source_missing", {
           gap_id: gap.id,
-          wanted_kind: gap.wanted_kind,
-          watch_id: res.output.watch_id,
-          source: policy.source,
+          wanted_source: policy.source,
         });
-      } else {
-        events.emit("discovery.watch_failed", {
+        continue;
+      }
+      if (!graph.getCapability(notify)) {
+        events.emit("discovery.notify_missing", {
           gap_id: gap.id,
-          code: res.error.code,
-          message: res.error.message,
+          wanted_notify: notify,
+        });
+        continue;
+      }
+
+      const query = typeof policy.query === "function" ? policy.query(gap) : policy.query;
+
+      const spec = {
+        source: policy.source,
+        query,
+        interval_ms: intervalMs,
+        dedupe_key: dedupeKey,
+        on_new: notify,
+        reason: watchKey,
+      };
+
+      try {
+        const res = await deps.invoke("watcher.polling", spec, {
+          tenant: "local",
+          by: "discovery_loop",
+        });
+        if (res.ok) {
+          createdThisTick++;
+          coveredWatchKeys.add(watchKey);
+          created.push({
+            gap_id: gap.id,
+            watch_id: res.output.watch_id,
+            source: policy.source,
+          });
+          events.emit("discovery.watch_created", {
+            gap_id: gap.id,
+            wanted_kind: gap.wanted_kind,
+            watch_id: res.output.watch_id,
+            source: policy.source,
+          });
+        } else {
+          events.emit("discovery.watch_failed", {
+            gap_id: gap.id,
+            source: policy.source,
+            code: res.error.code,
+            message: res.error.message,
+          });
+        }
+      } catch (e) {
+        events.emit("discovery.watch_threw", {
+          gap_id: gap.id,
+          source: policy.source,
+          error: e.message,
         });
       }
-    } catch (e) {
-      events.emit("discovery.watch_threw", {
-        gap_id: gap.id,
-        error: e.message,
-      });
     }
   }
 
   events.emit("discovery.tick_summary", {
     gaps: gaps.length,
-    uncovered: uncovered.length,
+    uncovered: uncoveredCount,
     watched: watchedCount,
     created: created.length,
     proposals: proposalsCreated,
@@ -335,7 +339,7 @@ export async function tick(deps, opts = {}) {
 
   return {
     gaps: gaps.length,
-    uncovered: uncovered.length,
+    uncovered: uncoveredCount,
     watched: watchedCount,
     created,
     proposals: proposalsCreated,

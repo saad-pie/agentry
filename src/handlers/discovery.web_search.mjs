@@ -1,5 +1,29 @@
 // agentry/src/handlers/discovery.web_search.mjs
-const CSE_ENDPOINT = "https://www.googleapis.com/customsearch/v1";
+//
+// Search the open web via a self-hosted SearXNG instance.
+//
+// SearXNG (https://github.com/searxng/searxng) is a metasearch engine:
+// it fans out to Google, DuckDuckGo, Brave, Wikipedia, GitHub,
+// StackOverflow, arxiv, and dozens more, aggregates the results, and
+// returns them as JSON. No API key, no quota, no vendor lock-in.
+//
+// Config:
+//   SEARXNG_URL (env)  — default http://127.0.0.1:8080
+//
+// Output: candidates shaped like discovery.github_search's, with
+// web-specific fields filled and GitHub-specific fields set to null.
+// Same dedupe key ("id" = URL). The proposal LLM handles both kinds.
+
+const DEFAULT_SEARXNG_URL = "http://127.0.0.1:8080";
+const DEFAULT_TIMEOUT_MS = 25000;
+const MAX_RESULTS = 20;
+
+function searxngBase(ctx) {
+  const fromConfig = ctx?.config?.searxng?.url;
+  const fromEnv = process.env.SEARXNG_URL;
+  const raw = fromConfig || fromEnv || DEFAULT_SEARXNG_URL;
+  return String(raw).replace(/\/+$/, "");
+}
 
 export default async function discoveryWebSearch(input, ctx) {
   const { query, limit = 10 } = input || {};
@@ -7,64 +31,64 @@ export default async function discoveryWebSearch(input, ctx) {
     throw new Error("discovery.web_search requires query (string)");
   }
 
-  const { key, cx } = ctx.config.googleCse || {};
-  if (!key || !cx) {
-    const err = new Error("discovery.web_search: missing credentials. Set GOOGLE_CSE_KEY and GOOGLE_CSE_CX.");
-    err.retryable = false;
-    throw err;
-  }
+  const base = searxngBase(ctx);
+  const num = Math.min(Number(limit) || 10, MAX_RESULTS);
 
-  const num = Math.min(Number(limit) || 10, 10);
-  const params = new URLSearchParams({ key, cx, q: query, num: String(num) });
-  const url = `${CSE_ENDPOINT}?${params.toString()}`;
+  const params = new URLSearchParams({
+    q: query,
+    format: "json",
+    language: "en",
+    safesearch: "0",
+  });
+  const url = `${base}/search?${params.toString()}`;
 
   const started = Date.now();
   let res;
   try {
-    res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    res = await fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "user-agent": "agentry/0.1.0",
+      },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
   } catch (e) {
     const err = new Error(`web_search: fetch failed: ${e.message}`);
     err.retryable = true;
     throw err;
   }
 
-  if (res.status === 429) {
-    const err = new Error("web_search: daily quota exceeded");
-    err.retryable = false;
-    throw err;
-  }
-  if (res.status === 403) {
-    const body = await res.json().catch(() => ({}));
-    const reason = body?.error?.errors?.[0]?.reason || "unknown";
-    const err = new Error(`web_search: 403 ${reason}`);
-    err.retryable = reason === "rateLimitExceeded" || reason === "userRateLimitExceeded";
-    throw err;
-  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     const err = new Error(`web_search: HTTP ${res.status} — ${body.slice(0, 200)}`);
-    err.retryable = res.status >= 500;
+    err.retryable = res.status >= 500 || res.status === 429;
     throw err;
   }
 
   const data = await res.json().catch(() => null);
-  const items = Array.isArray(data?.items) ? data.items : [];
+  const raw = Array.isArray(data?.results) ? data.results : [];
 
-  const candidates = items.map((it, idx) => {
-    const link = it.link || "";
+  const candidates = raw.slice(0, num).map((r, idx) => {
     let domain = null;
-    try { domain = new URL(link).hostname.replace(/^www\./, ""); } catch {}
+    try { domain = new URL(r.url).hostname.replace(/^www\./, ""); } catch {}
     return {
-      id: link,
+      id: r.url,                          // dedupe key — URL is unique
       kind: "web_result",
-      source: "google_cse",
-      name: it.title || null,
-      url: link,
+      source: "searxng",
+      name: r.title || null,
+      url: r.url || null,
+      description: r.content || null,     // canonical text field the LLM reads
+      snippet: r.content || null,         // alias for compatibility
       domain,
-      snippet: it.snippet || null,
-      displayed_link: it.displayLink || null,
+      // GitHub-shaped fields, present-but-null so the LLM prompt can
+      // handle repo and web_result candidates uniformly.
+      stars: null,
+      language: null,
+      topics: [],
+      license: null,
+      pushed_at: null,
       rank: idx + 1,
-      meta: it.pagemap ? { pagemap_keys: Object.keys(it.pagemap) } : undefined,
+      engines: Array.isArray(r.engines) ? r.engines : null,
     };
   });
 
@@ -74,10 +98,9 @@ export default async function discoveryWebSearch(input, ctx) {
       meta: {
         query,
         count: candidates.length,
-        total_results: data?.searchInformation?.totalResults ?? null,
-        formatted_total: data?.searchInformation?.formattedTotalResults ?? null,
-        search_time_s: data?.searchInformation?.searchTime ?? null,
-        quota_ceiling: 10,
+        engine: "searxng",
+        searxng_url: base,
+        raw_count: raw.length,
       },
     },
     cost: { time_ms: Date.now() - started, http_calls: 1, money_usd: 0 },

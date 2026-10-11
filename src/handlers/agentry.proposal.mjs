@@ -1,45 +1,49 @@
 // agentry/src/handlers/agentry.proposal.mjs
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
-// Uses the LLM to score each candidate against the gap. Composes a
-// structured proposal node, generates per-candidate approval tokens,
-// and sends an email with approve/reject URLs.
-//
-// The proposal does NOT adopt. Adoption is a separate, human-gated step.
-// This handler's only output is: a graph node + an email.
+// Model chain: try each provider in order, first that returns
+// parseable JSON wins. Never let one provider's downtime kill the
+// whole proposal.
 
 import { randomBytes } from "node:crypto";
 
-// Model selection is dynamic. We ask the handler to accept any model
-// whose provider is free-tier. That way if gpt-oss-20b:free is
-// unavailable and the router serves something else free, we still
-// accept it — because both are free and live.
-//
-// The handler verifies the returned model against the live registry
-// when accept_from is set. ACCEPT_FREE_OR_QUOTA = null means "don't
-// verify" (permissive, for first-day observation). Set to
-// { limit_type: "per_week" } to enforce strict free-only.
-const PRIMARY_LLM = "gpt-oss-20b:free";
-const FALLBACK_LLM = "qwen3.6-plus:free";
-const ACCEPT_FREE = { limit_type: "per_week" };   // strict: only unlimited-free
-const ACCEPT_FREE_OR_QUOTA = null;                // permissive: any free-classified
+// Fallback chain across providers. Each entry is {provider, model}.
+// The harness's `space-bunny-alpha:free` is first (most reliable in
+// practice) but the whole chain exists because any one provider can
+// rate-limit or 429 at any moment.
+const MODEL_CHAIN = [
+  { provider: "atria",     model: "space-bunny-alpha:free" },
+  { provider: "google",    model: "gemini-2.5-flash" },
+  { provider: "unorouter", model: "gpt-oss-20b:free" },
+  { provider: "unorouter", model: "glm-5.3-flash:free" },
+];
 
-// If this env var is set, it's used to build approve/reject URLs.
-// On the Space it will be https://<space-host>/agentry
+// null = permissive (accept whatever free model the router returns).
+const ACCEPT_FREE_OR_QUOTA = null;
+
 const APPROVAL_BASE_URL = process.env.AGENTRY_APPROVAL_BASE_URL || null;
-
-// How long an approval token is valid, in ms. 7 days.
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function systemPrompt() {
   return `You are a capability reviewer for an autonomous agent.
 
 You will be given:
-  1. A "gap" — something the agent tried to do and could not, described
-     by its wanted kind and the missing capability id.
-  2. A list of "candidates" — repositories or tools found by a search.
+  1. A "gap" — something the agent tried to do and could not.
+  2. A list of "candidates" — each is either:
+       - kind "repo":       a GitHub repository with stars, language,
+                            pushed_at, license.
+       - kind "web_result": a web search result with title, url,
+                            description/snippet, domain.
 
-For each candidate, decide how well it fills the gap.
+For repo candidates, judge on: fit, stars, recency, license, activity.
+For web_result candidates, judge on: fit, the specificity of the
+description/snippet, the credibility of the domain (official docs,
+github.com, npmjs.com, pypi.org are strong; random blogs are weak),
+and whether the title names a specific tool or project.
+
+Recommend only tools that are open source, actively maintained, and
+actually solve the gap. Set fit <= 0.2 for abandoned projects, vague
+blog posts, and anything you would not stake your reputation on.
 
 Return ONLY a JSON object with this exact shape, nothing else:
 {
@@ -59,7 +63,6 @@ Return ONLY a JSON object with this exact shape, nothing else:
 Rules:
 - Do not add any text outside the JSON object.
 - If a candidate is clearly irrelevant, set fit <= 0.2 and confidence "high".
-- Be conservative: prefer well-known, actively maintained projects.
 - If nothing is a good fit, set recommended_id to null.
 - Return every input candidate exactly once, in the same order.`;
 }
@@ -67,14 +70,18 @@ Rules:
 function userPrompt(gap, candidates) {
   const trimmed = candidates.map(c => ({
     id: c.id,
+    kind: c.kind || "repo",
     name: c.name,
     url: c.url,
     description: c.description || null,
+    // github-only
     stars: c.stars ?? null,
     language: c.language ?? null,
-    topics: c.topics || [],
-    pushed_at: c.pushed_at ?? null,
     license: c.license ?? null,
+    pushed_at: c.pushed_at ?? null,
+    topics: c.topics || [],
+    // web-only
+    domain: c.domain ?? null,
   }));
   return `GAP:
   wanted_kind: ${gap.wanted_kind || "unknown"}
@@ -121,40 +128,38 @@ function fallbackProposal(gap, candidates) {
 async function analyze(deps, gap, candidates) {
   const messages = [
     { role: "system", content: systemPrompt() },
-    { role: "user", content: userPrompt(gap, candidates) },
+    { role: "user",   content: userPrompt(gap, candidates) },
   ];
 
-  for (const model of [PRIMARY_LLM, FALLBACK_LLM]) {
+  for (const { provider, model } of MODEL_CHAIN) {
     try {
       const res = await deps.invoke("llm.openai_compat", {
         model,
         messages,
         temperature: 0.1,
         max_tokens: 1500,
-        // Per-call policy. null = accept whatever the provider returns
-        // (useful for a first day of observation). Set to
-        // { limit_type: "per_week" } to enforce free-only.
         accept_from: ACCEPT_FREE_OR_QUOTA,
       }, { tenant: "local", by: "agentry.proposal" });
 
       if (!res.ok) {
         deps.events.emit("proposal.llm_failed", {
-          model,
+          provider, model,
           code: res.error.code,
           message: res.error.message,
           substituted: res.error.substituted === true,
-          reason: res.error.reason || null,
         });
         continue;
       }
       const parsed = parseProposalJSON(res.output.content);
-      if (parsed) return { proposal: parsed, model_used: res.output.model || model };
+      if (parsed) {
+        return { proposal: parsed, model_used: res.output.model || model, provider_used: provider };
+      }
       deps.events.emit("proposal.llm_unparseable", {
-        model,
+        provider, model,
         content: String(res.output.content).slice(0, 300),
       });
     } catch (e) {
-      deps.events.emit("proposal.llm_threw", { model, error: e.message });
+      deps.events.emit("proposal.llm_threw", { provider, model, error: e.message });
     }
   }
   return null;
@@ -186,12 +191,14 @@ function renderEmail({ gap, analysis, perCandidateTokens, approveBase }) {
   for (const c of analysis.candidates) {
     const raw = (gap._candidatesById && gap._candidatesById[c.id]) || {};
     lines.push(`• ${c.id}`);
+    if (raw.kind)     lines.push(`  kind: ${raw.kind}`);
     if (raw.name && raw.name !== c.id) lines.push(`  name: ${raw.name}`);
-    if (raw.url) lines.push(`  url:  ${raw.url}`);
+    if (raw.url)      lines.push(`  url:  ${raw.url}`);
     if (raw.stars != null) lines.push(`  stars: ${raw.stars}`);
     if (raw.language) lines.push(`  lang: ${raw.language}`);
+    if (raw.domain)   lines.push(`  domain: ${raw.domain}`);
     if (c.fit != null) lines.push(`  fit:  ${c.fit}  (confidence: ${c.confidence})`);
-    if (c.why) lines.push(`  why:  ${c.why}`);
+    if (c.why)        lines.push(`  why:  ${c.why}`);
     if (Array.isArray(c.risks) && c.risks.length) lines.push(`  risks: ${c.risks.join(", ")}`);
     const tok = perCandidateTokens[c.id];
     if (tok && approveBase) {
@@ -201,11 +208,7 @@ function renderEmail({ gap, analysis, perCandidateTokens, approveBase }) {
     lines.push("");
   }
 
-  if (analysis.recommended_id) {
-    lines.push(`Recommended: ${analysis.recommended_id}`);
-  } else {
-    lines.push("Recommended: none");
-  }
+  lines.push(analysis.recommended_id ? `Recommended: ${analysis.recommended_id}` : "Recommended: none");
   lines.push("");
   lines.push(`(Proposal ${gap._proposalId || ""})`);
   return lines.join("\n");
@@ -217,25 +220,20 @@ export default async function agentryProposal(input, ctx) {
   if (!Array.isArray(candidates) || candidates.length === 0) {
     throw new Error("agentry.proposal requires non-empty candidates array");
   }
-
   if (typeof ctx.invoke !== "function") {
     throw new Error("agentry.proposal requires ctx.invoke — was it invoked through the runtime?");
   }
 
   const started = Date.now();
   const deps = {
-    graph: ctx.graph,
-    events: ctx.events,
-    config: ctx.config,
-    invoke: ctx.invoke,
+    graph: ctx.graph, events: ctx.events, config: ctx.config, invoke: ctx.invoke,
   };
 
-  // 1. Analyze
   const result = await analyze(deps, gap, candidates);
   const analysis = result?.proposal ?? fallbackProposal(gap, candidates);
   const modelUsed = result?.model_used ?? null;
+  const providerUsed = result?.provider_used ?? null;
 
-  // 2. Build per-candidate approval tokens
   const proposalId = `proposal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const perCandidateTokens = {};
   const tokenIndex = {};
@@ -246,13 +244,11 @@ export default async function agentryProposal(input, ctx) {
     tokenIndex[t] = { candidate_id: c.id, proposal_id: proposalId };
   }
 
-  // 3. Attach raw candidate info for rendering
   const candidatesById = {};
   for (const c of candidates) candidatesById[c.id] = c;
   gap._candidatesById = candidatesById;
   gap._proposalId = proposalId;
 
-  // 4. Record the proposal as a graph node
   const proposalNode = {
     id: proposalId,
     kind: "proposal",
@@ -261,14 +257,17 @@ export default async function agentryProposal(input, ctx) {
     gap_wanted_kind: gap.wanted_kind || null,
     gap_wanted_id: gap.wanted_id || null,
     model_used: modelUsed,
+    provider_used: providerUsed,
     analysis,
     candidates: candidates.map(c => ({
       id: c.id,
+      kind: c.kind || null,
       name: c.name,
       url: c.url,
       stars: c.stars ?? null,
       language: c.language ?? null,
       license: c.license ?? null,
+      domain: c.domain ?? null,
     })),
     tokens: tokenIndex,
     tokens_expires_at: expiresAt,
@@ -282,17 +281,16 @@ export default async function agentryProposal(input, ctx) {
     gap_id: gap.id,
     candidates: candidates.length,
     model_used: modelUsed,
+    provider_used: providerUsed,
     recommended_id: analysis.recommended_id || null,
   });
 
-  // 5. Send the email
   const approveBase = approvalTemplates();
   const body = renderEmail({ gap, analysis, perCandidateTokens, approveBase });
   const subject = `[agentry] proposal: ${analysis.recommended_id || `${candidates.length} candidates`} for ${gap.wanted_kind || gap.id}`;
 
   const notifyRes = await deps.invoke(notify, { subject, body_markdown: body }, {
-    tenant: "local",
-    by: "agentry.proposal",
+    tenant: "local", by: "agentry.proposal",
   });
 
   if (!notifyRes.ok) {
@@ -316,6 +314,7 @@ export default async function agentryProposal(input, ctx) {
       candidates_reviewed: analysis.candidates.length,
       recommended_id: analysis.recommended_id || null,
       model_used: modelUsed,
+      provider_used: providerUsed,
       notified: notifyRes.ok,
       approval_urls_available: Boolean(approveBase),
     },

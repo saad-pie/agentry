@@ -5,6 +5,19 @@ const watches = new Map();
 export function getWatches() { return watches; }
 export function clearWatches() { watches.clear(); }
 
+const REASON_SEP = "::";
+
+// reason format: "<gap.id>::<source>" (new)
+//                or "<gap.id>"         (legacy)
+function extractGapId(reason) {
+  if (typeof reason !== "string" || !reason) return null;
+  if (reason.includes(REASON_SEP)) {
+    return reason.split(REASON_SEP)[0];
+  }
+  if (reason.startsWith("gap:")) return reason;
+  return null;
+}
+
 export default async function watcherPolling(input, ctx) {
   const { source, query, interval_ms, dedupe_key, on_new, reason } = input || {};
   if (!source) throw new Error("watcher.polling requires source (a discovery capability id)");
@@ -97,16 +110,15 @@ export async function pollWatch(deps, watch) {
 
   // Persist fresh candidates as a `watch_result` node so the discovery
   // loop can turn them into a proposal on its next tick. The watch node
-  // itself only carries seen_ids (dedupe keys); the actual candidate
-  // objects need a home, and this is it. Append-only: every poll with
-  // fresh results creates a new node.
+  // carries only seen_ids; the candidate objects live here.
   if (fresh.length > 0) {
     const resultId = `watch_result:${watch.id}:${Date.now()}`;
+    const gapId = extractGapId(watch.reason);
     graph.putCapability({
       id: resultId,
       kind: "watch_result",
       watch_id: watch.id,
-      gap_id: watch.reason && watch.reason.startsWith("gap:") ? watch.reason : null,
+      gap_id: gapId,
       source: watch.source,
       candidates: fresh.map(f => f.candidate),
       created_at: Date.now(),
@@ -114,7 +126,8 @@ export async function pollWatch(deps, watch) {
     events.emit("watch.result_recorded", {
       watch_result_id: resultId,
       watch_id: watch.id,
-      gap_id: watch.reason && watch.reason.startsWith("gap:") ? watch.reason : null,
+      gap_id: gapId,
+      source: watch.source,
       candidates: fresh.length,
     });
   }
