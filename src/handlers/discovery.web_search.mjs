@@ -1,18 +1,11 @@
 // agentry/src/handlers/discovery.web_search.mjs
 //
 // Search the open web via a self-hosted SearXNG instance.
-//
-// SearXNG (https://github.com/searxng/searxng) is a metasearch engine:
-// it fans out to Google, DuckDuckGo, Brave, Wikipedia, GitHub,
-// StackOverflow, arxiv, and dozens more, aggregates the results, and
-// returns them as JSON. No API key, no quota, no vendor lock-in.
+// SearXNG fans out to Google, DuckDuckGo, Brave, Wikipedia, GitHub,
+// StackOverflow, arxiv and returns aggregated JSON. No API key, no quota.
 //
 // Config:
 //   SEARXNG_URL (env)  — default http://127.0.0.1:8080
-//
-// Output: candidates shaped like discovery.github_search's, with
-// web-specific fields filled and GitHub-specific fields set to null.
-// Same dedupe key ("id" = URL). The proposal LLM handles both kinds.
 
 const DEFAULT_SEARXNG_URL = "http://127.0.0.1:8080";
 const DEFAULT_TIMEOUT_MS = 25000;
@@ -53,14 +46,17 @@ export default async function discoveryWebSearch(input, ctx) {
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
   } catch (e) {
-    const err = new Error(`web_search: fetch failed: ${e.message}`);
+    const err = new Error(
+      `web_search: fetch failed against ${base}: ${e.message}. ` +
+      `Is the SearXNG instance up? Check SEARXNG_URL.`
+    );
     err.retryable = true;
     throw err;
   }
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    const err = new Error(`web_search: HTTP ${res.status} — ${body.slice(0, 200)}`);
+    const err = new Error(`web_search: HTTP ${res.status} from ${base} — ${body.slice(0, 200)}`);
     err.retryable = res.status >= 500 || res.status === 429;
     throw err;
   }
@@ -72,16 +68,14 @@ export default async function discoveryWebSearch(input, ctx) {
     let domain = null;
     try { domain = new URL(r.url).hostname.replace(/^www\./, ""); } catch {}
     return {
-      id: r.url,                          // dedupe key — URL is unique
+      id: r.url,
       kind: "web_result",
       source: "searxng",
       name: r.title || null,
       url: r.url || null,
-      description: r.content || null,     // canonical text field the LLM reads
-      snippet: r.content || null,         // alias for compatibility
+      description: r.content || null,
+      snippet: r.content || null,
       domain,
-      // GitHub-shaped fields, present-but-null so the LLM prompt can
-      // handle repo and web_result candidates uniformly.
       stars: null,
       language: null,
       topics: [],

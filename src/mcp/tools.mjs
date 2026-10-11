@@ -10,7 +10,7 @@ export function registerAgentryTools(deps) {
     {
       name: "reason",
       description:
-        "Ask agentry to reason about a failure or blockage. Returns structured analysis: what's missing, what to try immediately, and candidate fixes. A missing capability is recorded as a gap and a proposal will be emailed for approval in the background.",
+        "Ask agentry to reason about a failure or blockage. Returns structured analysis: what's missing, what to try immediately, and candidate fixes. A missing capability is recorded as a gap and a proposal will be emailed for approval in the background. IMPORTANT: pass your own model id in the `model` field so agentry can reason with the same model you're using — it's the one we know is working right now.",
       inputSchema: {
         type: "object",
         properties: {
@@ -19,6 +19,11 @@ export function registerAgentryTools(deps) {
           attempted: { type: "array", description: "Optional list of strategies already tried.", items: { type: "string" } },
           workspace_id: { type: "string", description: "Optional workspace id (helps correlate)." },
           session_id: { type: "string", description: "Optional session id (helps correlate)." },
+          model: {
+            type: "string",
+            description:
+              "Strongly recommended. The model id YOU are currently running as (e.g. 'deepseek-v4.1-flash:free'). agentry will prefer this model for its own reasoning call — it's the one we know just worked, because you just called us with it. If omitted, agentry falls back to its own model chain.",
+          },
         },
         required: ["failure"],
       },
@@ -26,13 +31,16 @@ export function registerAgentryTools(deps) {
     async (args, ctx) => {
       const res = await deps.invoke("agentry.reason", args, { tenant: "local", by: "mcp.harness" });
       if (!res.ok) {
-        return { content: [{ type: "text", text: `agentry.reason failed: ${res.error.code} — ${res.error.message}` }], isError: true };
+        return {
+          content: [{ type: "text", text: `agentry.reason failed: ${res.error.code} — ${res.error.message}` }],
+          isError: true,
+        };
       }
       return { content: [{ type: "text", text: JSON.stringify(res.output, null, 2) }] };
     }
   );
 
-  // --- agentry.status (quick, no LLM) ---
+  // --- agentry.status ---
   registerTool(
     {
       name: "status",

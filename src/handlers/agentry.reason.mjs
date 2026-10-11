@@ -2,16 +2,49 @@
 // The reasoning capability the harness calls when it hits a wall.
 //
 // Contract:
-//   input:  { failure, attempted?, intent?, workspace_id?, session_id? }
-//   output: { analysis, missing, immediate_action, gap_recorded, suggestions }
+//   input:  { failure, attempted?, intent?, workspace_id?, session_id?, model? }
+//   output: { analysis, missing, immediate_action, gap_recorded, suggestions, model_used }
 //
-// Speed: uses llm.openai_compat directly (fast, ~2s).
-// The gap is recorded synchronously (cheap). The proposal is generated
-// later by the discovery loop, NOT during this call.
+// Model selection:
+//   If the harness tells us which model IT is running on (input.model), we
+//   try that FIRST — it's the one we know just worked, because the harness
+//   called us with it. The rest of the chain is a fallback net.
+//
+// Speed: uses llm.openai_compat directly (~2s). Records the gap
+// synchronously. The proposal is generated later by the discovery loop.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
-const REASONING_MODEL = process.env.AGENTRY_REASON_MODEL || "space-bunny-alpha:free";
+function buildModelChain(input) {
+  const chain = [];
+  // 1. The model the harness told us it's running on. This is the most
+  //    likely to succeed — it just called us with it.
+  if (input?.model && typeof input.model === "string" && input.model.length > 0) {
+    chain.push({ provider: null, model: input.model, source: "harness" });
+  }
+  // 2. agentry's configured reasoning model.
+  const configured = process.env.AGENTRY_REASON_MODEL;
+  if (configured) {
+    chain.push({ provider: null, model: configured, source: "env" });
+  } else {
+    chain.push({ provider: "atria", model: "space-bunny-alpha:free", source: "default" });
+  }
+  // 3. Fallback chain across providers. Same philosophy as
+  //    agentry.proposal's MODEL_CHAIN. One provider's outage must
+  //    never kill the reasoning path.
+  chain.push(
+    { provider: "google",    model: "gemini-2.5-flash",       source: "fallback" },
+    { provider: "unorouter", model: "gpt-oss-20b:free",       source: "fallback" },
+    { provider: "unorouter", model: "glm-5.3-flash:free",     source: "fallback" },
+  );
+  // De-dupe by model id, preserve order.
+  const seen = new Set();
+  return chain.filter(c => {
+    if (seen.has(c.model)) return false;
+    seen.add(c.model);
+    return true;
+  });
+}
 
 function systemPrompt() {
   return `You are agentry, the reasoning layer behind an autonomous agent system.
@@ -73,36 +106,71 @@ export default async function agentryReason(input, ctx) {
   }
 
   const started = Date.now();
-
-  // 1. Ask the LLM to reason about the failure.
   const messages = [
     { role: "system", content: systemPrompt() },
     { role: "user", content: userPrompt(input) },
   ];
 
-  const llmRes = await ctx.invoke("llm.openai_compat", {
-    model: REASONING_MODEL,
-    messages,
-    temperature: 0.1,
-    max_tokens: 800,
-    accept_from: null,   // permissive — provider routes to whatever free model
-  }, { tenant: "local", by: "agentry.reason" });
+  const chain = buildModelChain(input);
+  const attempts = [];
+  let parsed = null;
+  let modelUsed = null;
+  let chainSource = null;
 
-  if (!llmRes.ok) {
-    throw new Error(`agentry.reason: LLM call failed — ${llmRes.error.code}: ${llmRes.error.message}`);
+  for (const { provider, model, source } of chain) {
+    try {
+      const llmRes = await ctx.invoke("llm.openai_compat", {
+        model,
+        messages,
+        temperature: 0.1,
+        max_tokens: 800,
+        accept_from: null,   // permissive — accept whatever free model the router serves
+      }, { tenant: "local", by: "agentry.reason" });
+
+      if (!llmRes.ok) {
+        attempts.push({
+          provider, model, source, ok: false,
+          code: llmRes.error.code, message: llmRes.error.message,
+        });
+        ctx.events.emit("agentry.reason.llm_failed", {
+          provider, model, source,
+          code: llmRes.error.code, message: llmRes.error.message,
+        });
+        continue;
+      }
+
+      const p = parseJson(llmRes.output.content);
+      if (p) {
+        parsed = p;
+        modelUsed = llmRes.output.model || model;
+        chainSource = source;
+        attempts.push({ provider, model, source, ok: true });
+        break;
+      }
+      attempts.push({ provider, model, source, ok: false, reason: "unparseable" });
+      ctx.events.emit("agentry.reason.llm_unparseable", {
+        provider, model, source,
+        content: String(llmRes.output.content).slice(0, 300),
+      });
+    } catch (e) {
+      attempts.push({ provider, model, source, ok: false, error: e.message });
+      ctx.events.emit("agentry.reason.llm_threw", { provider, model, source, error: e.message });
+    }
   }
 
-  const parsed = parseJson(llmRes.output.content) || {
-    analysis: "LLM returned unparseable output; no structured analysis available.",
-    missing: null,
-    immediate_action: "retry once, then report the limitation to the user",
-    suggestions: [],
-    _parse_failed: true,
-    _raw: String(llmRes.output.content).slice(0, 500),
-  };
+  if (!parsed) {
+    ctx.events.emit("agentry.reason.all_models_failed", {
+      workspace_id: workspace_id || null,
+      session_id: session_id || null,
+      attempts,
+    });
+    throw new Error(
+      `agentry.reason: all ${chain.length} models in the fallback chain failed. ` +
+      `Last attempt: ${JSON.stringify(attempts[attempts.length - 1] || null)}`
+    );
+  }
 
-  // 2. If a missing capability was identified, record the gap NOW.
-  //    The discovery loop will propose a fix on its next tick.
+  // Record the gap if a missing capability was identified.
   let gap_id = null;
   if (parsed.missing && parsed.missing.wanted_id) {
     const key = `gap:${parsed.missing.wanted_id}`;
@@ -127,7 +195,9 @@ export default async function agentryReason(input, ctx) {
         session_id: session_id || null,
       });
     } catch (e) {
-      ctx.events.emit("agentry.reason.gap_record_failed", { error: e.message, wanted_id: parsed.missing.wanted_id });
+      ctx.events.emit("agentry.reason.gap_record_failed", {
+        error: e.message, wanted_id: parsed.missing.wanted_id,
+      });
     }
   }
 
@@ -136,6 +206,9 @@ export default async function agentryReason(input, ctx) {
     session_id: session_id || null,
     missing: parsed.missing?.wanted_id || null,
     gap_id,
+    model_used: modelUsed,
+    chain_source: chainSource,
+    attempts_count: attempts.length,
     ms: Date.now() - started,
   });
 
@@ -149,6 +222,8 @@ export default async function agentryReason(input, ctx) {
       note: gap_id
         ? "A capability gap was recorded. A proposal will be generated in the background and emailed for approval."
         : "No gap recorded — this looks like a retry or in-session fix.",
+      model_used: modelUsed,
+      chain_source: chainSource,
     },
     cost: { time_ms: Date.now() - started },
   };
