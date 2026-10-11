@@ -1,5 +1,9 @@
 // agentry/src/handlers/agentry.adopt.mjs
-// (unchanged above the retirement block — copy from what you have)
+// Grows the graph. This is the handler that makes the pitch real.
+//
+// Notify: routes through notify.fallback so a Gmail outage doesn't
+// swallow the adoption follow-up. On failure, notify.console writes
+// the full body to stdout — visible in the HF Space log.
 
 const DEFAULT_NOTIFY = "notify.email.gmail";
 const REASON_SEP = "::";
@@ -31,7 +35,6 @@ function buildAdoptedCapability({ proposal, candidate }) {
 }
 
 function renderAdoptionEmail({ proposal, adopted, retiredGap, retiredWatches }) {
-  // unchanged from your version
   const lines = [];
   if (adopted.length) {
     lines.push(`Capability added: ${adopted.map(a => `\`${a.capability_id}\``).join(", ")}`);
@@ -134,7 +137,7 @@ export default async function agentryAdopt(input, ctx) {
     }
   }
 
-  // ── Retire watches: match by exact gap_id OR by prefix "<gap_id>::" ──
+  // Retire watches: exact gap_id OR prefix "<gap_id>::"
   const retiredWatches = [];
   if (proposal.gap_id) {
     const exact = proposal.gap_id;
@@ -177,12 +180,27 @@ export default async function agentryAdopt(input, ctx) {
 
   let notified = false;
   try {
-    const notifyRes = await ctx.invoke(notifyCap, { subject, body_markdown: body }, { tenant: "local", by: "agentry.adopt" });
+    const notifyRes = await ctx.invoke("notify.fallback", {
+      subject,
+      body_markdown: body,
+      primary: notifyCap,
+      fallback: "notify.console",
+    }, { tenant: "local", by: "agentry.adopt" });
     notified = notifyRes.ok === true;
     if (!notified) {
-      events.emit("adoption.notify_failed", { proposal_id, code: notifyRes.error?.code, message: notifyRes.error?.message });
+      events.emit("adoption.notify_failed", {
+        proposal_id,
+        code: notifyRes.error?.code,
+        message: notifyRes.error?.message,
+      });
     } else {
-      events.emit("adoption.notified", { proposal_id, channel: notifyCap, message_id: notifyRes.output?.message_id || null });
+      events.emit("adoption.notified", {
+        proposal_id,
+        channel: notifyRes.output.channel,
+        primary_ok: notifyRes.output.primary_ok,
+        fallback_used: notifyRes.output.fallback_used,
+        message_id: notifyRes.output.message_id || null,
+      });
     }
   } catch (e) {
     events.emit("adoption.notify_threw", { proposal_id, error: e.message });
@@ -192,6 +210,7 @@ export default async function agentryAdopt(input, ctx) {
     output: {
       adopted, retired_gap: retiredGap, retired_watches: retiredWatches,
       notified,
+      delivered_via: notified ? "notify.fallback" : null,
       reason: adopted.length > 0 ? "adopted" : "rejected",
     },
     cost: { time_ms: Date.now() - started },

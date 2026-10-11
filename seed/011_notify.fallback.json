@@ -1,0 +1,25 @@
+{
+  "id": "notify.fallback",
+  "kind": "notify",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "notify.fallback",
+  "accepts": {
+    "subject": "string",
+    "body_markdown": "string",
+    "priority": { "type": "string", "optional": true },
+    "primary": { "type": "string", "optional": true },
+    "fallback": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "delivered_at": "number",
+    "channel": "string",
+    "primary_ok": "boolean",
+    "fallback_used": "boolean",
+    "primary_error": { "type": "string", "optional": true },
+    "message_id": { "type": "string", "optional": true }
+  },
+  "cost": { "money_usd": 0, "time_ms": 2500 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Wrapper around another notify capability. Tries primary first (default notify.email.gmail); on failure falls back to notify.console, which writes to stdout so the message appears in the HF Space log. Use this anywhere a notification must not silently fail. The fallback body includes the primary's error so it is visible in the log."
+}

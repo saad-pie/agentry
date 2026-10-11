@@ -4,6 +4,10 @@
 // Model chain: try each provider in order, first that returns
 // parseable JSON wins. Never let one provider's downtime kill the
 // whole proposal.
+//
+// Notify: routes through notify.fallback so that if Gmail is
+// unavailable, the proposal still lands in the HF Space log via
+// notify.console.
 
 import { randomBytes } from "node:crypto";
 
@@ -289,7 +293,16 @@ export default async function agentryProposal(input, ctx) {
   const body = renderEmail({ gap, analysis, perCandidateTokens, approveBase });
   const subject = `[agentry] proposal: ${analysis.recommended_id || `${candidates.length} candidates`} for ${gap.wanted_kind || gap.id}`;
 
-  const notifyRes = await deps.invoke(notify, { subject, body_markdown: body }, {
+  // Route through notify.fallback so a Gmail outage doesn't swallow
+  // the proposal. On failure, notify.console writes the full body
+  // (including approve/reject URLs) to stdout — visible in the HF
+  // Space log.
+  const notifyRes = await deps.invoke("notify.fallback", {
+    subject,
+    body_markdown: body,
+    primary: notify,
+    fallback: "notify.console",
+  }, {
     tenant: "local", by: "agentry.proposal",
   });
 
@@ -302,7 +315,9 @@ export default async function agentryProposal(input, ctx) {
   } else {
     ctx.events.emit("proposal.notified", {
       proposal_id: proposalId,
-      channel: notify,
+      channel: notifyRes.output.channel,
+      primary_ok: notifyRes.output.primary_ok,
+      fallback_used: notifyRes.output.fallback_used,
       message_id: notifyRes.output.message_id || null,
     });
   }
@@ -316,6 +331,8 @@ export default async function agentryProposal(input, ctx) {
       model_used: modelUsed,
       provider_used: providerUsed,
       notified: notifyRes.ok,
+      delivered_via: notifyRes.ok ? notifyRes.output.channel : null,
+      fallback_used: notifyRes.ok ? notifyRes.output.fallback_used : false,
       approval_urls_available: Boolean(approveBase),
     },
     cost: { time_ms: Date.now() - started },
