@@ -1,0 +1,16 @@
+{
+  "id": "agentry.os",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.os",
+  "accepts": {
+    "action": "string",
+    "session": "string",
+    "...": "action-specific args"
+  },
+  "produces": { "result": "object" },
+  "cost": { "money_usd": 0, "time_ms": 100 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Operating system for agents. Persistent sessions with isolated cwd, env, and process table. Filesystem shared under /work. Exposes fs, shell, python, git, and process primitives as typed calls with schema'd returns. Not a bash sandbox — a real environment with state."
+}
