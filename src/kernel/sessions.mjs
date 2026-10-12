@@ -100,17 +100,23 @@ export class SessionStore {
   /**
    * Resolve a caller-supplied path against the session's cwd, enforcing
    * that the result stays inside the session root. Returns the absolute
-   * path or throws.
+   * path or throws with code=NOT_FOUND.
    */
   resolvePath(sessionId, path) {
     const s = this._cache.get(sessionId);
-    if (!s) throw new Error(`unknown session: ${sessionId}`);
+    if (!s) {
+      const e = new Error(`unknown session: ${sessionId}`);
+      e.code = "NOT_FOUND";
+      throw e;
+    }
     const base = resolve(s.root, s.cwd);
     const abs = resolve(base, path);
     const normalizedRoot = normalize(s.root);
     const normalizedAbs = normalize(abs);
     if (!normalizedAbs.startsWith(normalizedRoot)) {
-      throw new Error(`path escapes session root: ${path}`);
+      const e = new Error(`path escapes session root: ${path}`);
+      e.code = "NOT_FOUND";
+      throw e;
     }
     return normalizedAbs;
   }

@@ -45,8 +45,8 @@ function sendError(res, err) {
 }
 
 const ROUTES = {
-  "GET  /health": async () => ({
-    ok: true, kernel: "agentry-kernel", version: "0.13.1",
+  "GET /health": async () => ({
+    ok: true, kernel: "agentry-kernel", version: "0.13.2",
     root: ROOT, uptime_s: Math.round(process.uptime()),
     sessions: sessions.list().length,
     shell_processes: shell.processes.size,
@@ -95,7 +95,7 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const key = `${req.method} ${url.pathname}`;
   const handler = ROUTES[key];
-  res.setHeader("x-agentry-kernel", "0.13.1");
+  res.setHeader("x-agentry-kernel", "0.13.2");
 
   if (!handler) return send(res, 404, { error: { code: "NOT_FOUND", message: `no route: ${key}` } });
 

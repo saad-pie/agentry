@@ -1,13 +1,13 @@
 // agentry/src/kernel/languages/python.mjs
 //
 // Python runtime primitives. Runs code or files with the session's
-// Python interpreter, installs packages with pip, and manages venvs.
+// Python interpreter, installs packages with pip.
 //
-// Uses the system python3 + venv + pip. No special config; if the
-// container has python3, this works.
+// Uses the system python3 + pip. No special config; if the container
+// has python3, this works.
 
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 60000;
@@ -50,7 +50,6 @@ export function pythonRun(sessions, shell, { session, code, file, args = [], cwd
     mkdirSync(dir, { recursive: true });
     const fname = `script_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}.py`;
     scriptPath = join(dir, fname);
-    const { writeFileSync } = require("node:fs");
     writeFileSync(scriptPath, code);
   } else {
     scriptPath = sessions.resolvePath(session, file);
@@ -77,7 +76,6 @@ export function pythonRun(sessions, shell, { session, code, file, args = [], cwd
     stderr: r.stderr || "",
     exit_code: r.status,
     signal: r.signal,
-    ms: timeout_ms < 60000 ? timeout_ms : null,
     script_path: code ? scriptPath.replace(s.root + "/", "") : file,
     error: r.error ? r.error.message : null,
   };
@@ -95,7 +93,6 @@ export function pythonInstall(sessions, { session, packages = [], upgrade = fals
     e.code = "INVALID_REQUEST";
     throw e;
   }
-  // Validate package names — reject obvious shell metacharacters.
   for (const p of packages) {
     if (typeof p !== "string" || !/^[a-zA-Z0-9_.\-\[\]=<>!~]+$/.test(p)) {
       const e = new Error(`invalid package name: ${p}`);
