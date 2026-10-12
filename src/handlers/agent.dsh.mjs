@@ -8,6 +8,11 @@
 //   - Header: x-api-key: <token>   (Authorization: Bearer also accepted)
 //
 // First use creates an agentry user + a workspace. Both are cached.
+//
+// Workspaces can be targeted by id (`workspaceId`) or by name
+// (`workspace`). The name variant resolves through ensureWorkspace,
+// which lists and creates as needed — used by agentry.reason.harness
+// to submit into the `reasoner` workspace (no AGENTS.md, no recursion).
 
 import { mkdirSync } from "node:fs";
 
@@ -35,7 +40,7 @@ function userHeaders(apiKey) {
 // ---- process-lifetime cache ----
 let _userId = null;
 let _userApiKey = null;
-let _workspaceId = null;
+const _workspaceIdByName = new Map();   // name → id
 
 // Ensure the agentry user exists, return { userId, apiKey }.
 async function ensureUser() {
@@ -81,8 +86,9 @@ async function ensureUser() {
 }
 
 // Ensure a workspace exists, return its id.
+// Cached by name so repeated lookups are cheap.
 async function ensureWorkspace(name = DEFAULT_WORKSPACE_NAME, path = DEFAULT_WORKSPACE_PATH) {
-  if (_workspaceId) return _workspaceId;
+  if (_workspaceIdByName.has(name)) return _workspaceIdByName.get(name);
 
   try { mkdirSync(path, { recursive: true }); }
   catch (e) { throw new Error(`agent.dsh: cannot create workspace dir ${path} — ${e.message}`); }
@@ -97,7 +103,10 @@ async function ensureWorkspace(name = DEFAULT_WORKSPACE_NAME, path = DEFAULT_WOR
       const list = await res.json();
       if (Array.isArray(list)) {
         const existing = list.find(w => w.name === name || w.path === path);
-        if (existing?.id) { _workspaceId = existing.id; return _workspaceId; }
+        if (existing?.id) {
+          _workspaceIdByName.set(name, existing.id);
+          return existing.id;
+        }
       }
     }
   } catch { /* fall through to create */ }
@@ -117,18 +126,27 @@ async function ensureWorkspace(name = DEFAULT_WORKSPACE_NAME, path = DEFAULT_WOR
   if (!data.id) {
     throw new Error(`agent.dsh: workspace creation returned no id — ${JSON.stringify(data).slice(0, 300)}`);
   }
-  _workspaceId = data.id;
-  return _workspaceId;
+  _workspaceIdByName.set(name, data.id);
+  return data.id;
 }
 
 export default async function agentDsh(input, ctx) {
-  const { prompt, workspaceId, provider, model, max_tokens, timeout_ms = 30000 } = input || {};
+  const { prompt, workspaceId, workspace, provider, model, max_tokens, timeout_ms = 30000 } = input || {};
   if (!prompt || typeof prompt !== "string") {
     throw new Error("agent.dsh requires prompt (string)");
   }
 
   const { apiKey } = await ensureUser();
-  const wsId = workspaceId || await ensureWorkspace();
+
+  // Resolve the target workspace: explicit id wins, then name, then default.
+  let wsId = workspaceId;
+  if (!wsId && workspace && typeof workspace === "string") {
+    const wsPath = `/tmp/home/.dsh/agentry-workspaces/${workspace}`;
+    wsId = await ensureWorkspace(workspace, wsPath);
+  }
+  if (!wsId) {
+    wsId = await ensureWorkspace();
+  }
 
   const body = { workspaceId: wsId, prompt };
   if (provider) body.provider = provider;

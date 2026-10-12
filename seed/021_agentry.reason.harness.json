@@ -1,0 +1,25 @@
+{
+  "id": "agentry.reason.harness",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.reason.harness",
+  "accepts": {
+    "failure": "string",
+    "intent": { "type": "string", "optional": true },
+    "attempted": { "type": "array", "optional": true },
+    "workspace_id": { "type": "string", "optional": true },
+    "session_id": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "analysis": "string",
+    "missing": "object|null",
+    "immediate_action": "string",
+    "suggestions": "array",
+    "gap_recorded": "string|null",
+    "harness_task_id": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 60000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Deep reasoning path. Submits a task to the DeepSeek Harness in a dedicated reasoner workspace (no AGENTS.md, so no recursion). The harness uses its own tools — web search, fetch, file reads — before answering. Returns the same shape as agentry.reason. On failure, callers should fall back to agentry.reason."
+}
