@@ -5,12 +5,13 @@
   "handler": "agentry.os",
   "accepts": {
     "action": "string",
-    "session": "string",
-    "...": "action-specific args"
+    "session": { "type": "string", "optional": true },
+    "timeout_ms": { "type": "number", "optional": true }
   },
-  "produces": { "result": "object" },
+  "produces": { "action": "string", "result": "object" },
   "cost": { "money_usd": 0, "time_ms": 100 },
   "limits": {},
   "source": "seeded:agentry",
-  "notes": "Operating system for agents. Persistent sessions with isolated cwd, env, and process table. Filesystem shared under /work. Exposes fs, shell, python, git, and process primitives as typed calls with schema'd returns. Not a bash sandbox — a real environment with state."
+  "notes": "The agentry operating system. Persistent sessions with isolated cwd, env, and process table. Filesystem shared under work/<session>/. Dispatches to agentry-kernel on 127.0.0.1:7864. Actions: session.create|get|list|cwd|env, fs.read|write|list, shell.spawn|write|read|kill|list, python.run|install|version, node.run|install|npx|version, git.clone|status|commit|log|version, proc.start|status|stop|logs|list, health. Not a bash sandbox — a typed execution environment with state."
 }
+
