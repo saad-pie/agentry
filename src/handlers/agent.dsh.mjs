@@ -13,6 +13,11 @@
 // (`workspace`). The name variant resolves through ensureWorkspace,
 // which lists and creates as needed — used by agentry.reason.harness
 // to submit into the `reasoner` workspace (no AGENTS.md, no recursion).
+//
+// v0.15.4 — always pass an explicit model. The gateway pins the model on
+// the first submit to a workspace and 409s on mismatch afterwards.
+// Relying on the gateway's default was silently binding every workspace
+// to atria/space-bunny-alpha:free, which returns empty output.
 
 import { mkdirSync } from "node:fs";
 
@@ -22,6 +27,13 @@ const AGENTRY_USER_NAME = process.env.DSH_USER_NAME || "agentry";
 const DEFAULT_WORKSPACE_NAME = process.env.DSH_WORKSPACE_NAME || "agentry-default";
 const DEFAULT_WORKSPACE_PATH =
   process.env.DSH_WORKSPACE_PATH || "/tmp/home/.dsh/agentry-workspaces/default";
+
+// v0.15.4 — explicit model defaults. The gateway has a persistent
+// session per workspace; the first submit pins the model. Never rely
+// on the gateway default (it's currently atria/space-bunny-alpha:free
+// and returns empty).
+const DEFAULT_PROVIDER = process.env.DSH_DEFAULT_PROVIDER || "unorouter";
+const DEFAULT_MODEL = process.env.DSH_DEFAULT_MODEL || "gpt-oss-20b:free";
 
 function adminHeaders() {
   return {
@@ -148,9 +160,17 @@ export default async function agentDsh(input, ctx) {
     wsId = await ensureWorkspace();
   }
 
-  const body = { workspaceId: wsId, prompt };
-  if (provider) body.provider = provider;
-  if (model) body.model = model;
+  // v0.15.4 — always pass an explicit model + provider.
+  // The gateway pins the model on the first submit to a workspace and
+  // 409s on mismatch. Not passing a model means the gateway chooses its
+  // own default (currently atria/space-bunny-alpha:free, which returns
+  // empty output). Explicit is correct.
+  const body = {
+    workspaceId: wsId,
+    prompt,
+    provider: provider || DEFAULT_PROVIDER,
+    model: model || DEFAULT_MODEL,
+  };
   if (max_tokens) body.maxTokens = max_tokens;
 
   const started = Date.now();
@@ -180,6 +200,7 @@ export default async function agentDsh(input, ctx) {
       workspace_id: data.workspaceId || wsId,
       user_id: data.userId || null,
       submitted_at: Date.now(),
+      model_used: data.model || { provider: body.provider, model: body.model },
     },
     cost: { time_ms: Date.now() - started, http_calls: 1 },
   };
