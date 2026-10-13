@@ -3,16 +3,12 @@
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
-// Shape of the pipeline:
 //   1. Resolve proposal + candidate + gap from the graph.
 //   2. If candidate.kind === "repo": clone into a kernel session,
 //      read README + manifest. Facts, not vibes.
-//   3. Ask the reasoner for a SPEC (JSON slots, not freeform code).
+//   3. Ask the LLM for a SPEC (JSON slots, not freeform code).
 //   4. Render the spec into a .mjs handler + a seed .json.
 //   5. Return paths. Do NOT write the graph. Trial gates that.
-//
-// Does not register the handler. Trial does that.
-// Does not run the handler. Trial does that.
 
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -26,7 +22,6 @@ const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR
 const REFERENCE_FILE = "bua.screenshot.mjs";
 const DEFAULT_SYNTH_MODEL = process.env.AGENTRY_SYNTH_MODEL || "gpt-oss-20b:free";
 const DEFAULT_SYNTH_PROVIDER = process.env.AGENTRY_SYNTH_PROVIDER || "unorouter";
-const REPO_READ_TIMEOUT_MS = 90000;
 const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
 
@@ -35,7 +30,7 @@ const MAX_MANIFEST_CHARS = 4000;
 // ─────────────────────────────────────────────────────────────
 
 async function readRepoTerritory(candidate, deps) {
-  const session = `synth_${candidate.id.replace(/[^a-z0-9_.-]/gi, "_")}_${Date.now().toString(36)}`;
+  const session = "synth_" + candidate.id.replace(/[^a-z0-9_.-]/gi, "_") + "_" + Date.now().toString(36);
   const { invoke } = deps;
 
   await invoke("agentry.os", { action: "session.create", id: session },
@@ -60,7 +55,7 @@ async function readRepoTerritory(candidate, deps) {
     }, { tenant: "local", by: "agentry.synthesize" });
 
     if (!cloneRes.ok) {
-      facts.error = `git.clone failed: ${cloneRes.error.message}`;
+      facts.error = "git.clone failed: " + cloneRes.error.message;
       return facts;
     }
     facts.cloned = true;
@@ -83,7 +78,7 @@ async function readRepoTerritory(candidate, deps) {
       const r = await invoke("agentry.os", {
         action: "fs.read",
         session,
-        path: `repo/${name}`,
+        path: "repo/" + name,
       }, { tenant: "local", by: "agentry.synthesize" });
       if (r.ok && r.output?.content) {
         facts.readme = String(r.output.content).slice(0, MAX_README_CHARS);
@@ -99,7 +94,7 @@ async function readRepoTerritory(candidate, deps) {
       const r = await invoke("agentry.os", {
         action: "fs.read",
         session,
-        path: `repo/${name}`,
+        path: "repo/" + name,
       }, { tenant: "local", by: "agentry.synthesize" });
       if (r.ok && r.output?.content) {
         facts.manifest = String(r.output.content).slice(0, MAX_MANIFEST_CHARS);
@@ -108,95 +103,102 @@ async function readRepoTerritory(candidate, deps) {
       }
     }
   } catch (e) {
-    facts.error = `repo read threw: ${e.message}`;
+    facts.error = "repo read threw: " + e.message;
   }
 
   return facts;
 }
 
 // ─────────────────────────────────────────────────────────────
-// The prompt — slot filling, not architecture inventing
+// The prompt — assembled by concatenation, no nested backticks
 // ─────────────────────────────────────────────────────────────
 
 function buildPrompt({ gap, candidate, facts, referenceHandler }) {
+  const gapJson = JSON.stringify({
+    id: gap.id,
+    wanted_id: gap.wanted_id || gap.id.replace(/^gap:/, ""),
+    wanted_kind: gap.wanted_kind,
+    reason: gap.reason || null,
+  }, null, 2);
+
+  const candidateJson = JSON.stringify({
+    id: candidate.id,
+    name: candidate.name || null,
+    url: candidate.url || null,
+    kind: candidate.kind || null,
+    description: candidate.description || null,
+  }, null, 2);
+
   const repoFacts = facts.cloned
-    ? `Top-level files:\n${facts.top_level.join("\n") || "(none listed)"}\n\n` +
-      (facts.readme ? `README:\n\`\`\`\n${facts.readme}\n\`\`\`\n\n` : "") +
-      (facts.manifest ? `${facts.manifest_path}:\n\`\`\`\n${facts.manifest}\n\`\`\`\n` : "")
-    : `(no repo facts available — candidate kind is ${candidate.kind})`;
+    ? "Top-level files:\n" + (facts.top_level.join("\n") || "(none listed)") + "\n\n"
+      + (facts.readme ? "README:\n<<<\n" + facts.readme + "\n>>>\n\n" : "")
+      + (facts.manifest ? (facts.manifest_path + ":\n<<<\n" + facts.manifest + "\n>>>\n") : "")
+    : "(no repo facts available — candidate kind is " + candidate.kind + ")";
 
-  return `You are agentry's code synthesizer.
+  const lines = [];
+  lines.push("You are agentry's code synthesizer.");
+  lines.push("");
+  lines.push("A gap has been approved for adoption. Produce a JSON spec that fills");
+  lines.push("slots in a handler template. The runtime renders your spec into a real");
+  lines.push(".mjs file. Do NOT write the handler yourself.");
+  lines.push("");
+  lines.push("Return ONLY a JSON object. No prose. No markdown fences.");
+  lines.push("");
+  lines.push("=== THE GAP ===");
+  lines.push(gapJson);
+  lines.push("");
+  lines.push("=== THE CANDIDATE ===");
+  lines.push(candidateJson);
+  lines.push("");
+  lines.push("=== REPO FACTS ===");
+  lines.push(repoFacts);
+  lines.push("");
+  lines.push("=== THE REFERENCE HANDLER — study this shape ===");
+  lines.push("The template exports capability, accept, and a default run(input, ctx).");
+  lines.push("It uses ctx.invoke(\"agentry.os\", { action: \"node.run\", session, code, env })");
+  lines.push("to run a Node script inside a kernel session. Your kernel_script will be");
+  lines.push("run the same way. The script's stdout becomes the handler's output.");
+  lines.push("");
+  lines.push("--- BEGIN REFERENCE HANDLER ---");
+  lines.push(referenceHandler);
+  lines.push("--- END REFERENCE HANDLER ---");
+  lines.push("");
+  lines.push("=== PRODUCE THIS JSON ===");
+  lines.push("{");
+  lines.push("  \"capability\": {");
+  lines.push("    \"id\": \"<dotted id, e.g. 'bua.browser'>\",");
+  lines.push("    \"kind\": \"<bua|cua|mua|memory|tool|notify|web|harness|unknown>\",");
+  lines.push("    \"accepts\": { \"<key>\": \"string\" | { \"type\": \"string|number|boolean\", \"optional\": true } },");
+  lines.push("    \"produces\": { \"<output_key>\": \"string|number|boolean\" },");
+  lines.push("    \"requires\": {");
+  lines.push("      \"npm\": [\"<pkg>\"],");
+  lines.push("      \"pip\": [\"<pkg>\"],");
+  lines.push("      \"post_install\": \"<shell cmd or null>\"");
+  lines.push("    }");
+  lines.push("  },");
+  lines.push("  \"accept_spec\": {");
+  lines.push("    \"input\": { \"<key>\": \"<value for the acceptance probe>\" },");
+  lines.push("    \"min_bytes\": 500");
+  lines.push("  },");
+  lines.push("  \"kernel_language\": \"node\" | \"python\",");
+  lines.push("  \"kernel_script\": \"<the code that runs in the kernel session. Reads env vars set by the handler. Writes its result to stdout.>\",");
+  lines.push("  \"glue\": {");
+  lines.push("    \"env_map\": { \"<ENV_VAR>\": \"<input_key>\" },");
+  lines.push("    \"result_parse\": \"stdout_text\" | \"stdout_json\",");
+  lines.push("    \"output_map\": { \"<output_key>\": \"<dot.path into parsed result>\" }");
+  lines.push("  }");
+  lines.push("}");
+  lines.push("");
+  lines.push("Rules:");
+  lines.push("- Output ONLY JSON. No prose. No fences.");
+  lines.push("- kernel_script runs in a kernel session. It reads env vars (from env_map)");
+  lines.push("  and writes its result to stdout. For binary outputs, write base64.");
+  lines.push("- If you cannot produce a working handler, output: { \"error\": \"<reason>\" }");
+  lines.push("- Prefer ONE npm package over five. Prefer an API call over spawning a browser.");
+  lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
+  lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
 
-A gap has been approved for adoption. Produce a JSON spec that fills
-slots in a handler template. The runtime renders your spec into a real
-.mjs file. Do NOT write the handler yourself.
-
-Return ONLY a JSON object. No prose. No markdown fences.
-
-═══ THE GAP ═══
-${JSON.stringify({
-  id: gap.id,
-  wanted_id: gap.wanted_id || gap.id.replace(/^gap:/, ""),
-  wanted_kind: gap.wanted_kind,
-  reason: gap.reason || null,
-}, null, 2)}
-
-═══ THE CANDIDATE ═══
-${JSON.stringify({
-  id: candidate.id,
-  name: candidate.name || null,
-  url: candidate.url || null,
-  kind: candidate.kind || null,
-  description: candidate.description || null,
-}, null, 2)}
-
-═══ REPO FACTS ═══
-${repoFacts}
-
-═══ THE REFERENCE HANDLER — study this shape ═══
-The template exports `capability`, `accept`, and a default `run(input, ctx)`.
-It uses ctx.invoke("agentry.os", { action: "node.run", session, code, env })
-to run a Node script inside a kernel session. Your kernel_script will be
-run the same way. The script's stdout becomes the handler's output.
-
-\`\`\`javascript
-${referenceHandler}
-\`\`\`
-
-═══ PRODUCE THIS JSON ═══
-{
-  "capability": {
-    "id": "<dotted id, e.g. 'bua.browser'>",
-    "kind": "<bua|cua|mua|memory|tool|notify|web|harness|unknown>",
-    "accepts": { "<key>": "string" | { "type": "string|number|boolean", "optional": true } },
-    "produces": { "<key>": "string|number|boolean" },
-    "requires": {
-      "npm": ["<pkg>"],
-      "pip": ["<pkg>"],
-      "post_install": "<shell cmd or null>"
-    }
-  },
-  "accept_spec": {
-    "input": { "<key>": "<value for the acceptance probe>" },
-    "min_bytes": 500
-  },
-  "kernel_language": "node" | "python",
-  "kernel_script": "<the code that runs in the kernel session. Reads env vars set by the handler. Writes its result to stdout.>",
-  "glue": {
-    "env_map": { "<ENV_VAR>": "<input_key>" },
-    "result_parse": "stdout_text" | "stdout_json",
-    "output_map": { "<output_key>": "<dot.path into parsed result>" }
-  }
-}
-
-Rules:
-- Output ONLY JSON. No prose. No fences.
-- kernel_script runs in a kernel session. It reads env vars (from env_map)
-  and writes its result to stdout. For binary outputs, write base64.
-- If you cannot produce a working handler, output: { "error": "<reason>" }
-- Prefer ONE npm package over five. Prefer an API call over spawning a browser.
-- Requires.npm must be exact package names (playwright, requests, etc).
-- post_install is a shell one-liner or null (e.g. "npx playwright install chromium").`;
+  return lines.join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -208,112 +210,116 @@ function renderHandler(spec) {
   const lang = kernel_language === "python" ? "python" : "node";
   const action = lang === "python" ? "python.run" : "node.run";
 
-  return `// agentry — synthesized handler for ${capability.id}
-// Generated by agentry.synthesize. Regenerate, do not hand-edit.
-// Kind: ${capability.kind}
-// Kernel language: ${lang}
+  const out = [];
+  out.push("// agentry — synthesized handler for " + capability.id);
+  out.push("// Generated by agentry.synthesize. Regenerate, do not hand-edit.");
+  out.push("// Kind: " + capability.kind);
+  out.push("// Kernel language: " + lang);
+  out.push("");
+  out.push("const CAP_ID = " + JSON.stringify(capability.id) + ";");
+  out.push("const CAP_KIND = " + JSON.stringify(capability.kind) + ";");
+  out.push("const ACCEPTS = " + JSON.stringify(capability.accepts || {}, null, 2) + ";");
+  out.push("const PRODUCES = " + JSON.stringify(capability.produces || {}, null, 2) + ";");
+  out.push("const REQUIRES = " + JSON.stringify(capability.requires || {}, null, 2) + ";");
+  out.push("const ENV_MAP = " + JSON.stringify(glue.env_map || {}, null, 2) + ";");
+  out.push("const OUTPUT_MAP = " + JSON.stringify(glue.output_map || {}, null, 2) + ";");
+  out.push("const RESULT_PARSE = " + JSON.stringify(glue.result_parse || "stdout_text") + ";");
+  out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
+  out.push("const KERNEL_SCRIPT = " + JSON.stringify(kernel_script || "") + ";");
+  out.push("");
+  out.push("const DEFAULT_TIMEOUT_MS = 90000;");
+  out.push("");
+  out.push("export const capability = {");
+  out.push("  id: CAP_ID,");
+  out.push("  kind: CAP_KIND,");
+  out.push("  invoked_via: \"invoker.in_process_js\",");
+  out.push("  accepts: ACCEPTS,");
+  out.push("  produces: PRODUCES,");
+  out.push("  requires: REQUIRES,");
+  out.push("};");
+  out.push("");
+  out.push("export async function accept(deps, opts = {}) {");
+  out.push("  const session = opts.session || (CAP_ID + \"-accept-test\");");
+  out.push("  const { prepareSession } = await import(\"../runtime/installer.mjs\");");
+  out.push("  await prepareSession(deps, { capId: CAP_ID, session });");
+  out.push("  const probe = await run(" + JSON.stringify(spec.accept_spec?.input || {}) + ", deps, { session });");
+  out.push("  const out = probe.output || probe;");
+  out.push("  const minBytes = " + (spec.accept_spec?.min_bytes ?? 0) + ";");
+  out.push("  if (minBytes > 0) {");
+  out.push("    const size = typeof out.bytes === \"number\" ? out.bytes : 0;");
+  out.push("    if (size < minBytes) {");
+  out.push("      throw new Error(\"accept: output too small (\" + size + \" < \" + minBytes + \")\");");
+  out.push("    }");
+  out.push("  }");
+  out.push("  return { ok: true, session, output: out };");
+  out.push("}");
+  out.push("");
+  out.push("async function run(input, ctx, opts = {}) {");
+  out.push("  const session = opts.session || input.session || (CAP_ID + \"-default\");");
+  out.push("  const timeout_ms = input.timeout_ms || DEFAULT_TIMEOUT_MS;");
+  out.push("");
+  out.push("  if (typeof ctx.invoke !== \"function\") {");
+  out.push("    throw new Error(CAP_ID + \" requires ctx.invoke\");");
+  out.push("  }");
+  out.push("");
+  out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session },");
+  out.push("    { tenant: \"local\", by: CAP_ID });");
+  out.push("");
+  out.push("  const env = {};");
+  out.push("  for (const [envKey, inputKey] of Object.entries(ENV_MAP)) {");
+  out.push("    const v = input[inputKey];");
+  out.push("    env[envKey] = v === undefined || v === null ? \"\" : String(v);");
+  out.push("  }");
+  out.push("");
+  out.push("  const res = await ctx.invoke(\"agentry.os\", {");
+  out.push("    action: KERNEL_ACTION,");
+  out.push("    session,");
+  out.push("    code: KERNEL_SCRIPT,");
+  out.push("    env,");
+  out.push("    timeout_ms,");
+  out.push("  }, { tenant: \"local\", by: CAP_ID });");
+  out.push("");
+  out.push("  if (!res.ok) {");
+  out.push("    throw new Error(CAP_ID + \": kernel call failed — \" + res.error.code + \": \" + res.error.message);");
+  out.push("  }");
+  out.push("");
+  out.push("  const r = res.output.result || res.output;");
+  out.push("  const exitCode = r.exit_code ?? r.exitCode ?? 0;");
+  out.push("  if (exitCode !== 0) {");
+  out.push("    throw new Error(CAP_ID + \": kernel exited \" + exitCode + \" — \" + String(r.stderr || \"\").slice(0, 300));");
+  out.push("  }");
+  out.push("");
+  out.push("  const stdout = String(r.stdout || \"\");");
+  out.push("  if (!stdout.trim()) {");
+  out.push("    throw new Error(CAP_ID + \": kernel produced no output\");");
+  out.push("  }");
+  out.push("");
+  out.push("  let raw;");
+  out.push("  if (RESULT_PARSE === \"stdout_json\") {");
+  out.push("    try { raw = JSON.parse(stdout); }");
+  out.push("    catch (e) { throw new Error(CAP_ID + \": stdout not JSON — \" + e.message); }");
+  out.push("  } else {");
+  out.push("    raw = stdout.trim();");
+  out.push("  }");
+  out.push("");
+  out.push("  const output = {};");
+  out.push("  for (const [outKey, path] of Object.entries(OUTPUT_MAP)) {");
+  out.push("    let v = raw;");
+  out.push("    for (const p of String(path).split(\".\")) v = v?.[p];");
+  out.push("    output[outKey] = v;");
+  out.push("  }");
+  out.push("  if (output.bytes === undefined) {");
+  out.push("    output.bytes = typeof raw === \"string\" ? Buffer.byteLength(raw) : JSON.stringify(raw).length;");
+  out.push("  }");
+  out.push("  output.captured_at = Date.now();");
+  out.push("");
+  out.push("  return { output, cost: { time_ms: r.ms || 0 } };");
+  out.push("}");
+  out.push("");
+  out.push("export default run;");
+  out.push("");
 
-const CAP_ID = ${JSON.stringify(capability.id)};
-const CAP_KIND = ${JSON.stringify(capability.kind)};
-const ACCEPTS = ${JSON.stringify(capability.accepts || {}, null, 2)};
-const PRODUCES = ${JSON.stringify(capability.produces || {}, null, 2)};
-const REQUIRES = ${JSON.stringify(capability.requires || {}, null, 2)};
-const ENV_MAP = ${JSON.stringify(glue.env_map || {}, null, 2)};
-const OUTPUT_MAP = ${JSON.stringify(glue.output_map || {}, null, 2)};
-const RESULT_PARSE = ${JSON.stringify(glue.result_parse || "stdout_text")};
-const KERNEL_ACTION = ${JSON.stringify(action)};
-const KERNEL_SCRIPT = ${JSON.stringify(kernel_script || "")};
-
-const DEFAULT_TIMEOUT_MS = 90000;
-
-export const capability = {
-  id: CAP_ID,
-  kind: CAP_KIND,
-  invoked_via: "invoker.in_process_js",
-  accepts: ACCEPTS,
-  produces: PRODUCES,
-  requires: REQUIRES,
-};
-
-export async function accept(deps, { session = \`\${CAP_ID}-accept-test\` } = {}) {
-  const { prepareSession } = await import("../runtime/installer.mjs");
-  await prepareSession(deps, { capId: CAP_ID, session });
-  const probe = await run(${JSON.stringify(spec.accept_spec?.input || {})}, deps, { session });
-  const out = probe.output || probe;
-  const minBytes = ${spec.accept_spec?.min_bytes ?? 0};
-  if (minBytes > 0) {
-    const size = typeof out.bytes === "number" ? out.bytes : 0;
-    if (size < minBytes) {
-      throw new Error(\`accept: output too small (\${size} < \${minBytes})\`);
-    }
-  }
-  return { ok: true, session, output: out };
-}
-
-async function run(input, ctx, opts = {}) {
-  const session = opts.session || input.session || \`\${CAP_ID}-default\`;
-  const timeout_ms = input.timeout_ms || DEFAULT_TIMEOUT_MS;
-
-  if (typeof ctx.invoke !== "function") {
-    throw new Error(\`\${CAP_ID} requires ctx.invoke\`);
-  }
-
-  await ctx.invoke("agentry.os", { action: "session.create", id: session },
-    { tenant: "local", by: CAP_ID });
-
-  const env = {};
-  for (const [envKey, inputKey] of Object.entries(ENV_MAP)) {
-    const v = input[inputKey];
-    env[envKey] = v === undefined || v === null ? "" : String(v);
-  }
-
-  const res = await ctx.invoke("agentry.os", {
-    action: KERNEL_ACTION,
-    session,
-    code: KERNEL_SCRIPT,
-    env,
-    timeout_ms,
-  }, { tenant: "local", by: CAP_ID });
-
-  if (!res.ok) {
-    throw new Error(\`\${CAP_ID}: kernel call failed — \${res.error.code}: \${res.error.message}\`);
-  }
-
-  const r = res.output.result || res.output;
-  const exitCode = r.exit_code ?? r.exitCode ?? 0;
-  if (exitCode !== 0) {
-    throw new Error(\`\${CAP_ID}: kernel exited \${exitCode} — \${String(r.stderr || "").slice(0, 300)}\`);
-  }
-
-  const stdout = String(r.stdout || "");
-  if (!stdout.trim()) {
-    throw new Error(\`\${CAP_ID}: kernel produced no output\`);
-  }
-
-  let raw;
-  if (RESULT_PARSE === "stdout_json") {
-    try { raw = JSON.parse(stdout); }
-    catch (e) { throw new Error(\`\${CAP_ID}: stdout not JSON — \${e.message}\`); }
-  } else {
-    raw = stdout.trim();
-  }
-
-  const output = {};
-  for (const [outKey, path] of Object.entries(OUTPUT_MAP)) {
-    let v = raw;
-    for (const p of String(path).split(".")) v = v?.[p];
-    output[outKey] = v;
-  }
-  if (output.bytes === undefined) {
-    output.bytes = typeof raw === "string" ? Buffer.byteLength(raw) : JSON.stringify(raw).length;
-  }
-  output.captured_at = Date.now();
-
-  return { output, cost: { time_ms: r.ms || 0 } };
-}
-
-export default run;
-`;
+  return out.join("\n");
 }
 
 function renderSeed(spec, handlerPath) {
@@ -357,20 +363,19 @@ export default async function agentrySynthesize(input, ctx) {
   const { graph, events } = ctx;
 
   const proposal = graph.getCapability(proposal_id);
-  if (!proposal) throw new Error(`agentry.synthesize: proposal not found: ${proposal_id}`);
+  if (!proposal) throw new Error("agentry.synthesize: proposal not found: " + proposal_id);
 
   const candidate = (proposal.candidates || []).find(c => c.id === candidate_id);
-  if (!candidate) throw new Error(`agentry.synthesize: candidate ${candidate_id} not in proposal`);
+  if (!candidate) throw new Error("agentry.synthesize: candidate " + candidate_id + " not in proposal");
 
   const gap = proposal.gap_id ? graph.getCapability(proposal.gap_id) : null;
-  if (!gap) throw new Error(`agentry.synthesize: gap ${proposal.gap_id} not found`);
+  if (!gap) throw new Error("agentry.synthesize: gap " + proposal.gap_id + " not found");
 
   events.emit("synthesize.started", {
     proposal_id, candidate_id, gap_id: gap.id,
     candidate_kind: candidate.kind,
   });
 
-  // ── 1. Gather repo facts (deterministic, no LLM) ──
   let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null };
   if (candidate.kind === "repo" && candidate.url) {
     try {
@@ -378,7 +383,7 @@ export default async function agentrySynthesize(input, ctx) {
       events.emit("synthesize.repo_read", {
         proposal_id, candidate_id,
         cloned: facts.cloned, error: facts.error,
-        readme_len: facts.readme?.length || 0,
+        readme_len: facts.readme ? facts.readme.length : 0,
         manifest: facts.manifest_path,
         top_level_count: facts.top_level.length,
       });
@@ -387,7 +392,6 @@ export default async function agentrySynthesize(input, ctx) {
     }
   }
 
-  // ── 2. Ask the reasoner for a spec ──
   const referenceHandler = readFileSync(join(HERE, REFERENCE_FILE), "utf8");
   const prompt = buildPrompt({ gap, candidate, facts, referenceHandler });
 
@@ -407,7 +411,7 @@ export default async function agentrySynthesize(input, ctx) {
       proposal_id, candidate_id,
       code: llmRes.error.code, message: llmRes.error.message,
     });
-    throw new Error(`agentry.synthesize: llm failed — ${llmRes.error.code}: ${llmRes.error.message}`);
+    throw new Error("agentry.synthesize: llm failed — " + llmRes.error.code + ": " + llmRes.error.message);
   }
 
   const spec = extractJson(llmRes.output.content);
@@ -420,18 +424,17 @@ export default async function agentrySynthesize(input, ctx) {
   }
   if (spec.error) {
     events.emit("synthesize.refused", { proposal_id, candidate_id, reason: spec.error });
-    throw new Error(`agentry.synthesize: LLM declined — ${spec.error}`);
+    throw new Error("agentry.synthesize: LLM declined — " + spec.error);
   }
   if (!spec.capability?.id || !spec.kernel_script || !spec.glue) {
     throw new Error("agentry.synthesize: spec missing capability.id, kernel_script, or glue");
   }
 
-  // ── 3. Render files ──
   mkdirSync(HANDLERS_DIR, { recursive: true });
   mkdirSync(SEEDS_DIR, { recursive: true });
 
-  const handlerPath = join(HANDLERS_DIR, `${spec.capability.id}.mjs`);
-  const seedPath = join(SEEDS_DIR, `${spec.capability.id}.json`);
+  const handlerPath = join(HANDLERS_DIR, spec.capability.id + ".mjs");
+  const seedPath = join(SEEDS_DIR, spec.capability.id + ".json");
 
   writeFileSync(handlerPath, renderHandler(spec));
   writeFileSync(seedPath, JSON.stringify(renderSeed(spec, handlerPath), null, 2));
