@@ -1,0 +1,21 @@
+{
+  "id": "agentry.synthesize",
+  "kind": "agentry",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.synthesize",
+  "accepts": {
+    "proposal_id": "string",
+    "candidate_id": "string"
+  },
+  "produces": {
+    "capability_id": "string",
+    "kind": "string",
+    "handler_path": "string",
+    "seed_path": "string",
+    "spec": "object"
+  },
+  "cost": { "money_usd": 0, "time_ms": 20000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Reads an approved candidate, gathers repo facts, asks the LLM for a spec, renders a .mjs handler + seed .json. Does not write the graph."
+}

@@ -46,7 +46,39 @@ export async function loadHandlerFromFile(id, filePath) {
 // ---- the invoker function itself ----
 async function inProcessJsInvoker(cap, input, context) {
   const handlerId = cap.handler || cap.id;
-  const fn = HANDLERS.get(handlerId);
+  let fn = HANDLERS.get(handlerId);
+
+  // ── BATCH 14: lazy handler load ──────────────────────────────
+  // Synthesized handlers are written to disk by one process (the
+  // discovery loop) but may be invoked by another (the MCP server).
+  // The HANDLERS map is per-process, so a fresh process will miss
+  // a handler that exists on disk. When the capability carries a
+  // `handler_file` pointer, load it on first miss and cache it.
+  // After the first invoke, this is a plain map lookup.
+  if (!fn && typeof cap.handler_file === "string" && cap.handler_file.length > 0) {
+    try {
+      await loadHandlerFromFile(handlerId, cap.handler_file);
+      fn = HANDLERS.get(handlerId);
+      context.events?.emit("invoker.lazy_loaded_handler", {
+        capability_id: cap.id,
+        handler_id: handlerId,
+        handler_file: cap.handler_file,
+      });
+    } catch (e) {
+      context.events?.emit("invoker.lazy_load_failed", {
+        capability_id: cap.id,
+        handler_id: handlerId,
+        handler_file: cap.handler_file,
+        error: e.message,
+      });
+      throw errors.invalidSpec(
+        cap.id,
+        `handler_file load failed for "${handlerId}" (${cap.handler_file}): ${e.message}`
+      );
+    }
+  }
+  // ── END BATCH 14 ─────────────────────────────────────────────
+
   if (!fn) {
     throw errors.invalidSpec(cap.id, `no handler registered for "${handlerId}"`);
   }

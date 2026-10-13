@@ -1,18 +1,30 @@
 // agentry/src/handlers/agentry.adopt.mjs
 // Grows the graph. This is the handler that makes the pitch real.
 //
+// v0.15.5 — before writing a capability node, run synthesize → trial.
+// Only write on trial pass. On trial fail, record a synthesis_attempt
+// node (retired immediately) so we can inspect what the LLM tried, keep
+// the gap open, and let discovery retry on the next tick.
+//
 // Notify: routes through notify.fallback so a Gmail outage doesn't
 // swallow the adoption follow-up. On failure, notify.console writes
 // the full body to stdout — visible in the HF Space log.
 //
-// Save-on-growth: after the adoption writes a new capability and
-// retires the gap, we force an out-of-cycle checkpoint to GitHub so
-// the growth survives a container crash before the next autosave tick.
+// Save-on-growth: after adoption writes a new capability and retires
+// the gap, force an out-of-cycle checkpoint to GitHub so growth
+// survives a crash before the next autosave tick.
 
 const DEFAULT_NOTIFY = "notify.email.gmail";
 const REASON_SEP = "::";
 
-function buildAdoptedCapability({ proposal, candidate }) {
+// v0.15.5 — this is only used if synthesis is disabled via env.
+// Normal path: synthesize + trial, node written only on pass.
+const SYNTHESIS_ENABLED = process.env.AGENTRY_SYNTHESIS_ENABLED !== "0";
+
+function buildPlaceholderCapability({ proposal, candidate, reason }) {
+  // Only reached when SYNTHESIS_ENABLED=0 or synthesize/trial are not
+  // available as capabilities. Keeps the previous behavior so this
+  // batch can be rolled back with one env var.
   const capId = proposal.gap_wanted_id || proposal.gap_id;
   const capKind = proposal.gap_wanted_kind || "unknown";
   const now = Date.now();
@@ -27,6 +39,7 @@ function buildAdoptedCapability({ proposal, candidate }) {
     produces: null,
     source: provenance,
     notes: candidate.url || null,
+    placeholder_reason: reason || "synthesis_disabled",
     adopted_from: {
       proposal_id: proposal.id,
       candidate_id: candidate.id,
@@ -38,35 +51,89 @@ function buildAdoptedCapability({ proposal, candidate }) {
   };
 }
 
-function renderAdoptionEmail({ proposal, adopted, retiredGap, retiredWatches }) {
+function renderAdoptionEmail({ proposal, adopted, failed, retiredGap, retiredWatches }) {
   const lines = [];
+
   if (adopted.length) {
     lines.push(`Capability added: ${adopted.map(a => `\`${a.capability_id}\``).join(", ")}`);
     lines.push("");
     lines.push(`Kind: ${proposal.gap_wanted_kind || "unknown"}`);
     lines.push(`Gap filled: ${proposal.gap_id || "—"}`);
     lines.push("");
-    lines.push("─── Sources ───");
+    lines.push("─── Auto-synthesized handlers ───");
     lines.push("");
     for (const a of adopted) {
-      lines.push(`• ${a.candidate_id}`);
-      if (a.candidate_url) lines.push(`  url: ${a.candidate_url}`);
+      lines.push(`• \`${a.capability_id}\``);
+      if (a.handler_path) lines.push(`  handler: \`${a.handler_path}\``);
+      if (a.candidate_url) lines.push(`  source: ${a.candidate_url}`);
+      if (a.trial_session) lines.push(`  trial session: \`${a.trial_session}\``);
+      if (a.placeholder) lines.push(`  ⚠ placeholder (no handler) — synthesis was disabled`);
+    }
+    if (failed && failed.length) {
+      lines.push("");
+      lines.push("─── Failed (gap stays open, will retry next discovery) ───");
+      lines.push("");
+      for (const f of failed) {
+        lines.push(`• \`${f.capability_id}\` — ${f.phase}: ${f.error}`);
+        if (f.handler_path) lines.push(`  attempt: \`${f.handler_path}\``);
+      }
     }
     lines.push("");
     lines.push(`Retired gap: \`${retiredGap || "none"}\``);
     lines.push(`Retired watches: ${retiredWatches.length ? retiredWatches.map(w => `\`${w}\``).join(", ") : "none"}`);
-    lines.push("");
-    lines.push("The capability exists in the graph but has no handler yet. Invoking it will fail with `invalid_spec: no handler registered`. Wire it up when you're ready.");
   } else {
-    lines.push(`Proposal rejected — nothing adopted.`);
+    lines.push(`Proposal processed — nothing adopted.`);
     lines.push("");
     lines.push(`Proposal: \`${proposal.id}\``);
     lines.push(`Gap: \`${proposal.gap_id || "—"}\``);
     lines.push(`Wanted kind: ${proposal.gap_wanted_kind || "unknown"}`);
     lines.push("");
-    lines.push("The gap remains open. Discovery will propose again if a new candidate appears. Watches for this gap have been retired to prevent repeat emails.");
+    if (failed && failed.length) {
+      lines.push("─── Synthesis failures ───");
+      lines.push("");
+      for (const f of failed) {
+        lines.push(`• \`${f.capability_id}\` — ${f.phase}: ${f.error}`);
+        if (f.handler_path) lines.push(`  attempt: \`${f.handler_path}\``);
+      }
+      lines.push("");
+      lines.push("The gap remains open. Discovery will retry on the next tick. Watches for this gap have been retired to prevent repeat emails; new watches will be created when the gap is re-observed.");
+    } else {
+      lines.push("The gap remains open. Discovery will propose again if a new candidate appears.");
+    }
   }
   return lines.join("\n");
+}
+
+// v0.15.5 — record what the LLM tried so a human can inspect it without
+// polluting the live capability set. Retired immediately.
+function recordSynthesisAttempt(ctx, { proposal, candidate, phase, error, synthesis }) {
+  try {
+    const id = `synthesis_attempt:${proposal.id}:${candidate.id}:${Date.now()}`;
+    ctx.graph.putCapability({
+      id,
+      kind: "synthesis_attempt",
+      proposal_id: proposal.id,
+      candidate_id: candidate.id,
+      candidate_url: candidate.url || null,
+      gap_id: proposal.gap_id || null,
+      phase,
+      error: String(error || "").slice(0, 800),
+      handler_path: synthesis?.handler_path || null,
+      seed_path: synthesis?.seed_path || null,
+      capability_id_attempted: synthesis?.capability_id || null,
+      retired_at: Date.now(),
+      retired_reason: "synthesis_attempt_record",
+    });
+    ctx.events.emit("adoption.synthesis_attempt_recorded", {
+      proposal_id: proposal.id,
+      candidate_id: candidate.id,
+      phase,
+      error_preview: String(error || "").slice(0, 120),
+      attempt_id: id,
+    });
+  } catch (e) {
+    ctx.events.emit("adoption.synthesis_attempt_record_failed", { error: e.message });
+  }
 }
 
 export default async function agentryAdopt(input, ctx) {
@@ -86,10 +153,10 @@ export default async function agentryAdopt(input, ctx) {
   if (proposal.kind !== "proposal") throw new Error(`agentry.adopt: ${proposal_id} is kind "${proposal.kind}", not "proposal"`);
 
   if (proposal.adopted_at) {
-    return { output: { adopted: [], retired_gap: null, retired_watches: [], notified: false, reason: "already_adopted" }, cost: { time_ms: Date.now() - started } };
+    return { output: { adopted: [], failed: [], retired_gap: null, retired_watches: [], notified: false, reason: "already_adopted" }, cost: { time_ms: Date.now() - started } };
   }
   if (proposal.state !== "decided") {
-    return { output: { adopted: [], retired_gap: null, retired_watches: [], notified: false, reason: `state_is_${proposal.state || "unknown"}` }, cost: { time_ms: Date.now() - started } };
+    return { output: { adopted: [], failed: [], retired_gap: null, retired_watches: [], notified: false, reason: `state_is_${proposal.state || "unknown"}` }, cost: { time_ms: Date.now() - started } };
   }
 
   const decisions = proposal.decisions || {};
@@ -101,7 +168,22 @@ export default async function agentryAdopt(input, ctx) {
   for (const c of proposal.candidates || []) candidateById.set(c.id, c);
 
   const adopted = [];
+  const failed = [];
   const now = Date.now();
+
+  // ── Batch 14: synthesize → trial → adopt on pass ──
+  const synthCap = graph.getCapability("agentry.synthesize");
+  const trialCap = graph.getCapability("agentry.trial");
+  const synthesisAvailable = SYNTHESIS_ENABLED && synthCap && trialCap;
+
+  if (!synthesisAvailable) {
+    events.emit("adoption.synthesis_unavailable", {
+      proposal_id,
+      enabled: SYNTHESIS_ENABLED,
+      has_synthesize: !!synthCap,
+      has_trial: !!trialCap,
+    });
+  }
 
   for (const { candidateId } of approved) {
     const candidate = candidateById.get(candidateId);
@@ -109,7 +191,154 @@ export default async function agentryAdopt(input, ctx) {
       events.emit("adoption.candidate_missing", { proposal_id, candidate_id: candidateId });
       continue;
     }
-    const node = buildAdoptedCapability({ proposal, candidate });
+
+    // ── Fallback path: no synthesis available ──
+    if (!synthesisAvailable) {
+      const node = buildPlaceholderCapability({
+        proposal, candidate,
+        reason: !SYNTHESIS_ENABLED ? "synthesis_disabled" : "synthesis_capabilities_missing",
+      });
+      try {
+        graph.putCapability(node);
+        adopted.push({
+          candidate_id: candidateId,
+          candidate_url: candidate.url || null,
+          capability_id: node.id,
+          kind: node.kind,
+          placeholder: true,
+        });
+        events.emit("adoption.capability_added_placeholder", {
+          proposal_id, candidate_id: candidateId,
+          capability_id: node.id, kind: node.kind, source: node.source,
+          reason: node.placeholder_reason,
+        });
+      } catch (e) {
+        events.emit("adoption.capability_add_failed", { proposal_id, candidate_id: candidateId, error: e.message });
+        failed.push({ candidate_id: candidateId, capability_id: node.id, phase: "node_write", error: e.message });
+      }
+      continue;
+    }
+
+    // ── Synthesis path ──
+    let synthesis = null;
+    try {
+      const synRes = await ctx.invoke("agentry.synthesize", {
+        proposal_id,
+        candidate_id: candidateId,
+      }, { tenant: "local", by: "agentry.adopt" });
+
+      if (!synRes.ok) {
+        const errMsg = synRes.error.message;
+        events.emit("adoption.synthesize_failed", {
+          proposal_id, candidate_id: candidateId,
+          code: synRes.error.code, message: errMsg,
+        });
+        recordSynthesisAttempt(ctx, { proposal, candidate, phase: "synthesize", error: errMsg });
+        failed.push({
+          candidate_id: candidateId,
+          capability_id: proposal.gap_wanted_id || proposal.gap_id,
+          phase: "synthesize",
+          error: errMsg,
+        });
+        continue;
+      }
+
+      synthesis = synRes.output;
+      events.emit("adoption.synthesize_completed", {
+        proposal_id, candidate_id: candidateId,
+        capability_id: synthesis.capability_id,
+        handler_path: synthesis.handler_path,
+      });
+    } catch (e) {
+      events.emit("adoption.synthesize_threw", { proposal_id, candidate_id: candidateId, error: e.message });
+      recordSynthesisAttempt(ctx, { proposal, candidate, phase: "synthesize_threw", error: e.message });
+      failed.push({
+        candidate_id: candidateId,
+        capability_id: proposal.gap_wanted_id || proposal.gap_id,
+        phase: "synthesize",
+        error: e.message,
+      });
+      continue;
+    }
+
+    // ── Trial ──
+    let trial = null;
+    try {
+      const trialRes = await ctx.invoke("agentry.trial", {
+        capability_id: synthesis.capability_id,
+        handler_path: synthesis.handler_path,
+        seed_path: synthesis.seed_path,
+      }, { tenant: "local", by: "agentry.adopt" });
+
+      if (!trialRes.ok || !trialRes.output?.ok) {
+        const errMsg = trialRes.error?.message || trialRes.output?.error || "trial failed";
+        const phase = trialRes.output?.phase || "trial";
+        events.emit("adoption.trial_failed", {
+          proposal_id, candidate_id: candidateId,
+          capability_id: synthesis.capability_id,
+          phase,
+          error: errMsg,
+        });
+        recordSynthesisAttempt(ctx, {
+          proposal, candidate, phase: `trial_${phase}`,
+          error: errMsg, synthesis,
+        });
+        failed.push({
+          candidate_id: candidateId,
+          capability_id: synthesis.capability_id,
+          phase: `trial_${phase}`,
+          error: errMsg,
+          handler_path: synthesis.handler_path,
+        });
+        continue;
+      }
+
+      trial = trialRes.output;
+      events.emit("adoption.trial_completed", {
+        proposal_id, candidate_id: candidateId,
+        capability_id: synthesis.capability_id,
+        session: trial.session,
+      });
+    } catch (e) {
+      events.emit("adoption.trial_threw", { proposal_id, candidate_id: candidateId, error: e.message });
+      recordSynthesisAttempt(ctx, { proposal, candidate, phase: "trial_threw", error: e.message, synthesis });
+      failed.push({
+        candidate_id: candidateId,
+        capability_id: synthesis.capability_id,
+        phase: "trial_threw",
+        error: e.message,
+        handler_path: synthesis.handler_path,
+      });
+      continue;
+    }
+
+    // ── Pass. Write the real capability node. ──
+    const node = {
+      id: synthesis.capability_id,
+      kind: synthesis.kind,
+      invoked_via: "invoker.in_process_js",
+      handler: synthesis.capability_id,
+      handler_file: synthesis.handler_path,
+      accepts: synthesis.spec?.capability?.accepts || null,
+      produces: synthesis.spec?.capability?.produces || null,
+      requires: synthesis.spec?.capability?.requires || {},
+      source: `synthesized:${candidate.kind === "repo" ? "github" : "web"}:${candidate.id}`,
+      notes: candidate.url || null,
+      trial: false,
+      trial_passed_at: Date.now(),
+      adopted_from: {
+        proposal_id: proposal.id,
+        candidate_id: candidate.id,
+        candidate_name: candidate.name || null,
+        candidate_url: candidate.url || null,
+        candidate_kind: candidate.kind || null,
+        synthesized_at: now,
+        handler_path: synthesis.handler_path,
+        seed_path: synthesis.seed_path,
+        trial_session: trial.session,
+      },
+    };
+
     try {
       graph.putCapability(node);
       adopted.push({
@@ -117,16 +346,28 @@ export default async function agentryAdopt(input, ctx) {
         candidate_url: candidate.url || null,
         capability_id: node.id,
         kind: node.kind,
+        handler_path: synthesis.handler_path,
+        trial_session: trial.session,
       });
       events.emit("adoption.capability_added", {
         proposal_id, candidate_id: candidateId,
-        capability_id: node.id, kind: node.kind, source: node.source,
+        capability_id: node.id, kind: node.kind,
+        handler_path: synthesis.handler_path,
+        source: node.source,
       });
     } catch (e) {
       events.emit("adoption.capability_add_failed", { proposal_id, candidate_id: candidateId, error: e.message });
+      failed.push({
+        candidate_id: candidateId,
+        capability_id: synthesis.capability_id,
+        phase: "node_write",
+        error: e.message,
+        handler_path: synthesis.handler_path,
+      });
     }
   }
 
+  // ── Retire gap only if at least one capability landed ──
   let retiredGap = null;
   if (adopted.length > 0 && proposal.gap_id) {
     const gap = graph.getCapability(proposal.gap_id);
@@ -141,7 +382,7 @@ export default async function agentryAdopt(input, ctx) {
     }
   }
 
-  // Retire watches: exact gap_id OR prefix "<gap_id>::"
+  // ── Retire watches: exact gap_id OR prefix "<gap_id>::" ──
   const retiredWatches = [];
   if (proposal.gap_id) {
     const exact = proposal.gap_id;
@@ -168,18 +409,23 @@ export default async function agentryAdopt(input, ctx) {
     adopted_at: now,
     state: adopted.length > 0 ? "adopted" : "rejected",
     adopted_capability_ids: adopted.map(a => a.capability_id),
+    failed_syntheses: failed.map(f => ({
+      candidate_id: f.candidate_id,
+      capability_id: f.capability_id,
+      phase: f.phase,
+      error: f.error,
+    })),
     retired_gap_id: retiredGap,
     retired_watch_ids: retiredWatches,
   });
 
   events.emit("proposal.adopted", {
-    proposal_id, adopted, retired_gap: retiredGap, retired_watches: retiredWatches,
+    proposal_id, adopted, failed,
+    retired_gap: retiredGap, retired_watches: retiredWatches,
     decision: adopted.length > 0 ? "adopted" : "rejected",
   });
 
   // ─── Checkpoint on growth ───
-  // The graph just changed. Force an out-of-cycle save so an adoption
-  // survives a crash before the next 5-minute autosave tick.
   if (adopted.length > 0) {
     try {
       await ctx.invoke("agentry.checkpoint", {
@@ -187,14 +433,15 @@ export default async function agentryAdopt(input, ctx) {
       }, { tenant: "local", by: "agentry.adopt" });
     } catch (e) {
       events.emit("adoption.checkpoint_failed", { proposal_id, error: e.message });
-      // Non-fatal. The 5-minute autosave will eventually catch up.
     }
   }
 
-  const body = renderAdoptionEmail({ proposal, adopted, retiredGap, retiredWatches });
+  const body = renderAdoptionEmail({ proposal, adopted, failed, retiredGap, retiredWatches });
   const subject = adopted.length > 0
     ? `[agentry] adopted: ${adopted.map(a => a.capability_id).join(", ")}`
-    : `[agentry] rejected: ${proposal.gap_wanted_kind || proposal.id}`;
+    : (failed.length > 0
+        ? `[agentry] synthesis failed: ${proposal.gap_wanted_kind || proposal.id}`
+        : `[agentry] rejected: ${proposal.gap_wanted_kind || proposal.id}`);
 
   let notified = false;
   try {
@@ -226,10 +473,15 @@ export default async function agentryAdopt(input, ctx) {
 
   return {
     output: {
-      adopted, retired_gap: retiredGap, retired_watches: retiredWatches,
+      adopted,
+      failed,
+      retired_gap: retiredGap,
+      retired_watches: retiredWatches,
       notified,
       delivered_via: notified ? "notify.fallback" : null,
-      reason: adopted.length > 0 ? "adopted" : "rejected",
+      reason: adopted.length > 0
+        ? "adopted"
+        : (failed.length > 0 ? "synthesis_failed" : "rejected"),
     },
     cost: { time_ms: Date.now() - started },
   };

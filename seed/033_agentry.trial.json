@@ -1,0 +1,22 @@
+{
+  "id": "agentry.trial",
+  "kind": "agentry",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.trial",
+  "accepts": {
+    "capability_id": "string",
+    "handler_path": "string",
+    "seed_path": { "type": "string", "optional": true },
+    "session": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "capability_id": "string",
+    "session": "string",
+    "handler_path": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 60000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Writes a trial node, prepares the trial session, imports the handler, runs accept(). On pass, clears the trial marker. On fail, retires the trial node."
+}
