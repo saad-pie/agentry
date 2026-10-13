@@ -59,12 +59,22 @@ export const capability = {
   adopted_from: ADOPTED_FROM,
 };
 
-// Acceptance test. Runs against a known URL and asserts the output
-// shape. The adoption pipeline runs this after installing deps; if it
-// fails, the capability is not registered.
-export async function accept(deps) {
+// Acceptance test.
+//
+// Self-contained: prepares its own session, then probes example.com.
+// The installer is idempotent — after the first run, prepareSession
+// is a no-op because the session carries a `prepared:bua.screenshot`
+// marker in its env.
+//
+// Uses a DEDICATED session ("bua-accept-test") so the test never
+// collides with runtime invocations that might be using a different
+// session name.
+export async function accept(deps, { session = "bua-accept-test" } = {}) {
+  const { prepareSession } = await import("../runtime/installer.mjs");
+  await prepareSession(deps, { capId: CAP_ID, session });
+
   const probe = await run(
-    { url: "https://example.com", width: 640, height: 480 },
+    { url: "https://example.com", width: 640, height: 480, session },
     deps
   );
   const out = probe.output || probe;
@@ -76,7 +86,7 @@ export async function accept(deps) {
   if (out.url !== "https://example.com") {
     throw new Error(`accept: URL mismatch (${out.url})`);
   }
-  return { ok: true, bytes: out.bytes };
+  return { ok: true, bytes: out.bytes, session };
 }
 
 async function run(input, ctx) {
