@@ -1,0 +1,20 @@
+{
+  "id": "agentry.checkpoint",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.checkpoint",
+  "accepts": {
+    "reason": { "type": "string", "optional": true },
+    "paths": { "type": "array", "optional": true }
+  },
+  "produces": {
+    "committed": "boolean",
+    "pushed": "boolean",
+    "sha": "string|null",
+    "reason": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 5000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Force an immediate save-to-GitHub of the state directory. Triggers an out-of-cycle commit+push so events that matter (capability adopted) survive a crash before the next autosave tick. Idempotent when there's nothing to commit."
+}

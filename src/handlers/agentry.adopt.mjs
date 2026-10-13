@@ -4,6 +4,10 @@
 // Notify: routes through notify.fallback so a Gmail outage doesn't
 // swallow the adoption follow-up. On failure, notify.console writes
 // the full body to stdout — visible in the HF Space log.
+//
+// Save-on-growth: after the adoption writes a new capability and
+// retires the gap, we force an out-of-cycle checkpoint to GitHub so
+// the growth survives a container crash before the next autosave tick.
 
 const DEFAULT_NOTIFY = "notify.email.gmail";
 const REASON_SEP = "::";
@@ -172,6 +176,20 @@ export default async function agentryAdopt(input, ctx) {
     proposal_id, adopted, retired_gap: retiredGap, retired_watches: retiredWatches,
     decision: adopted.length > 0 ? "adopted" : "rejected",
   });
+
+  // ─── Checkpoint on growth ───
+  // The graph just changed. Force an out-of-cycle save so an adoption
+  // survives a crash before the next 5-minute autosave tick.
+  if (adopted.length > 0) {
+    try {
+      await ctx.invoke("agentry.checkpoint", {
+        reason: `adopt:${adopted.length}_capabilities`,
+      }, { tenant: "local", by: "agentry.adopt" });
+    } catch (e) {
+      events.emit("adoption.checkpoint_failed", { proposal_id, error: e.message });
+      // Non-fatal. The 5-minute autosave will eventually catch up.
+    }
+  }
 
   const body = renderAdoptionEmail({ proposal, adopted, retiredGap, retiredWatches });
   const subject = adopted.length > 0

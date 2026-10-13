@@ -12,32 +12,28 @@
 //
 // Speed: uses llm.openai_compat directly (~2s). Records the gap
 // synchronously. The proposal is generated later by the discovery loop.
+//
+// Save-on-growth: when a gap is recorded, force a checkpoint so the
+// new gap survives a crash before the next autosave tick.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
 function buildModelChain(input) {
   const chain = [];
-  // 1. The model the harness told us it's running on. This is the most
-  //    likely to succeed — it just called us with it.
   if (input?.model && typeof input.model === "string" && input.model.length > 0) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
-  // 2. agentry's configured reasoning model.
   const configured = process.env.AGENTRY_REASON_MODEL;
   if (configured) {
     chain.push({ provider: null, model: configured, source: "env" });
   } else {
     chain.push({ provider: "atria", model: "space-bunny-alpha:free", source: "default" });
   }
-  // 3. Fallback chain across providers. Same philosophy as
-  //    agentry.proposal's MODEL_CHAIN. One provider's outage must
-  //    never kill the reasoning path.
   chain.push(
-    { provider: "google",    model: "gemini-2.5-flash",       source: "fallback" },
-    { provider: "unorouter", model: "gpt-oss-20b:free",       source: "fallback" },
-    { provider: "unorouter", model: "glm-5.3-flash:free",     source: "fallback" },
+    { provider: "google",    model: "gemini-2.5-flash",   source: "fallback" },
+    { provider: "unorouter", model: "gpt-oss-20b:free",   source: "fallback" },
+    { provider: "unorouter", model: "glm-5.3-flash:free", source: "fallback" },
   );
-  // De-dupe by model id, preserve order.
   const seen = new Set();
   return chain.filter(c => {
     if (seen.has(c.model)) return false;
@@ -124,7 +120,7 @@ export default async function agentryReason(input, ctx) {
         messages,
         temperature: 0.1,
         max_tokens: 800,
-        accept_from: null,   // permissive — accept whatever free model the router serves
+        accept_from: null,
       }, { tenant: "local", by: "agentry.reason" });
 
       if (!llmRes.ok) {
@@ -198,6 +194,19 @@ export default async function agentryReason(input, ctx) {
       ctx.events.emit("agentry.reason.gap_record_failed", {
         error: e.message, wanted_id: parsed.missing.wanted_id,
       });
+    }
+  }
+
+  // Checkpoint on gap record. Gaps are half the graph; losing one
+  // in the crash window is expensive.
+  if (gap_id) {
+    try {
+      await ctx.invoke("agentry.checkpoint", {
+        reason: `reason:gap_recorded:${gap_id}`,
+      }, { tenant: "local", by: "agentry.reason" });
+    } catch (e) {
+      ctx.events.emit("reason.checkpoint_failed", { gap_id, error: e.message });
+      // Non-fatal.
     }
   }
 

@@ -1,0 +1,33 @@
+{
+  "id": "bua.screenshot",
+  "kind": "bua",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "bua.screenshot",
+  "accepts": {
+    "url": "string",
+    "width": { "type": "number", "optional": true },
+    "height": { "type": "number", "optional": true },
+    "full_page": { "type": "boolean", "optional": true },
+    "session": { "type": "string", "optional": true },
+    "timeout_ms": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "png_base64": "string",
+    "bytes": "number",
+    "url": "string",
+    "captured_at": "number",
+    "width": "number",
+    "height": "number"
+  },
+  "requires": {
+    "npm": ["playwright"],
+    "post_install": "npx playwright install chromium"
+  },
+  "source": "adopted:github:microsoft/playwright",
+  "notes": "https://github.com/microsoft/playwright",
+  "adopted_from": {
+    "candidate_id": "microsoft/playwright",
+    "candidate_url": "https://github.com/microsoft/playwright",
+    "candidate_kind": "repo"
+  }
+}
