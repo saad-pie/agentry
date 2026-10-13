@@ -17,6 +17,20 @@ export async function prepareSession(deps, { capId, session }) {
 
   const requires = cap.requires || {};
 
+  // Ensure the session exists before we try to install into it.
+  // session.create is idempotent — returns { created: false } if it
+  // already exists.
+  const createRes = await invoke(
+    "agentry.os",
+    { action: "session.create", id: session },
+    { tenant: "local", by: "installer" }
+  );
+  if (!createRes.ok) {
+    throw new Error(
+      `installer: session.create failed — ${createRes.error.code}: ${createRes.error.message}`
+    );
+  }
+
   // Already prepared?
   const sessionEnv = await getSessionEnv(invoke, session);
   if (sessionEnv[PREPARE_KEY(capId)]) {
