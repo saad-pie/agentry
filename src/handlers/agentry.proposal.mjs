@@ -1,15 +1,16 @@
 // agentry/src/handlers/agentry.proposal.mjs
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
-// v0.15.6: MODEL_CHAIN reordered (Groq first). The provider field is
-// now passed through to llm.openai_compat — before this it was dropped
-// and every call went to atria regardless of the chain entry.
+// v0.15.10: Groq-first chain (gpt-oss-120b / gpt-oss-20b / qwen3.8-27b),
+// Google fallback. max_tokens raised 1500 → 4000 because reasoning models
+// spend budget on the reasoning field before emitting content.
 
 import { randomBytes } from "node:crypto";
 
 const MODEL_CHAIN = [
-  { provider: "groq", model: "llama-3.3-70b-versatile" },
-  { provider: "groq", model: "llama-3.1-8b-instant" },
+  { provider: "groq", model: "openai/gpt-oss-120b" },
+  { provider: "groq", model: "openai/gpt-oss-20b" },
+  { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
 
@@ -129,7 +130,7 @@ async function analyze(deps, gap, candidates) {
         model,
         messages,
         temperature: 0.1,
-        max_tokens: 1500,
+        max_tokens: 4000,
         accept_from: ACCEPT_FREE_OR_QUOTA,
       }, { tenant: "local", by: "agentry.proposal" });
 

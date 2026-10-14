@@ -1,9 +1,12 @@
-// agentry/src/handlers/agentry.synthesize.mjs                         //
+// agentry/src/handlers/agentry.synthesize.mjs
+//
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
-// v0.15.6:
-//   - Multi-provider fallback chain (Plugsky first, then atria, google)
+// v0.15.10:
+//   - Groq-first chain (gpt-oss-120b / gpt-oss-20b / qwen3.8-27b), Google fallback.
+//   - max_tokens raised to 8000: reasoning models consume budget on the
+//     reasoning field before emitting content. 4000 was truncating specs.
 //   - Repo read fix: kernel's git.clone writes to <session>/<repo-name>/
 //     not <session>/repo/. Read the actual directory listing instead of
 //     assuming.
@@ -22,9 +25,9 @@ const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
 
 const MODEL_CHAIN = [
-  { provider: "groq", model: "llama-3.3-70b-versatile" },
-  { provider: "groq", model: "llama-3.1-8b-instant" },
-  { provider: "groq", model: "meta-llama/llama-4-scout-17b-16e-instruct" },
+  { provider: "groq", model: "openai/gpt-oss-120b" },
+  { provider: "groq", model: "openai/gpt-oss-20b" },
+  { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
 
@@ -451,7 +454,7 @@ export default async function agentrySynthesize(input, ctx) {
         model,
         messages,
         temperature: 0.1,
-        max_tokens: 4000,
+        max_tokens: 8000,
       }, { tenant: "local", by: "agentry.synthesize" });
     } catch (e) {
       attempts.push({ provider, model, ok: false, error: e.message });

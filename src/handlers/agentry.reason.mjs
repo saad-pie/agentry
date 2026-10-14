@@ -1,9 +1,9 @@
 // agentry/src/handlers/agentry.reason.mjs
 // The reasoning capability the harness calls when it hits a wall.
 //
-// v0.15.6: provider is now passed through to llm.openai_compat so the
-// chain actually routes. Before this, provider was in the chain array
-// but dropped at the invoke boundary — everything went to atria.
+// v0.15.10: Groq-first chain (gpt-oss-120b / gpt-oss-20b / qwen3.8-27b),
+// Google fallback. max_tokens raised 800 → 3000: reasoning models burn
+// budget on the reasoning field before emitting JSON.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -13,8 +13,9 @@ function buildModelChain(input) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
   chain.push(
-    { provider: "groq", model: "llama-3.3-70b-versatile", source: "primary" },
-    { provider: "groq", model: "llama-3.1-8b-instant", source: "fallback" },
+    { provider: "groq", model: "openai/gpt-oss-120b", source: "primary" },
+    { provider: "groq", model: "openai/gpt-oss-20b", source: "fallback" },
+    { provider: "groq", model: "qwen/qwen3.8-27b", source: "fallback" },
     { provider: "google", model: "gemini-2.5-flash", source: "fallback" },
   );
   const seen = new Set();
@@ -103,7 +104,7 @@ export default async function agentryReason(input, ctx) {
         model,
         messages,
         temperature: 0.1,
-        max_tokens: 800,
+        max_tokens: 3000,
         accept_from: null,
       }, { tenant: "local", by: "agentry.reason" });
 
