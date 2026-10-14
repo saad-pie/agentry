@@ -1,20 +1,9 @@
 // agentry/src/handlers/agentry.reason.mjs
 // The reasoning capability the harness calls when it hits a wall.
 //
-// Contract:
-//   input:  { failure, attempted?, intent?, workspace_id?, session_id?, model? }
-//   output: { analysis, missing, immediate_action, gap_recorded, suggestions, model_used }
-//
-// Model selection:
-//   If the harness tells us which model IT is running on (input.model), we
-//   try that FIRST — it's the one we know just worked, because the harness
-//   called us with it. The rest of the chain is a fallback net.
-//
-// Speed: uses llm.openai_compat directly (~2s). Records the gap
-// synchronously. The proposal is generated later by the discovery loop.
-//
-// Save-on-growth: when a gap is recorded, force a checkpoint so the
-// new gap survives a crash before the next autosave tick.
+// v0.15.6: provider is now passed through to llm.openai_compat so the
+// chain actually routes. Before this, provider was in the chain array
+// but dropped at the invoke boundary — everything went to atria.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -23,15 +12,12 @@ function buildModelChain(input) {
   if (input?.model && typeof input.model === "string" && input.model.length > 0) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
-  const configured = process.env.AGENTRY_REASON_MODEL;
-  if (configured) {
-    chain.push({ provider: null, model: configured, source: "env" });
-  } else {
-    chain.push({ provider: "atria", model: "space-bunny-alpha:free", source: "default" });
-  }
   chain.push(
-    { provider: "google",    model: "gemini-2.5-flash",   source: "fallback" },
-    { provider: "unorouter", model: "gpt-oss-20b:free",   source: "fallback" },
+    { provider: "plugsky", model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", source: "primary" },
+    { provider: "plugsky", model: "openai/gpt-oss-20b", source: "fallback" },
+    { provider: "atria",   model: "space-bunny-alpha:free", source: "fallback" },
+    { provider: "google",  model: "gemini-2.5-flash", source: "fallback" },
+    { provider: "unorouter", model: "gpt-oss-20b:free", source: "fallback" },
     { provider: "unorouter", model: "glm-5.3-flash:free", source: "fallback" },
   );
   const seen = new Set();
@@ -116,6 +102,7 @@ export default async function agentryReason(input, ctx) {
   for (const { provider, model, source } of chain) {
     try {
       const llmRes = await ctx.invoke("llm.openai_compat", {
+        provider,
         model,
         messages,
         temperature: 0.1,
@@ -197,8 +184,7 @@ export default async function agentryReason(input, ctx) {
     }
   }
 
-  // Checkpoint on gap record. Gaps are half the graph; losing one
-  // in the crash window is expensive.
+  // Checkpoint on gap record.
   if (gap_id) {
     try {
       await ctx.invoke("agentry.checkpoint", {
@@ -206,7 +192,6 @@ export default async function agentryReason(input, ctx) {
       }, { tenant: "local", by: "agentry.reason" });
     } catch (e) {
       ctx.events.emit("reason.checkpoint_failed", { gap_id, error: e.message });
-      // Non-fatal.
     }
   }
 

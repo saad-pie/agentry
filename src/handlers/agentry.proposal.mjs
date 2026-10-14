@@ -1,28 +1,19 @@
 // agentry/src/handlers/agentry.proposal.mjs
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
-// Model chain: try each provider in order, first that returns
-// parseable JSON wins. Never let one provider's downtime kill the
-// whole proposal.
-//
-// Notify: routes through notify.fallback so that if Gmail is
-// unavailable, the proposal still lands in the HF Space log via
-// notify.console.
+// v0.15.6: MODEL_CHAIN reordered (Plugsky first). The provider field is
+// now passed through to llm.openai_compat — before this it was dropped
+// and every call went to atria regardless of the chain entry.
 
 import { randomBytes } from "node:crypto";
 
-// Fallback chain across providers. Each entry is {provider, model}.
-// The harness's `space-bunny-alpha:free` is first (most reliable in
-// practice) but the whole chain exists because any one provider can
-// rate-limit or 429 at any moment.
 const MODEL_CHAIN = [
-  { provider: "atria",     model: "space-bunny-alpha:free" },
-  { provider: "google",    model: "gemini-2.5-flash" },
-  { provider: "unorouter", model: "gpt-oss-20b:free" },
-  { provider: "unorouter", model: "glm-5.3-flash:free" },
+  { provider: "plugsky", model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
+  { provider: "plugsky", model: "openai/gpt-oss-20b" },
+  { provider: "google",  model: "gemini-2.5-flash" },
+  { provider: "atria",   model: "space-bunny-alpha:free" },
 ];
 
-// null = permissive (accept whatever free model the router returns).
 const ACCEPT_FREE_OR_QUOTA = null;
 
 const APPROVAL_BASE_URL = process.env.AGENTRY_APPROVAL_BASE_URL || null;
@@ -78,13 +69,11 @@ function userPrompt(gap, candidates) {
     name: c.name,
     url: c.url,
     description: c.description || null,
-    // github-only
     stars: c.stars ?? null,
     language: c.language ?? null,
     license: c.license ?? null,
     pushed_at: c.pushed_at ?? null,
     topics: c.topics || [],
-    // web-only
     domain: c.domain ?? null,
   }));
   return `GAP:
@@ -138,6 +127,7 @@ async function analyze(deps, gap, candidates) {
   for (const { provider, model } of MODEL_CHAIN) {
     try {
       const res = await deps.invoke("llm.openai_compat", {
+        provider,
         model,
         messages,
         temperature: 0.1,
@@ -293,10 +283,6 @@ export default async function agentryProposal(input, ctx) {
   const body = renderEmail({ gap, analysis, perCandidateTokens, approveBase });
   const subject = `[agentry] proposal: ${analysis.recommended_id || `${candidates.length} candidates`} for ${gap.wanted_kind || gap.id}`;
 
-  // Route through notify.fallback so a Gmail outage doesn't swallow
-  // the proposal. On failure, notify.console writes the full body
-  // (including approve/reject URLs) to stdout — visible in the HF
-  // Space log.
   const notifyRes = await deps.invoke("notify.fallback", {
     subject,
     body_markdown: body,

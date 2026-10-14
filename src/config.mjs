@@ -1,9 +1,8 @@
-// agentry/src/config.mjs
-// The single source of truth for paths and secrets.
+// agentry/src/config.mjs                                              // The single source of truth for paths and secrets.
 // Nothing else in agentry reads process.env directly. Ever.
 //
 // Why: so we never repeat the "hardcoded /tmp" mistake. Every path comes from here.
-
+                                                                       
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -58,11 +57,32 @@ export function loadConfig(overrides = {}) {
       cx: env("GOOGLE_CSE_CX", null),
     },
 
-    // LLM provider (the one your harness uses)
+    // LLM providers. Each entry is { baseUrl, apiKey }. Callers pass a
+    // `provider` name to llm.openai_compat; the handler resolves baseUrl
+    // + apiKey from this map. If provider is omitted, "atria" is used
+    // (backwards compat with every call site written before v0.15.6).
     llm: {
       baseUrl: env("ATRIA_BASE_URL", "https://antigravity-seven-delta.vercel.app/v1"),
       apiKey: env("ATRIA_API_KEY", "antigravity-free"),
-      metaFile: env("AGENTRY_META_FILE", null),   // path to models.meta.json if present
+      metaFile: env("AGENTRY_META_FILE", null),
+      providers: {
+        atria: {
+          baseUrl: env("ATRIA_BASE_URL", "https://antigravity-seven-delta.vercel.app/v1"),
+          apiKey: env("ATRIA_API_KEY", "antigravity-free"),
+        },
+        plugsky: {
+          baseUrl: env("PLUGSKY_BASE_URL", "https://api.plugsky.ai/v1"),
+          apiKey: env("PLUGSKY_API_KEY", null),
+        },
+        google: {
+          baseUrl: env("ATRIA_BASE_URL", "https://antigravity-seven-delta.vercel.app/v1"),
+          apiKey: env("ATRIA_API_KEY", "antigravity-free"),
+        },
+        unorouter: {
+          baseUrl: env("ATRIA_BASE_URL", "https://antigravity-seven-delta.vercel.app/v1"),
+          apiKey: env("ATRIA_API_KEY", "antigravity-free"),
+        },
+      },
     },
 
     // Runtime behavior

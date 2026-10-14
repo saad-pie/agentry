@@ -1,10 +1,10 @@
 // agentry/src/handlers/llm.openai_compat.mjs
 // OpenAI-compatible chat completions with dynamic model verification.
 //
-// New: accepts `accept_from` — a predicate spec describing which models
-// are acceptable responses. If set, and the provider returns a model that
-// doesn't satisfy the predicate, the handler rejects with a `substituted`
-// error. If not set, no verification (backwards compatible).
+// v0.15.6: honors the `provider` input. If set, resolves baseUrl + apiKey
+// from config.llm.providers[provider]. If not set, falls back to the
+// top-level baseUrl/apiKey (backwards compat with everything written
+// before v0.15.6).
 
 import { ModelRegistry } from "../model_registry.mjs";
 
@@ -37,12 +37,13 @@ function satisfies(modelEntry, acceptFrom) {
 export default async function llmOpenAICompat(input, ctx) {
   const {
     model,
+    provider,
     messages,
     temperature = 0.2,
     max_tokens = 1024,
-    response_format,       // optional: { type: "json_object" }
+    response_format,
     timeout_ms = 30000,
-    accept_from,           // optional: { model?, provider?, limit_type? }
+    accept_from,
   } = input || {};
 
   if (!model) throw new Error("llm.openai_compat requires 'model'");
@@ -51,8 +52,25 @@ export default async function llmOpenAICompat(input, ctx) {
   }
 
   const cfg = ctx.config?.llm || {};
-  const baseUrl = cfg.baseUrl || "https://antigravity-seven-delta.vercel.app/v1";
-  const apiKey = cfg.apiKey || "antigravity-free";
+  const providers = cfg.providers || {};
+
+  // Resolve the target provider.
+  let baseUrl, apiKey;
+  if (provider) {
+    const p = providers[provider];
+    if (!p) {
+      throw new Error(`llm.openai_compat: unknown provider "${provider}" — add it to config.llm.providers`);
+    }
+    if (!p.apiKey) {
+      throw new Error(`llm.openai_compat: provider "${provider}" has no apiKey configured`);
+    }
+    baseUrl = p.baseUrl;
+    apiKey = p.apiKey;
+  } else {
+    baseUrl = cfg.baseUrl || "https://antigravity-seven-delta.vercel.app/v1";
+    apiKey = cfg.apiKey || "antigravity-free";
+  }
+
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
 
   const body = { model, messages, temperature, max_tokens };
@@ -109,7 +127,6 @@ export default async function llmOpenAICompat(input, ctx) {
   const usage = data?.usage || {};
   const returnedModelId = data?.model || model;
 
-  // ---- dynamic verification against the live registry ----
   if (accept_from) {
     const reg = await getRegistry(ctx);
     const entry = reg.models.get(returnedModelId);

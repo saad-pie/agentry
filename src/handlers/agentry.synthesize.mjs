@@ -3,12 +3,11 @@
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
-//   1. Resolve proposal + candidate + gap from the graph.
-//   2. If candidate.kind === "repo": clone into a kernel session,
-//      read README + manifest. Facts, not vibes.
-//   3. Ask the LLM for a SPEC (JSON slots, not freeform code).
-//   4. Render the spec into a .mjs handler + a seed .json.
-//   5. Return paths. Do NOT write the graph. Trial gates that.
+// v0.15.6:
+//   - Multi-provider fallback chain (Plugsky first, then atria, google)
+//   - Repo read fix: kernel's git.clone writes to <session>/<repo-name>/
+//     not <session>/repo/. Read the actual directory listing instead of
+//     assuming.
 
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -20,10 +19,15 @@ const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR
 const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR
   || "/tmp/home/.dsh/agentry-synthesized/seeds";
 const REFERENCE_FILE = "bua.screenshot.mjs";
-const DEFAULT_SYNTH_MODEL = process.env.AGENTRY_SYNTH_MODEL || "gpt-oss-20b:free";
-const DEFAULT_SYNTH_PROVIDER = process.env.AGENTRY_SYNTH_PROVIDER || "unorouter";
 const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
+
+const MODEL_CHAIN = [
+  { provider: "plugsky", model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
+  { provider: "plugsky", model: "openai/gpt-oss-20b" },
+  { provider: "atria",   model: "space-bunny-alpha:free" },
+  { provider: "google",  model: "gemini-2.5-flash" },
+];
 
 // ─────────────────────────────────────────────────────────────
 // Repo fact gathering — deterministic, no LLM
@@ -43,6 +47,7 @@ async function readRepoTerritory(candidate, deps) {
     manifest: null,
     manifest_path: null,
     top_level: [],
+    repo_dir: null,
     error: null,
   };
 
@@ -60,25 +65,58 @@ async function readRepoTerritory(candidate, deps) {
     }
     facts.cloned = true;
 
-    const listRes = await invoke("agentry.os", {
+    // The kernel writes git.clone results to <session>/<repo-name>/, not
+    // <session>/repo/. List the session root to find the real directory.
+    const rootListRes = await invoke("agentry.os", {
       action: "fs.list",
       session,
-      path: "repo",
+      path: ".",
     }, { tenant: "local", by: "agentry.synthesize" });
 
-    if (listRes.ok) {
-      const entries = listRes.output?.result?.entries || listRes.output?.entries || [];
-      facts.top_level = Array.isArray(entries)
-        ? entries.slice(0, 40).map(e => (typeof e === "string" ? e : e.name))
-        : [];
+    let rootEntries = [];
+    if (rootListRes.ok) {
+      const e = rootListRes.output?.result?.entries || rootListRes.output?.entries || [];
+      rootEntries = Array.isArray(e) ? e.map(x => typeof x === "string" ? x : x.name) : [];
     }
+
+    // Find the cloned repo directory. Candidate names: "playwright", "repo",
+    // or anything that isn't a dotfile.
+    const repoCandidates = [
+      "repo",
+      candidate.name,
+      candidate.id.split("/").pop(),
+      ...rootEntries.filter(n => !n.startsWith(".") && n !== "package.json"),
+    ].filter(Boolean);
+
+    let repoDir = null;
+    for (const dir of repoCandidates) {
+      const check = await invoke("agentry.os", {
+        action: "fs.list",
+        session,
+        path: dir,
+      }, { tenant: "local", by: "agentry.synthesize" });
+      if (check.ok) {
+        const inner = check.output?.result?.entries || check.output?.entries || [];
+        if (Array.isArray(inner) && inner.length > 0) {
+          repoDir = dir;
+          facts.top_level = inner.slice(0, 40).map(x => typeof x === "string" ? x : x.name);
+          break;
+        }
+      }
+    }
+
+    if (!repoDir) {
+      facts.error = "could not find cloned repo dir. session root: " + JSON.stringify(rootEntries);
+      return facts;
+    }
+    facts.repo_dir = repoDir;
 
     const readmeCandidates = ["README.md", "README.rst", "README.txt", "Readme.md", "readme.md"];
     for (const name of readmeCandidates) {
       const r = await invoke("agentry.os", {
         action: "fs.read",
         session,
-        path: "repo/" + name,
+        path: repoDir + "/" + name,
       }, { tenant: "local", by: "agentry.synthesize" });
       if (r.ok && r.output?.content) {
         facts.readme = String(r.output.content).slice(0, MAX_README_CHARS);
@@ -94,7 +132,7 @@ async function readRepoTerritory(candidate, deps) {
       const r = await invoke("agentry.os", {
         action: "fs.read",
         session,
-        path: "repo/" + name,
+        path: repoDir + "/" + name,
       }, { tenant: "local", by: "agentry.synthesize" });
       if (r.ok && r.output?.content) {
         facts.manifest = String(r.output.content).slice(0, MAX_MANIFEST_CHARS);
@@ -130,7 +168,8 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   }, null, 2);
 
   const repoFacts = facts.cloned
-    ? "Top-level files:\n" + (facts.top_level.join("\n") || "(none listed)") + "\n\n"
+    ? "Repo directory: " + (facts.repo_dir || "(unknown)") + "\n"
+      + "Top-level files:\n" + (facts.top_level.join("\n") || "(none listed)") + "\n\n"
       + (facts.readme ? "README:\n<<<\n" + facts.readme + "\n>>>\n\n" : "")
       + (facts.manifest ? (facts.manifest_path + ":\n<<<\n" + facts.manifest + "\n>>>\n") : "")
     : "(no repo facts available — candidate kind is " + candidate.kind + ")";
@@ -376,13 +415,14 @@ export default async function agentrySynthesize(input, ctx) {
     candidate_kind: candidate.kind,
   });
 
-  let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null };
+  let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null, repo_dir: null };
   if (candidate.kind === "repo" && candidate.url) {
     try {
       facts = await readRepoTerritory(candidate, ctx);
       events.emit("synthesize.repo_read", {
         proposal_id, candidate_id,
         cloned: facts.cloned, error: facts.error,
+        repo_dir: facts.repo_dir,
         readme_len: facts.readme ? facts.readme.length : 0,
         manifest: facts.manifest_path,
         top_level_count: facts.top_level.length,
@@ -395,23 +435,55 @@ export default async function agentrySynthesize(input, ctx) {
   const referenceHandler = readFileSync(join(HERE, REFERENCE_FILE), "utf8");
   const prompt = buildPrompt({ gap, candidate, facts, referenceHandler });
 
-  const llmRes = await ctx.invoke("llm.openai_compat", {
-    model: DEFAULT_SYNTH_MODEL,
-    provider: DEFAULT_SYNTH_PROVIDER,
-    messages: [
-      { role: "system", content: "You output only JSON. No prose. No fences." },
-      { role: "user", content: prompt },
-    ],
-    temperature: 0.1,
-    max_tokens: 4000,
-  }, { tenant: "local", by: "agentry.synthesize" });
+  const messages = [
+    { role: "system", content: "You output only JSON. No prose. No fences." },
+    { role: "user", content: prompt },
+  ];
 
-  if (!llmRes.ok) {
-    events.emit("synthesize.llm_failed", {
-      proposal_id, candidate_id,
-      code: llmRes.error.code, message: llmRes.error.message,
+  let llmRes = null;
+  let llmUsed = null;
+  const attempts = [];
+
+  for (const { provider, model } of MODEL_CHAIN) {
+    let r;
+    try {
+      r = await ctx.invoke("llm.openai_compat", {
+        provider,
+        model,
+        messages,
+        temperature: 0.1,
+        max_tokens: 4000,
+      }, { tenant: "local", by: "agentry.synthesize" });
+    } catch (e) {
+      attempts.push({ provider, model, ok: false, error: e.message });
+      continue;
+    }
+
+    attempts.push({
+      provider, model,
+      ok: r.ok,
+      code: r.ok ? null : r.error?.code,
+      message: r.ok ? null : String(r.error?.message || "").slice(0, 150),
     });
-    throw new Error("agentry.synthesize: llm failed — " + llmRes.error.code + ": " + llmRes.error.message);
+
+    if (!r.ok) continue;
+
+    const s = extractJson(r.output.content);
+    if (s) {
+      llmRes = r;
+      llmUsed = { provider, model };
+      break;
+    }
+    attempts[attempts.length - 1].ok = false;
+    attempts[attempts.length - 1].reason = "unparseable";
+    attempts[attempts.length - 1].preview = String(r.output.content || "").slice(0, 200);
+  }
+
+  if (!llmRes) {
+    events.emit("synthesize.all_models_failed", {
+      proposal_id, candidate_id, attempts,
+    });
+    throw new Error("agentry.synthesize: all " + MODEL_CHAIN.length + " models failed. attempts=" + JSON.stringify(attempts));
   }
 
   const spec = extractJson(llmRes.output.content);
@@ -445,6 +517,7 @@ export default async function agentrySynthesize(input, ctx) {
     kind: spec.capability.kind,
     handler_path: handlerPath,
     seed_path: seedPath,
+    model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
     ms: Date.now() - started,
   });
 
@@ -455,9 +528,10 @@ export default async function agentrySynthesize(input, ctx) {
       handler_path: handlerPath,
       seed_path: seedPath,
       repo_session: facts.session,
+      repo_dir: facts.repo_dir,
       repo_read: facts.cloned,
       spec,
-      model_used: llmRes.output.model || DEFAULT_SYNTH_MODEL,
+      model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : (llmRes.output.model || null),
     },
     cost: { time_ms: Date.now() - started },
   };
