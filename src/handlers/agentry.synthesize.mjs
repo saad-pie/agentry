@@ -3,13 +3,9 @@
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
-// v0.15.10:
-//   - Groq-first chain (gpt-oss-120b / gpt-oss-20b / qwen3.8-27b), Google fallback.
-//   - max_tokens raised to 8000: reasoning models consume budget on the
-//     reasoning field before emitting content. 4000 was truncating specs.
-//   - Repo read fix: kernel's git.clone writes to <session>/<repo-name>/
-//     not <session>/repo/. Read the actual directory listing instead of
-//     assuming.
+// v0.15.11:
+//   - Synthesized handlers now import installer.mjs via an absolute path
+//     resolved at render time, not a broken relative path.
 
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -23,6 +19,11 @@ const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR
 const REFERENCE_FILE = "bua.screenshot.mjs";
 const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
+
+// Absolute path to installer.mjs, resolved once at load. Baked into every
+// synthesized handler so it can import prepareSession without depending
+// on relative path resolution.
+const INSTALLER_PATH = join(HERE, "..", "runtime", "installer.mjs").replace(/\\/g, "/");
 
 const MODEL_CHAIN = [
   { provider: "groq", model: "openai/gpt-oss-120b" },
@@ -67,8 +68,6 @@ async function readRepoTerritory(candidate, deps) {
     }
     facts.cloned = true;
 
-    // The kernel writes git.clone results to <session>/<repo-name>/, not
-    // <session>/repo/. List the session root to find the real directory.
     const rootListRes = await invoke("agentry.os", {
       action: "fs.list",
       session,
@@ -81,8 +80,6 @@ async function readRepoTerritory(candidate, deps) {
       rootEntries = Array.isArray(e) ? e.map(x => typeof x === "string" ? x : x.name) : [];
     }
 
-    // Find the cloned repo directory. Candidate names: "playwright", "repo",
-    // or anything that isn't a dotfile.
     const repoCandidates = [
       "repo",
       candidate.name,
@@ -150,7 +147,7 @@ async function readRepoTerritory(candidate, deps) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// The prompt — assembled by concatenation, no nested backticks
+// The prompt
 // ─────────────────────────────────────────────────────────────
 
 function buildPrompt({ gap, candidate, facts, referenceHandler }) {
@@ -281,7 +278,7 @@ function renderHandler(spec) {
   out.push("");
   out.push("export async function accept(deps, opts = {}) {");
   out.push("  const session = opts.session || (CAP_ID + \"-accept-test\");");
-  out.push("  const { prepareSession } = await import(\"../runtime/installer.mjs\");");
+  out.push("  const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
   out.push("  await prepareSession(deps, { capId: CAP_ID, session });");
   out.push("  const probe = await run(" + JSON.stringify(spec.accept_spec?.input || {}) + ", deps, { session });");
   out.push("  const out = probe.output || probe;");
