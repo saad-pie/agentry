@@ -10,23 +10,28 @@
 // has no AGENTS.md. The harness session running there has no bridge
 // instructions, so it cannot call agentry back.
 //
+// v0.15.14: pass provider + model explicitly. The DSH gateway pins a
+// workspace to a model on first submit; without a provider the default
+// was unorouter/gpt-oss-20b:free, which returns empty output. The
+// reasoner-groq workspace is fresh, so the first submit pins it to
+// groq/openai/gpt-oss-120b permanently.
+//
 // Contract:
 //   input:  { failure, attempted?, intent?, workspace_id?, session_id? }
 //   output: { analysis, missing, immediate_action, gap_recorded, suggestions, model_used, harness_task_id }
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
-const DEFAULT_WORKSPACE_NAME = process.env.AGENTRY_REASONER_WORKSPACE || "reasoner";
-const DEFAULT_MODEL = process.env.AGENTRY_REASONER_MODEL || null;   // null = let the harness pick
+const DEFAULT_WORKSPACE_NAME = process.env.AGENTRY_REASONER_WORKSPACE || "reasoner-groq";
+const DEFAULT_PROVIDER = process.env.AGENTRY_REASONER_PROVIDER || "groq";
+const DEFAULT_MODEL = process.env.AGENTRY_REASONER_MODEL || "openai/gpt-oss-120b";
 const MAX_WAIT_MS = 120000;
 const POLL_INTERVAL_MS = 3000;
 
 function systemPromptForHarness() {
   return `You are agentry's reasoning layer.
 
-The DeepSeek Harness just hit a wall, and the meta-system (agentry) is
-asking you to think about why. You are NOT acting as the user's agent
-in this task. You are acting as a diagnostician.
+The DeepSeek Harness just hit a wall, and the meta-system (agentry) is asking you to think about why. You are NOT acting as the user's agent in this task. You are acting as a diagnostician.
 
 You have tools available in this session. USE THEM. Before answering:
   - Search the web if you need to know what tool or library solves this.
@@ -34,8 +39,7 @@ You have tools available in this session. USE THEM. Before answering:
   - Read files if they're referenced in the failure.
   - Reason step by step.
 
-Do NOT call agentry. You are the reasoner, not the requester. No curl
-to port 7863. That would recurse.
+Do NOT call agentry. You are the reasoner, not the requester. No curl to port 7863. That would recurse.
 
 When you're ready, respond with ONLY a single JSON object, nothing else:
 
@@ -92,6 +96,7 @@ function parseJson(text) {
 export default async function agentryReasonHarness(input, ctx) {
   const { failure, intent, workspace_id, session_id } = input || {};
   if (!failure && !intent) throw new Error("agentry.reason.harness requires failure or intent");
+
   if (typeof ctx.invoke !== "function") {
     throw new Error("agentry.reason.harness requires ctx.invoke");
   }
@@ -103,6 +108,7 @@ export default async function agentryReasonHarness(input, ctx) {
   const submit = await ctx.invoke("agent.dsh", {
     prompt,
     workspace: DEFAULT_WORKSPACE_NAME,
+    provider: DEFAULT_PROVIDER,
     model: DEFAULT_MODEL,
   }, { tenant: "local", by: "agentry.reason.harness" });
 
@@ -116,6 +122,8 @@ export default async function agentryReasonHarness(input, ctx) {
   ctx.events.emit("agentry.reason.harness.submitted", {
     task_id: taskId,
     workspace: submit.output.workspace_id || null,
+    provider: DEFAULT_PROVIDER,
+    model: DEFAULT_MODEL,
     workspace_id: workspace_id || null,
     session_id: session_id || null,
   });
@@ -138,15 +146,33 @@ export default async function agentryReasonHarness(input, ctx) {
     );
   }
 
-  // 3. Parse the harness response.
-  const rawOutput = poll.output.output;
+  // 3. Parse the harness response. agent.dsh_poll normalizes the answer
+  // into `output` (string). If empty, fall back to the last assistant
+  // message in `messages`, which is where the harness actually puts its
+  // final answer when it used tools.
+  let rawOutput = poll.output.output;
+  if ((!rawOutput || typeof rawOutput !== "string" || rawOutput.trim() === "") && Array.isArray(poll.output.messages)) {
+    for (let i = poll.output.messages.length - 1; i >= 0; i--) {
+      const m = poll.output.messages[i];
+      if (m?.role === "assistant" && typeof m.text === "string" && m.text.trim()) {
+        rawOutput = m.text;
+        break;
+      }
+    }
+  }
+
   if (!rawOutput || typeof rawOutput !== "string" || rawOutput.trim() === "") {
+    ctx.events.emit("agentry.reason.harness.empty_output", {
+      task_id: taskId,
+      messages_count: Array.isArray(poll.output.messages) ? poll.output.messages.length : 0,
+    });
     throw new Error("agentry.reason.harness: harness returned empty output");
   }
+
   const parsed = parseJson(rawOutput);
   if (!parsed) {
     throw new Error(
-      `agentry.reason.harness: could not parse JSON from harness output. Raw: ${rawOutput.slice(0, 200)}`
+      `agentry.reason.harness: could not parse JSON from harness output. Raw: ${rawOutput.slice(0, 300)}`
     );
   }
 
@@ -195,7 +221,7 @@ export default async function agentryReasonHarness(input, ctx) {
       note: gap_id
         ? "A capability gap was recorded. A proposal will be generated in the background and emailed for approval."
         : "No gap recorded — this looks like a retry or in-session fix.",
-      model_used: null,
+      model_used: `${DEFAULT_PROVIDER}/${DEFAULT_MODEL}`,
       harness_task_id: taskId,
     },
     cost: { time_ms: Date.now() - started, http_calls: 2 },
