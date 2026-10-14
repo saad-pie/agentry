@@ -71,7 +71,7 @@ export function loadConfig(overrides = {}) {
           apiKey: env("ATRIA_API_KEY", "antigravity-free"),
         },
         plugsky: {
-          baseUrl: env("PLUGSKY_BASE_URL", "https://api.plugsky.ai/v1"),
+          baseUrl: env("PLUGSKY_BASE_URL", "https://api.plugsky.com/v1"),
           apiKey: env("PLUGSKY_API_KEY", null),
         },
         google: {

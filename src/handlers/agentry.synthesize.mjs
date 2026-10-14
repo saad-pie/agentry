@@ -23,8 +23,8 @@ const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
 
 const MODEL_CHAIN = [
-  { provider: "plugsky", model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
-  { provider: "plugsky", model: "openai/gpt-oss-20b" },
+  { provider: "plugsky", model: "plugsky-micro" },
+  { provider: "plugsky", model: "plugsky-lite" },
   { provider: "atria",   model: "space-bunny-alpha:free" },
   { provider: "google",  model: "gemini-2.5-flash" },
 ];

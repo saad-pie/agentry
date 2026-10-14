@@ -13,8 +13,8 @@ function buildModelChain(input) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
   chain.push(
-    { provider: "plugsky", model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", source: "primary" },
-    { provider: "plugsky", model: "openai/gpt-oss-20b", source: "fallback" },
+    { provider: "plugsky", model: "plugsky-micro", source: "primary" },
+    { provider: "plugsky", model: "plugsky-lite", source: "fallback" },
     { provider: "atria",   model: "space-bunny-alpha:free", source: "fallback" },
     { provider: "google",  model: "gemini-2.5-flash", source: "fallback" },
     { provider: "unorouter", model: "gpt-oss-20b:free", source: "fallback" },
