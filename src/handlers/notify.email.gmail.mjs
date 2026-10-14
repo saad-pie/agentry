@@ -1,62 +1,60 @@
 // agentry/src/handlers/notify.email.gmail.mjs
-const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+//
+// SMTP-based Gmail notifier. Uses nodemailer + a Google App Password.
+// No OAuth, no refresh token, no user cap, no 7-day expiry.
+//
+// Same input/output contract as the previous OAuth version:
+//   input:  { subject, body_markdown, to? }
+//   output: { message_id, thread_id, to, sent_at, channel }
+//
+// Reads credentials from config.gmail or env:
+//   SMTP_HOST (default smtp.gmail.com)
+//   SMTP_PORT (default 465)
+//   SMTP_USER (required)
+//   SMTP_PASS (required, 16-char app password)
+//   SMTP_FROM (defaults to SMTP_USER)
+//   GMAIL_TO  (optional default recipient)
 
-let tokenCache = { access_token: null, expires_at: 0 };
+import nodemailer from "nodemailer";
 
-async function getAccessToken({ clientId, clientSecret, refreshToken }) {
-  if (tokenCache.access_token && tokenCache.expires_at - 60000 > Date.now()) {
-    return tokenCache.access_token;
-  }
+let _transporter = null;
+let _transporterKey = null;
 
-  const body = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    refresh_token: refreshToken,
-    grant_type: "refresh_token",
-  });
-
-  const res = await fetch(TOKEN_ENDPOINT, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-    signal: AbortSignal.timeout(10000),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    const err = new Error(`gmail: token exchange failed HTTP ${res.status} — ${text.slice(0, 200)}`);
-    err.retryable = res.status >= 500;
-    throw err;
-  }
-
-  const data = await res.json();
-  if (!data.access_token) throw new Error("gmail: token exchange returned no access_token");
-
-  tokenCache.access_token = data.access_token;
-  tokenCache.expires_at = Date.now() + (Number(data.expires_in) || 3600) * 1000;
-  return data.access_token;
+function resolveConfig(ctx) {
+  const gmail = ctx?.config?.gmail || {};
+  const host = gmail.smtpHost || process.env.SMTP_HOST || "smtp.gmail.com";
+  const port = Number(gmail.smtpPort || process.env.SMTP_PORT || "465");
+  const user = gmail.smtpUser || process.env.SMTP_USER || null;
+  const pass = gmail.smtpPass || process.env.SMTP_PASS || null;
+  const from = gmail.smtpFrom || process.env.SMTP_FROM || user;
+  const defaultTo = gmail.to || process.env.GMAIL_TO || user;
+  return { host, port, user, pass, from, defaultTo };
 }
 
-function buildRawMessage({ from, to, subject, body_markdown }) {
-  const bodyText = body_markdown || "";
-  const clean = (s) => String(s || "").replace(/[\r\n]+/g, " ").trim();
-  const message = [
-    `From: ${clean(from)}`,
-    `To: ${clean(to)}`,
-    `Subject: ${clean(subject)}`,
-    `MIME-Version: 1.0`,
-    `Content-Type: text/plain; charset="UTF-8"`,
-    `Content-Transfer-Encoding: 8bit`,
-    ``,
-    bodyText,
-  ].join("\r\n");
+function getTransporter(cfg) {
+  const key = `${cfg.host}:${cfg.port}:${cfg.user}`;
+  if (_transporter && _transporterKey === key) return _transporter;
 
-  return Buffer.from(message, "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  _transporter = nodemailer.createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.port === 465,
+    requireTLS: cfg.port !== 465,
+    auth: { user: cfg.user, pass: cfg.pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 10000,
+    socketTimeout: 30000,
+  });
+  _transporterKey = key;
+  return _transporter;
+}
+
+function bodyToHtml(bodyMarkdown) {
+  const escaped = String(bodyMarkdown || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return `<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;font-size:13px;line-height:1.5;">${escaped}</div>`;
 }
 
 export default async function notifyGmail(input, ctx) {
@@ -64,54 +62,69 @@ export default async function notifyGmail(input, ctx) {
   if (!subject) throw new Error("notify.email.gmail requires subject");
   if (!body_markdown) throw new Error("notify.email.gmail requires body_markdown");
 
-  const cfg = ctx.config?.gmail || {};
-  const { clientId, clientSecret, refreshToken, from } = cfg;
-  const toAddr = to || cfg.to || cfg.from;
+  const cfg = resolveConfig(ctx);
+  const toAddr = to || cfg.defaultTo;
 
-  if (!clientId || !clientSecret || !refreshToken || !from) {
-    const err = new Error("notify.email.gmail: missing config. Need GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_FROM.");
+  if (!cfg.user || !cfg.pass) {
+    const err = new Error(
+      "notify.email.gmail: missing credentials. Need SMTP_USER and SMTP_PASS env vars (Google App Password, not your account password)."
+    );
     err.retryable = false;
     throw err;
   }
-
-  const accessToken = await getAccessToken({ clientId, clientSecret, refreshToken });
-  const raw = buildRawMessage({ from, to: toAddr, subject, body_markdown });
+  if (!cfg.from) {
+    const err = new Error("notify.email.gmail: missing sender. Set SMTP_FROM or SMTP_USER.");
+    err.retryable = false;
+    throw err;
+  }
+  if (!toAddr) {
+    const err = new Error("notify.email.gmail: no recipient. Pass 'to' or set GMAIL_TO.");
+    err.retryable = false;
+    throw err;
+  }
 
   const started = Date.now();
-  const res = await fetch(SEND_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "authorization": `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ raw }),
-    signal: AbortSignal.timeout(15000),
-  });
+  const transporter = getTransporter(cfg);
 
-  if (res.status === 401) {
-    tokenCache = { access_token: null, expires_at: 0 };
-    const err = new Error("gmail: 401 unauthorized — token may have been revoked");
-    err.retryable = false;
-    throw err;
-  }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    const err = new Error(`gmail: send failed HTTP ${res.status} — ${text.slice(0, 300)}`);
-    err.retryable = res.status >= 500 || res.status === 429;
-    throw err;
-  }
-
-  const data = await res.json();
-
-  return {
-    output: {
-      message_id: data.id || null,
-      thread_id: data.threadId || null,
+  try {
+    const info = await transporter.sendMail({
+      from: cfg.from,
       to: toAddr,
-      sent_at: Date.now(),
-      channel: "gmail",
-    },
-    cost: { time_ms: Date.now() - started, http_calls: 2, money_usd: 0 },
-  };
+      subject,
+      text: String(body_markdown),
+      html: bodyToHtml(body_markdown),
+    });
+
+    ctx?.events?.emit("notify.email.gmail.sent", {
+      to: toAddr,
+      subject,
+      message_id: info.messageId || null,
+      response: info.response || null,
+      ms: Date.now() - started,
+    });
+
+    return {
+      output: {
+        message_id: info.messageId || null,
+        thread_id: null,
+        to: toAddr,
+        sent_at: Date.now(),
+        channel: "gmail.smtp",
+      },
+      cost: { time_ms: Date.now() - started, http_calls: 1, money_usd: 0 },
+    };
+  } catch (e) {
+    const err = new Error(`notify.email.gmail: send failed — ${e.message}`);
+    err.retryable = /ECONN|ETIMEDOUT|4\d\d/.test(String(e.code || "") + " " + String(e.responseCode || ""));
+    err.smtp_code = e.code || null;
+    err.smtp_response = e.responseCode || null;
+    ctx?.events?.emit("notify.email.gmail.failed", {
+      to: toAddr,
+      subject,
+      error: e.message,
+      code: e.code || null,
+      responseCode: e.responseCode || null,
+    });
+    throw err;
+  }
 }
