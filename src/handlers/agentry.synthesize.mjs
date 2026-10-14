@@ -3,9 +3,15 @@
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
+// v0.15.12:
+//   - Fix double-escaped kernel_script from reasoning models. Some models
+//     (gpt-oss-120b) emit code with literal \n and \" sequences inside
+//     their JSON string output, which survives JSON.parse and lands in
+//     the kernel as one line. Detect that pattern (no real newlines but
+//     escaped ones present) and decode once before writing the file.
+//
 // v0.15.11:
-//   - Synthesized handlers now import installer.mjs via an absolute path
-//     resolved at render time, not a broken relative path.
+//   - Synthesized handlers import installer.mjs via an absolute path.
 
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -31,6 +37,30 @@ const MODEL_CHAIN = [
   { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
+
+// Some reasoning models emit code as a string with literal \n and \"
+// sequences inside their JSON, and those survive JSON.parse as two
+// characters instead of one. Symptom: the kernel script has no real
+// newlines but many "\n" substrings, and node fails to parse it.
+//
+// Detect that pattern precisely and decode once. If the string already
+// contains real newlines (which is what a well-behaved model emits), we
+// leave it alone — we don't want to touch legitimate escape sequences
+// inside regex or string literals.
+function decodeIfDoubleEscaped(s) {
+  if (typeof s !== "string" || !s.length) return s;
+  // Already has real newlines: assume it's fine.
+  if (s.includes("\n")) return s;
+  // No real newlines but escaped ones present: double-escaped.
+  if (!s.includes("\\n")) return s;
+  return s
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
 
 // ─────────────────────────────────────────────────────────────
 // Repo fact gathering — deterministic, no LLM
@@ -235,6 +265,13 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("- Prefer ONE npm package over five. Prefer an API call over spawning a browser.");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
+  lines.push("");
+  lines.push("IMPORTANT — kernel_script escaping:");
+  lines.push("- Inside the kernel_script string, each real newline must be a single");
+  lines.push("  backslash-n in the JSON, which the JSON parser turns into a newline.");
+  lines.push("- Do NOT add extra backslashes. Write \"playwright\", not \\\"playwright\\\".");
+  lines.push("  If you emit extra backslashes, the runtime receives a one-line script");
+  lines.push("  full of \\n sequences and node fails to parse it.");
 
   return lines.join("\n");
 }
@@ -263,7 +300,8 @@ function renderHandler(spec) {
   out.push("const OUTPUT_MAP = " + JSON.stringify(glue.output_map || {}, null, 2) + ";");
   out.push("const RESULT_PARSE = " + JSON.stringify(glue.result_parse || "stdout_text") + ";");
   out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
-  out.push("const KERNEL_SCRIPT = " + JSON.stringify(kernel_script || "") + ";");
+  const cleanScript = decodeIfDoubleEscaped(kernel_script || "");
+  out.push("const KERNEL_SCRIPT = " + JSON.stringify(cleanScript) + ";");
   out.push("");
   out.push("const DEFAULT_TIMEOUT_MS = 90000;");
   out.push("");
