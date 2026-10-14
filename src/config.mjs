@@ -1,8 +1,9 @@
-// agentry/src/config.mjs                                              // The single source of truth for paths and secrets.
+// agentry/src/config.mjs
+// The single source of truth for paths and secrets.
 // Nothing else in agentry reads process.env directly. Ever.
 //
 // Why: so we never repeat the "hardcoded /tmp" mistake. Every path comes from here.
-                                                                       
+
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -71,6 +72,10 @@ export function loadConfig(overrides = {}) {
           apiKey: env("ATRIA_API_KEY", "antigravity-free"),
         },
         plugsky: {
+          baseUrl: env("PLUGSKY_BASE_URL", "https://api.plugsky.com/v1"),
+          apiKey: env("PLUGSKY_API_KEY", null),
+        },
+        groq: {
           baseUrl: env("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
           apiKey: env("GROQ_API_KEY", null),
         },
