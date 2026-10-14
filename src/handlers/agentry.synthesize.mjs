@@ -1,5 +1,4 @@
-// agentry/src/handlers/agentry.synthesize.mjs
-//
+// agentry/src/handlers/agentry.synthesize.mjs                         //
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
@@ -23,10 +22,10 @@ const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
 
 const MODEL_CHAIN = [
-  { provider: "plugsky", model: "plugsky-micro" },
-  { provider: "plugsky", model: "plugsky-lite" },
-  { provider: "atria",   model: "space-bunny-alpha:free" },
-  { provider: "google",  model: "gemini-2.5-flash" },
+  { provider: "groq", model: "llama-3.3-70b-versatile" },
+  { provider: "groq", model: "llama-3.1-8b-instant" },
+  { provider: "groq", model: "meta-llama/llama-4-scout-17b-16e-instruct" },
+  { provider: "google", model: "gemini-2.5-flash" },
 ];
 
 // ─────────────────────────────────────────────────────────────

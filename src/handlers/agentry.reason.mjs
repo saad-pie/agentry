@@ -13,12 +13,9 @@ function buildModelChain(input) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
   chain.push(
-    { provider: "plugsky", model: "plugsky-micro", source: "primary" },
-    { provider: "plugsky", model: "plugsky-lite", source: "fallback" },
-    { provider: "atria",   model: "space-bunny-alpha:free", source: "fallback" },
-    { provider: "google",  model: "gemini-2.5-flash", source: "fallback" },
-    { provider: "unorouter", model: "gpt-oss-20b:free", source: "fallback" },
-    { provider: "unorouter", model: "glm-5.3-flash:free", source: "fallback" },
+    { provider: "groq", model: "llama-3.3-70b-versatile", source: "primary" },
+    { provider: "groq", model: "llama-3.1-8b-instant", source: "fallback" },
+    { provider: "google", model: "gemini-2.5-flash", source: "fallback" },
   );
   const seen = new Set();
   return chain.filter(c => {

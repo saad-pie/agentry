@@ -1,21 +1,19 @@
 // agentry/src/handlers/agentry.proposal.mjs
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
-// v0.15.6: MODEL_CHAIN reordered (Plugsky first). The provider field is
+// v0.15.6: MODEL_CHAIN reordered (Groq first). The provider field is
 // now passed through to llm.openai_compat — before this it was dropped
 // and every call went to atria regardless of the chain entry.
 
 import { randomBytes } from "node:crypto";
 
 const MODEL_CHAIN = [
-  { provider: "plugsky", model: "plugsky-micro" },
-  { provider: "plugsky", model: "plugsky-lite" },
-  { provider: "google",  model: "gemini-2.5-flash" },
-  { provider: "atria",   model: "space-bunny-alpha:free" },
+  { provider: "groq", model: "llama-3.3-70b-versatile" },
+  { provider: "groq", model: "llama-3.1-8b-instant" },
+  { provider: "google", model: "gemini-2.5-flash" },
 ];
 
 const ACCEPT_FREE_OR_QUOTA = null;
-
 const APPROVAL_BASE_URL = process.env.AGENTRY_APPROVAL_BASE_URL || null;
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -23,12 +21,12 @@ function systemPrompt() {
   return `You are a capability reviewer for an autonomous agent.
 
 You will be given:
-  1. A "gap" — something the agent tried to do and could not.
-  2. A list of "candidates" — each is either:
-       - kind "repo":       a GitHub repository with stars, language,
-                            pushed_at, license.
-       - kind "web_result": a web search result with title, url,
-                            description/snippet, domain.
+1. A "gap" — something the agent tried to do and could not.
+2. A list of "candidates" — each is either:
+   - kind "repo":       a GitHub repository with stars, language,
+                        pushed_at, license.
+   - kind "web_result": a web search result with title, url,
+                        description/snippet, domain.
 
 For repo candidates, judge on: fit, stars, recency, license, activity.
 For web_result candidates, judge on: fit, the specificity of the
@@ -144,6 +142,7 @@ async function analyze(deps, gap, candidates) {
         });
         continue;
       }
+
       const parsed = parseProposalJSON(res.output.content);
       if (parsed) {
         return { proposal: parsed, model_used: res.output.model || model, provider_used: provider };
@@ -210,6 +209,7 @@ function renderEmail({ gap, analysis, perCandidateTokens, approveBase }) {
 
 export default async function agentryProposal(input, ctx) {
   const { gap, candidates, notify = "notify.email.gmail" } = input || {};
+
   if (!gap || typeof gap !== "object") throw new Error("agentry.proposal requires gap");
   if (!Array.isArray(candidates) || candidates.length === 0) {
     throw new Error("agentry.proposal requires non-empty candidates array");
