@@ -1,52 +1,28 @@
 // agentry/src/handlers/notify.email.gmail.mjs
 //
-// SMTP-based Gmail notifier. Uses nodemailer + a Google App Password.
-// No OAuth, no refresh token, no user cap, no 7-day expiry.
+// HTTP email notifier via Resend. HF Spaces block outbound SMTP
+// (ports 25/465/587), so the SMTP path can't work from inside a
+// Space. Resend is an HTTPS API on 443 — no port restrictions, no
+// OAuth, no app passwords, no user cap.
 //
-// Same input/output contract as the previous OAuth version:
+// Same input/output contract as before:
 //   input:  { subject, body_markdown, to? }
 //   output: { message_id, thread_id, to, sent_at, channel }
 //
-// Reads credentials from config.gmail or env:
-//   SMTP_HOST (default smtp.gmail.com)
-//   SMTP_PORT (default 465)
-//   SMTP_USER (required)
-//   SMTP_PASS (required, 16-char app password)
-//   SMTP_FROM (defaults to SMTP_USER)
-//   GMAIL_TO  (optional default recipient)
+// Env:
+//   RESEND_API_KEY  (required)  — starts with re_
+//   RESEND_FROM     (required)  — e.g. onboarding@resend.dev
+//   GMAIL_TO        (optional)  — default recipient
 
-import nodemailer from "nodemailer";
-
-let _transporter = null;
-let _transporterKey = null;
+const ENDPOINT = "https://api.resend.com/emails";
 
 function resolveConfig(ctx) {
   const gmail = ctx?.config?.gmail || {};
-  const host = gmail.smtpHost || process.env.SMTP_HOST || "smtp.gmail.com";
-  const port = Number(gmail.smtpPort || process.env.SMTP_PORT || "465");
-  const user = gmail.smtpUser || process.env.SMTP_USER || null;
-  const pass = gmail.smtpPass || process.env.SMTP_PASS || null;
-  const from = gmail.smtpFrom || process.env.SMTP_FROM || user;
-  const defaultTo = gmail.to || process.env.GMAIL_TO || user;
-  return { host, port, user, pass, from, defaultTo };
-}
-
-function getTransporter(cfg) {
-  const key = `${cfg.host}:${cfg.port}:${cfg.user}`;
-  if (_transporter && _transporterKey === key) return _transporter;
-
-  _transporter = nodemailer.createTransport({
-    host: cfg.host,
-    port: cfg.port,
-    secure: cfg.port === 465,
-    requireTLS: cfg.port !== 465,
-    auth: { user: cfg.user, pass: cfg.pass },
-    connectionTimeout: 15000,
-    greetingTimeout: 10000,
-    socketTimeout: 30000,
-  });
-  _transporterKey = key;
-  return _transporter;
+  return {
+    apiKey: gmail.resendApiKey || process.env.RESEND_API_KEY || null,
+    from: gmail.resendFrom || process.env.RESEND_FROM || null,
+    defaultTo: gmail.to || process.env.GMAIL_TO || null,
+  };
 }
 
 function bodyToHtml(bodyMarkdown) {
@@ -65,15 +41,13 @@ export default async function notifyGmail(input, ctx) {
   const cfg = resolveConfig(ctx);
   const toAddr = to || cfg.defaultTo;
 
-  if (!cfg.user || !cfg.pass) {
-    const err = new Error(
-      "notify.email.gmail: missing credentials. Need SMTP_USER and SMTP_PASS env vars (Google App Password, not your account password)."
-    );
+  if (!cfg.apiKey) {
+    const err = new Error("notify.email.gmail: RESEND_API_KEY env var is required");
     err.retryable = false;
     throw err;
   }
   if (!cfg.from) {
-    const err = new Error("notify.email.gmail: missing sender. Set SMTP_FROM or SMTP_USER.");
+    const err = new Error("notify.email.gmail: RESEND_FROM env var is required");
     err.retryable = false;
     throw err;
   }
@@ -84,47 +58,56 @@ export default async function notifyGmail(input, ctx) {
   }
 
   const started = Date.now();
-  const transporter = getTransporter(cfg);
-
-  try {
-    const info = await transporter.sendMail({
+  const res = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer ${cfg.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
       from: cfg.from,
-      to: toAddr,
+      to: [toAddr],
       subject,
       text: String(body_markdown),
       html: bodyToHtml(body_markdown),
-    });
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
 
-    ctx?.events?.emit("notify.email.gmail.sent", {
-      to: toAddr,
-      subject,
-      message_id: info.messageId || null,
-      response: info.response || null,
-      ms: Date.now() - started,
-    });
-
-    return {
-      output: {
-        message_id: info.messageId || null,
-        thread_id: null,
-        to: toAddr,
-        sent_at: Date.now(),
-        channel: "gmail.smtp",
-      },
-      cost: { time_ms: Date.now() - started, http_calls: 1, money_usd: 0 },
-    };
-  } catch (e) {
-    const err = new Error(`notify.email.gmail: send failed — ${e.message}`);
-    err.retryable = /ECONN|ETIMEDOUT|4\d\d/.test(String(e.code || "") + " " + String(e.responseCode || ""));
-    err.smtp_code = e.code || null;
-    err.smtp_response = e.responseCode || null;
-    ctx?.events?.emit("notify.email.gmail.failed", {
-      to: toAddr,
-      subject,
-      error: e.message,
-      code: e.code || null,
-      responseCode: e.responseCode || null,
-    });
+  if (res.status === 401 || res.status === 403) {
+    const text = await res.text().catch(() => "");
+    const err = new Error(`notify.email.gmail: auth failed HTTP ${res.status} — ${text.slice(0, 200)}`);
+    err.retryable = false;
     throw err;
   }
+  if (res.status === 429) {
+    const err = new Error("notify.email.gmail: rate limited by Resend");
+    err.retryable = true;
+    throw err;
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    const err = new Error(`notify.email.gmail: send failed HTTP ${res.status} — ${text.slice(0, 300)}`);
+    err.retryable = res.status >= 500;
+    throw err;
+  }
+
+  const data = await res.json().catch(() => ({}));
+  ctx?.events?.emit("notify.email.gmail.sent", {
+    to: toAddr,
+    subject,
+    message_id: data.id || null,
+    ms: Date.now() - started,
+  });
+
+  return {
+    output: {
+      message_id: data.id || null,
+      thread_id: null,
+      to: toAddr,
+      sent_at: Date.now(),
+      channel: "resend",
+    },
+    cost: { time_ms: Date.now() - started, http_calls: 1, money_usd: 0 },
+  };
 }
