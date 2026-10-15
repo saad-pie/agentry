@@ -5,8 +5,10 @@
 //   2. Decided proposals → adopted capabilities
 //   3. Gaps → watches (one watch per (gap, source) pair)
 //
-// Adoption is human-gated: the loop only adopts a proposal whose
-// state is "decided" (every candidate has a recorded decision).
+// Adoption is human-gated by default: the loop only adopts a proposal
+// whose state is "decided" (every candidate has a recorded decision).
+// Proposals can reach that state two ways: a human clicking approve
+// in the email, or (v0.15.23+) auto-approval by kind whitelist.
 //
 // v0.15.15:
 //   - Pass 1 skips watch_results whose gap already has an open
@@ -16,6 +18,13 @@
 //   - bua/cua/mua/memory dropped web_search from SOURCES_BY_KIND. Those
 //     queries return blog posts, the LLM correctly rejects them, and
 //     the source was pure noise.
+//
+// v0.15.22:
+//   - The "already has an open proposal" predicate was widened from
+//     (pending || in_review) to (!adopted_at && !retired_at). This
+//     covers proposals in state "decided" that haven't been picked up
+//     by Pass 2 yet. Required for v0.15.23 auto-adoption, but harmless
+//     on its own.
 
 import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 
@@ -121,15 +130,14 @@ export async function tick(deps, opts = {}) {
   // Pass 1: un-analyzed watch_results → proposals
   // ─────────────────────────────────────────────────────────────
 
-  // v0.15.15 — which gaps already have an open proposal? Skip their
-  // watch_results entirely. This is the fix for the "N emails per gap"
-  // flood: without it, every candidate batch from every watch generates
-  // a fresh proposal (and a fresh email) for the same gap.
+  // v0.15.22 — which gaps already have an open proposal? Skip their
+  // watch_results entirely. "Open" = no adopted_at and no retired_at,
+  // i.e. the proposal is still on its way through the pipeline.
   const gapsWithOpenProposal = new Set();
   for (const cap of graph.capabilities().values()) {
     if (cap.kind !== "proposal") continue;
     if (cap.adopted_at) continue;
-    if (cap.state !== "pending" && cap.state !== "in_review") continue;
+    if (cap.retired_at) continue;
     if (cap.gap_id) gapsWithOpenProposal.add(cap.gap_id);
   }
 

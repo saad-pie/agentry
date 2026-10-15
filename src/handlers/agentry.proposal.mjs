@@ -2,11 +2,19 @@
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
 // v0.15.15: at most one open proposal per gap. If a proposal for this
-// gap already exists in pending or in_review state, dedupe against it
-// instead of creating a new one. This is the fix for the "N emails per
-// gap" flood: the discovery loop calls us once per watch_result, and
-// without this guard it generates a fresh proposal (and a fresh email)
-// on every 60-second tick.
+// gap already exists and hasn't been terminally processed (adopted or
+// rejected or retired), dedupe against it instead of creating a new one.
+//
+// v0.15.22: the "open" predicate was widened from
+//   (state === "pending" || state === "in_review")
+// to
+//   (!adopted_at && !retired_at)
+// The old predicate missed proposals in state "decided" that hadn't
+// yet been picked up by the discovery loop's adoption pass. That was
+// latent while every proposal went through human approval, but it
+// becomes a live bug the moment auto-adoption is introduced: an
+// auto-decided proposal would not block the next watch_result, and
+// the next tick would create a duplicate for the same gap.
 
 import { randomBytes } from "node:crypto";
 
@@ -222,17 +230,17 @@ export default async function agentryProposal(input, ctx) {
     throw new Error("agentry.proposal requires ctx.invoke — was it invoked through the runtime?");
   }
 
-  // v0.15.15 — dedupe: at most one open proposal per gap.
-  // If a proposal for this gap already exists in pending or in_review
-  // state, return it instead of creating a new one. This prevents the
-  // discovery loop from generating (and emailing) a fresh proposal on
-  // every watch_result that comes in for the same gap.
+  // v0.15.22 — dedupe: at most one open proposal per gap.
+  // "Open" = a proposal node for this gap that has neither been
+  // terminally processed (adopted / rejected → adopted_at set) nor
+  // explicitly retired. This covers pending, in_review, and decided-
+  // but-not-yet-adopted proposals alike.
   const openProposal = [...ctx.graph.capabilities().values()].find(
     (c) =>
       c.kind === "proposal" &&
       !c.adopted_at &&
-      c.gap_id === gap.id &&
-      (c.state === "pending" || c.state === "in_review")
+      !c.retired_at &&
+      c.gap_id === gap.id
   );
 
   if (openProposal) {
