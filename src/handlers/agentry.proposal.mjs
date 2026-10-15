@@ -25,6 +25,7 @@
 // A kind list is not. bua/cua/mua/memory stay human-gated.
 
 import { randomBytes } from "node:crypto";
+import { link, RELATIONS } from "../graph/edges.mjs";
 
 const MODEL_CHAIN = [
   { provider: "groq", model: "openai/gpt-oss-120b" },
@@ -349,6 +350,18 @@ export default async function agentryProposal(input, ctx) {
     updated_at: now,
   };
   ctx.graph.putCapability(proposalNode);
+  try {
+    link(ctx.graph, {
+      from: proposalId,
+      to: gap.id,
+      relation: RELATIONS.PROPOSAL_SATISFIES_GAP,
+      meta: { auto_approved: Boolean(autoApproved) },
+    });
+  } catch (e) {
+    ctx.events.emit("proposal.edge_write_failed", {
+      proposal_id: proposalId, gap_id: gap.id, error: e.message,
+    });
+  }
   ctx.events.emit("proposal.created", {
     proposal_id: proposalId,
     gap_id: gap.id,

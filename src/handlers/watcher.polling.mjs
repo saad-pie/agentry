@@ -1,5 +1,6 @@
 // agentry/src/handlers/watcher.polling.mjs
 import { invoke } from "../invoke.mjs";
+import { link, RELATIONS } from "../graph/edges.mjs";
 
 const watches = new Map();
 export function getWatches() { return watches; }
@@ -123,6 +124,20 @@ export async function pollWatch(deps, watch) {
       candidates: fresh.map(f => f.candidate),
       created_at: Date.now(),
     });
+    if (gapId) {
+      try {
+        link(graph, {
+          from: resultId,
+          to: gapId,
+          relation: RELATIONS.WATCH_RESULT_FOR_GAP,
+          meta: { source: watch.source, candidate_count: fresh.length },
+        });
+      } catch (e) {
+        events.emit("watch.edge_write_failed", {
+          watch_result_id: resultId, gap_id: gapId, error: e.message,
+        });
+      }
+    }
     events.emit("watch.result_recorded", {
       watch_result_id: resultId,
       watch_id: watch.id,

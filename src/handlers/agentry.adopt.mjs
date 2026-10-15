@@ -14,6 +14,8 @@
 // the gap, force an out-of-cycle checkpoint to GitHub so growth
 // survives a crash before the next autosave tick.
 
+import { link, RELATIONS } from "../graph/edges.mjs";
+
 const DEFAULT_NOTIFY = "notify.email.gmail";
 const REASON_SEP = "::";
 
@@ -355,6 +357,35 @@ export default async function agentryAdopt(input, ctx) {
         handler_path: synthesis.handler_path,
         source: node.source,
       });
+      // v0.16.0 — typed edges for this adoption.
+      try {
+        if (proposal.gap_id) {
+          link(graph, {
+            from: node.id,
+            to: proposal.gap_id,
+            relation: RELATIONS.CAPABILITY_SATISFIES_GAP,
+            meta: { via_proposal: proposal.id, candidate_id: candidate.id },
+          });
+        }
+        if (candidate.id) {
+          link(graph, {
+            from: node.id,
+            to: candidate.id,
+            relation: RELATIONS.CAPABILITY_SOURCED_FROM,
+            meta: { candidate_url: candidate.url || null, candidate_kind: candidate.kind || null },
+          });
+        }
+        link(graph, {
+          from: proposal.id,
+          to: node.id,
+          relation: RELATIONS.PROPOSAL_ADOPTED_CAPABILITY,
+          meta: { via_candidate_id: candidate.id },
+        });
+      } catch (e) {
+        events.emit("adoption.edge_write_failed", {
+          proposal_id, candidate_id: candidateId, capability_id: node.id, error: e.message,
+        });
+      }
     } catch (e) {
       events.emit("adoption.capability_add_failed", { proposal_id, candidate_id: candidateId, error: e.message });
       failed.push({
