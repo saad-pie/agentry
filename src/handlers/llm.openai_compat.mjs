@@ -1,14 +1,14 @@
 // agentry/src/handlers/llm.openai_compat.mjs
 // OpenAI-compatible chat completions with dynamic model verification.
 //
-// v0.15.6: honors the `provider` input. If set, resolves baseUrl + apiKey
-// from config.llm.providers[provider]. If not set, falls back to the
-// top-level baseUrl/apiKey (backwards compat with everything written
-// before v0.15.6).
+// v0.15.16: accepts `tools` and `tool_choice` for native function
+// calling, and surfaces `tool_calls` from the response. Only sends
+// tool_choice if the caller explicitly passes one — some providers
+// reject any non-null value, and reasoning-family models can't accept
+// one at all.
 
 import { ModelRegistry } from "../model_registry.mjs";
 
-// One registry per process. Refreshed on first use and every 10 min.
 let REGISTRY = null;
 let REGISTRY_LAST_REFRESH = 0;
 const REGISTRY_REFRESH_MS = 10 * 60 * 1000;
@@ -44,6 +44,8 @@ export default async function llmOpenAICompat(input, ctx) {
     response_format,
     timeout_ms = 30000,
     accept_from,
+    tools,
+    tool_choice,
   } = input || {};
 
   if (!model) throw new Error("llm.openai_compat requires 'model'");
@@ -54,7 +56,6 @@ export default async function llmOpenAICompat(input, ctx) {
   const cfg = ctx.config?.llm || {};
   const providers = cfg.providers || {};
 
-  // Resolve the target provider.
   let baseUrl, apiKey;
   if (provider) {
     const p = providers[provider];
@@ -75,6 +76,10 @@ export default async function llmOpenAICompat(input, ctx) {
 
   const body = { model, messages, temperature, max_tokens };
   if (response_format) body.response_format = response_format;
+  if (Array.isArray(tools) && tools.length > 0) {
+    body.tools = tools;
+    if (tool_choice) body.tool_choice = tool_choice;
+  }
 
   const started = Date.now();
   let res;
@@ -89,7 +94,13 @@ export default async function llmOpenAICompat(input, ctx) {
       signal: AbortSignal.timeout(timeout_ms),
     });
   } catch (e) {
-    const err = new Error(`llm: fetch failed: ${e.message}`);
+    const cause = e.cause;
+    const detail = [
+      e.message,
+      cause?.code ? `code=${cause.code}` : null,
+      cause?.message ? `cause=${cause.message}` : null,
+    ].filter(Boolean).join(" | ");
+    const err = new Error(`llm: fetch failed: ${detail}`);
     err.retryable = true;
     throw err;
   }
@@ -124,6 +135,7 @@ export default async function llmOpenAICompat(input, ctx) {
 
   const content = choice.message?.content ?? "";
   const finish_reason = choice.finish_reason ?? null;
+  const tool_calls = Array.isArray(choice.message?.tool_calls) ? choice.message.tool_calls : [];
   const usage = data?.usage || {};
   const returnedModelId = data?.model || model;
 
@@ -156,6 +168,7 @@ export default async function llmOpenAICompat(input, ctx) {
       content,
       model: returnedModelId,
       finish_reason,
+      tool_calls,
       usage: {
         prompt_tokens: usage.prompt_tokens ?? null,
         completion_tokens: usage.completion_tokens ?? null,

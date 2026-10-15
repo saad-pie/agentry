@@ -7,23 +7,20 @@
 // final JSON. No DSH, no gateway, no queue — just the model and a
 // tool loop we fully control.
 //
-// Same input/output contract as agentry.reason and
-// agentry.reason.harness. Callers can drop this in place of either.
-//
-//   input:  { failure, attempted?, intent?, workspace_id?, session_id? }
-//   output: { analysis, missing, immediate_action, gap_recorded,
-//             suggestions, model_used, turns, tools_used }
+// v0.15.16: openai/gpt-oss-120b on Groq is a reasoning model and
+// rejects any tool_choice value (400 tool_use_failed). Switched to
+// llama-3.3-70b-versatile primary, qwen/qwen3-32b fallback — both
+// support normal tool calling. Also removed tool_choice from the
+// request entirely.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
 const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "groq";
-const MODEL = process.env.AGENTRY_DEEP_MODEL || "openai/gpt-oss-120b";
-const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "openai/gpt-oss-20b";
+const MODEL = process.env.AGENTRY_DEEP_MODEL || "llama-3.3-70b-versatile";
+const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "qwen/qwen3-32b";
 const MAX_TURNS = Number(process.env.AGENTRY_DEEP_MAX_TURNS || "5");
 const MAX_TOOL_CALLS_PER_TURN = 4;
 
-// Tool schemas the model can call. Keep this small and precise —
-// every tool is a surface the model can waste a turn on.
 const TOOLS = [
   {
     type: "function",
@@ -148,8 +145,6 @@ async function runFetchUrl(ctx, args) {
     return { error: "fetch_url: url must be absolute http(s)" };
   }
 
-  // Run inside a kernel session so we don't depend on Node's fetch
-  // handling of arbitrary HTML.
   const session = "deep_fetch_" + Date.now().toString(36);
 
   const script = `
@@ -184,7 +179,6 @@ async function runFetchUrl(ctx, args) {
   let parsed;
   try { parsed = JSON.parse(raw); } catch { return { error: "fetch_url: bad response shape" }; }
 
-  // Strip HTML tags if the response is HTML. Crude but sufficient.
   let text = parsed.text || "";
   if (/text\/html/i.test(parsed.content_type)) {
     text = text
@@ -236,14 +230,12 @@ export default async function agentryReasonDeep(input, ctx) {
   let finalContent = null;
   let modelUsed = null;
 
-  // Try the primary model; if the entire loop fails to produce JSON,
-  // retry once on the fallback model before giving up.
   const modelChain = [MODEL];
   if (FALLBACK_MODEL && FALLBACK_MODEL !== MODEL) modelChain.push(FALLBACK_MODEL);
 
   outer:
   for (const model of modelChain) {
-    messages.length = 2; // reset conversation on model change
+    messages.length = 2;
     toolsUsed.length = 0;
 
     for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -252,7 +244,6 @@ export default async function agentryReasonDeep(input, ctx) {
         model,
         messages,
         tools: TOOLS,
-        tool_choice: "auto",
         temperature: 0.1,
         max_tokens: 4000,
       }, { tenant: "local", by: "agentry.reason.deep" });
@@ -268,21 +259,18 @@ export default async function agentryReasonDeep(input, ctx) {
       modelUsed = r.output.model || model;
       const toolCalls = Array.isArray(r.output.tool_calls) ? r.output.tool_calls : [];
 
-      // No tool calls → this is the model's final answer.
       if (toolCalls.length === 0) {
         finalContent = String(r.output.content || "");
         attempts.push({ model, turn, ok: true, final: true });
         break outer;
       }
 
-      // Append the assistant's tool-call message to the conversation.
       messages.push({
         role: "assistant",
         content: r.output.content || null,
         tool_calls: toolCalls,
       });
 
-      // Execute each tool call and append results.
       const calls = toolCalls.slice(0, MAX_TOOL_CALLS_PER_TURN);
       for (const call of calls) {
         const toolName = call?.function?.name || "unknown";
@@ -328,7 +316,6 @@ export default async function agentryReasonDeep(input, ctx) {
     );
   }
 
-  // Record the gap.
   let gap_id = null;
   if (parsed.missing && parsed.missing.wanted_id) {
     const key = `gap:${parsed.missing.wanted_id}`;
