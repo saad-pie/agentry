@@ -1,6 +1,10 @@
 // agentry/src/mcp/tools.mjs
 // Registers agentry's capabilities as MCP tools.
 // Called once at MCP server startup, with the runtime's deps.
+//
+// v0.15.15: deep path now calls agentry.reason.deep (Groq with native
+// tool use) instead of agentry.reason.harness (DSH, broken because the
+// harness had no LLM API key). Same fallback semantics.
 
 import { registerTool } from "./server.mjs";
 
@@ -10,7 +14,7 @@ export function registerAgentryTools(deps) {
     {
       name: "reason",
       description:
-        "Ask agentry to reason about a failure or blockage. By default this is the DEEP path: agentry asks the harness itself to investigate with its own tools (web search, fetch, file reads) before answering. If the deep path fails, agentry falls back to a fast raw-LLM reasoner. Returns structured JSON: what's missing, what to try immediately, candidate fixes. A missing capability is recorded as a gap and a proposal will be emailed for approval. IMPORTANT: pass your own model id in the `model` field so agentry can reason with the same model you're using — it's the one we know is working right now. Pass depth=\"fast\" only when you know the failure is trivial (a retry, a typo, a missing credential) and don't want the deep reasoning round-trip.",
+        "Ask agentry to reason about a failure or blockage. By default this is the DEEP path: agentry runs a tool loop on Groq (web_search, fetch_url) to investigate before answering. If the deep path fails, agentry falls back to a fast raw-LLM reasoner. Returns structured JSON: what's missing, what to try immediately, candidate fixes. A missing capability is recorded as a gap and a proposal will be emailed for approval. Pass depth=\"fast\" only when you know the failure is trivial (a retry, a typo, a missing credential) and don't want the deep reasoning round-trip.",
       inputSchema: {
         type: "object",
         properties: {
@@ -22,7 +26,7 @@ export function registerAgentryTools(deps) {
           model: {
             type: "string",
             description:
-              "Strongly recommended. The model id YOU are currently running as (e.g. 'deepseek-v4.1-flash:free'). agentry uses this for its fast-path reasoning fallback. The deep path uses the harness itself and doesn't need it, but if the deep path fails, this is what saves us.",
+              "Optional. The model id YOU are currently running as. agentry uses this for its fast-path reasoning fallback.",
           },
           depth: {
             type: "string",
@@ -40,7 +44,7 @@ export function registerAgentryTools(deps) {
       if (depth === "deep") {
         // Try deep first. Fall back to fast on any error.
         try {
-          const deepRes = await deps.invoke("agentry.reason.harness", args, { tenant: "local", by: "mcp.harness" });
+          const deepRes = await deps.invoke("agentry.reason.deep", args, { tenant: "local", by: "mcp.deep" });
           if (deepRes.ok) {
             return { content: [{ type: "text", text: JSON.stringify({ ...deepRes.output, depth_used: "deep" }, null, 2) }] };
           }
@@ -54,7 +58,7 @@ export function registerAgentryTools(deps) {
       }
 
       // Fast path (or fallback from deep).
-      const fastRes = await deps.invoke("agentry.reason", args, { tenant: "local", by: "mcp.harness" });
+      const fastRes = await deps.invoke("agentry.reason", args, { tenant: "local", by: "mcp.fast" });
       if (!fastRes.ok) {
         return {
           content: [{ type: "text", text: `agentry.reason failed: ${fastRes.error.code} — ${fastRes.error.message}` }],

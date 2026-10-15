@@ -1,9 +1,12 @@
 // agentry/src/handlers/agentry.proposal.mjs
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
-// v0.15.10: Groq-first chain (gpt-oss-120b / gpt-oss-20b / qwen3.8-27b),
-// Google fallback. max_tokens raised 1500 → 4000 because reasoning models
-// spend budget on the reasoning field before emitting content.
+// v0.15.15: at most one open proposal per gap. If a proposal for this
+// gap already exists in pending or in_review state, dedupe against it
+// instead of creating a new one. This is the fix for the "N emails per
+// gap" flood: the discovery loop calls us once per watch_result, and
+// without this guard it generates a fresh proposal (and a fresh email)
+// on every 60-second tick.
 
 import { randomBytes } from "node:crypto";
 
@@ -217,6 +220,39 @@ export default async function agentryProposal(input, ctx) {
   }
   if (typeof ctx.invoke !== "function") {
     throw new Error("agentry.proposal requires ctx.invoke — was it invoked through the runtime?");
+  }
+
+  // v0.15.15 — dedupe: at most one open proposal per gap.
+  // If a proposal for this gap already exists in pending or in_review
+  // state, return it instead of creating a new one. This prevents the
+  // discovery loop from generating (and emailing) a fresh proposal on
+  // every watch_result that comes in for the same gap.
+  const openProposal = [...ctx.graph.capabilities().values()].find(
+    (c) =>
+      c.kind === "proposal" &&
+      !c.adopted_at &&
+      c.gap_id === gap.id &&
+      (c.state === "pending" || c.state === "in_review")
+  );
+
+  if (openProposal) {
+    ctx.events.emit("proposal.deduped", {
+      gap_id: gap.id,
+      existing_proposal_id: openProposal.id,
+      existing_state: openProposal.state,
+      candidates_in_existing: (openProposal.candidates || []).length,
+    });
+    return {
+      output: {
+        proposal_id: openProposal.id,
+        gap_id: gap.id,
+        deduped: true,
+        existing_state: openProposal.state,
+        notified: false,
+        reason: "proposal_already_open_for_gap",
+      },
+      cost: { time_ms: 0 },
+    };
   }
 
   const started = Date.now();

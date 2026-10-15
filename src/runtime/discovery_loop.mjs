@@ -7,13 +7,21 @@
 //
 // Adoption is human-gated: the loop only adopts a proposal whose
 // state is "decided" (every candidate has a recorded decision).
+//
+// v0.15.15:
+//   - Pass 1 skips watch_results whose gap already has an open
+//     proposal (pending or in_review). Fix for the "N emails per gap"
+//     flood — without it, every fresh candidate batch from every watch
+//     generates a new proposal for the same gap.
+//   - bua/cua/mua/memory dropped web_search from SOURCES_BY_KIND. Those
+//     queries return blog posts, the LLM correctly rejects them, and
+//     the source was pure noise.
 
 import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 
 // ─── Per-kind source policy. Each gap kind maps to an ARRAY of sources.
 // Every source becomes its own watch, so one gap triggers GitHub search
-// AND web search in parallel. Both can independently produce candidates
-// and proposals.
+// AND (for some kinds) web search in parallel.
 
 const SOURCES_BY_KIND = {
   bua: [
@@ -21,32 +29,24 @@ const SOURCES_BY_KIND = {
         q: `"browser automation" OR playwright OR puppeteer OR "browser-use" OR "chrome devtools" stars:>5`,
         sort: "stars", order: "desc",
       }) },
-    { source: "discovery.web_search", query: () =>
-        `best open source browser automation library 2026 playwright alternatives` },
   ],
   cua: [
     { source: "discovery.github_search", query: () => ({
         q: `"computer use" OR "gui agent" OR "screen agent" OR "desktop automation" stars:>5`,
         sort: "stars", order: "desc",
       }) },
-    { source: "discovery.web_search", query: () =>
-        `best open source computer use agent 2026 desktop automation` },
   ],
   mua: [
     { source: "discovery.github_search", query: () => ({
         q: `"mobile automation" OR appium OR "android automation" OR "ios automation" stars:>5`,
         sort: "stars", order: "desc",
       }) },
-    { source: "discovery.web_search", query: () =>
-        `best open source mobile automation framework 2026 android ios` },
   ],
   memory: [
     { source: "discovery.github_search", query: () => ({
         q: `"agent memory" OR "vector database" OR "semantic memory" OR qdrant OR chroma stars:>5`,
         sort: "stars", order: "desc",
       }) },
-    { source: "discovery.web_search", query: () =>
-        `best open source agent memory layer 2026 vector store` },
   ],
   tool: [
     { source: "discovery.github_search", query: (gap) => ({
@@ -84,8 +84,7 @@ const GAP_WATCH_DEDUPE_KEY = "id";
 
 const DEFAULT_NOTIFY = "notify.email.gmail";
 
-// Bound on watches created per tick. Since one gap now spawns multiple
-// watches, this is the total across all gaps on a single tick.
+// Bound on watches created per tick.
 const MAX_WATCHES_PER_TICK = 6;
 
 // Composite reason separator. `<gap.id>::<source>`.
@@ -121,6 +120,19 @@ export async function tick(deps, opts = {}) {
   // ─────────────────────────────────────────────────────────────
   // Pass 1: un-analyzed watch_results → proposals
   // ─────────────────────────────────────────────────────────────
+
+  // v0.15.15 — which gaps already have an open proposal? Skip their
+  // watch_results entirely. This is the fix for the "N emails per gap"
+  // flood: without it, every candidate batch from every watch generates
+  // a fresh proposal (and a fresh email) for the same gap.
+  const gapsWithOpenProposal = new Set();
+  for (const cap of graph.capabilities().values()) {
+    if (cap.kind !== "proposal") continue;
+    if (cap.adopted_at) continue;
+    if (cap.state !== "pending" && cap.state !== "in_review") continue;
+    if (cap.gap_id) gapsWithOpenProposal.add(cap.gap_id);
+  }
+
   let proposalsCreated = 0;
   for (const node of graph.capabilities().values()) {
     if (node.kind !== "watch_result") continue;
@@ -141,6 +153,23 @@ export async function tick(deps, opts = {}) {
       continue;
     }
 
+    // Skip: gap already has an open proposal. Mark as analyzed so we
+    // don't re-check on every tick, but don't propose.
+    if (gapsWithOpenProposal.has(gap.id)) {
+      events.emit("discovery.watch_result_skipped", {
+        watch_result_id: node.id,
+        gap_id: gap.id,
+        reason: "gap_already_has_open_proposal",
+      });
+      graph.putCapability({
+        id: node.id,
+        kind: "watch_result",
+        analyzed_at: Date.now(),
+        analysis_skipped_reason: "gap_already_has_open_proposal",
+      });
+      continue;
+    }
+
     try {
       const res = await deps.invoke("agentry.proposal", {
         gap,
@@ -149,7 +178,26 @@ export async function tick(deps, opts = {}) {
       }, { tenant: "local", by: "discovery_loop" });
 
       if (res.ok) {
+        // If the proposal was deduped (existing one found), don't count
+        // it as new and don't add the gap to the set again.
+        if (res.output.deduped) {
+          events.emit("discovery.proposal_deduped", {
+            watch_result_id: node.id,
+            gap_id: gap.id,
+            existing_proposal_id: res.output.proposal_id,
+          });
+          graph.putCapability({
+            id: node.id,
+            kind: "watch_result",
+            analyzed_at: Date.now(),
+            analysis_skipped_reason: "proposal_deduped",
+            proposal_id: res.output.proposal_id,
+          });
+          continue;
+        }
+
         proposalsCreated++;
+        gapsWithOpenProposal.add(gap.id); // new proposal is now the open one
         events.emit("discovery.proposal_created", {
           watch_result_id: node.id,
           gap_id: gap.id,
@@ -232,7 +280,6 @@ export async function tick(deps, opts = {}) {
   }
 
   // Which (gap, source) pairs already have a watch?
-  // reason is `<gap.id>::<source>`. Match by equality on the composite.
   const coveredWatchKeys = new Set();
   for (const cap of graph.capabilities().values()) {
     if (cap.kind !== "watch_instance") continue;
@@ -248,8 +295,8 @@ export async function tick(deps, opts = {}) {
 
   for (const gap of gaps) {
     const sources = SOURCES_BY_KIND[gap.wanted_kind] || defaultSources(gap);
-    let gapHasAnyUncovered = false;
 
+    let gapHasAnyUncovered = false;
     for (const policy of sources) {
       const key = compositeReason(gap.id, policy.source);
       if (!coveredWatchKeys.has(key)) {
