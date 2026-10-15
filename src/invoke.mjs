@@ -5,6 +5,7 @@
 // invoke(capabilityId, input, context) → { ok: true, output, cost, ms } | { ok: false, error }
 
 import { errors, ok, fail } from "./errors.mjs";
+import { recordRun } from "./graph/runs.mjs";
 
 /**
  * The Invoker registry. An invoker is a function:
@@ -101,30 +102,29 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
 
   const ms = Date.now() - startedAt;
 
-  // 5. Update reliability (last-write-wins moving average; simple, honest)
+  // 5. Record the run. No more per-invoke reliability rewrite — that
+  //    moved to a periodic rollup over runs.jsonl (see graph/runs.mjs).
+  //    Fixes capabilities.jsonl growing one line per invocation and
+  //    gives us a real per-run history for RSI.
   try {
-    const prev = cap.reliability || { success_rate: null, p50_ms: null, p99_ms: null };
-    const prevRuns = prev.runs || 0;
-    const runs = prevRuns + 1;
-    const successes = (prev.successes || 0) + (result.ok ? 1 : 0);
-    const nextP50 =
-      prev.p50_ms == null ? ms :
-      Math.round((prev.p50_ms * prevRuns + ms) / runs);
-    graph.putCapability({
-      id: cap.id,
-      reliability: {
-        ...prev,
-        runs,
-        successes,
-        success_rate: successes / runs,
-        p50_ms: nextP50,
-        p99_ms: prev.p99_ms == null ? ms : Math.max(prev.p99_ms, ms),
-        last_run_at: Date.now(),
-      },
+    const inputSession =
+      (input && typeof input === "object" && typeof input.session === "string")
+        ? input.session
+        : null;
+    recordRun(graph, {
+      capability_id: capabilityId,
+      session_id: inputSession,
+      tenant: context.tenant || null,
+      by: context.by || null,
+      task_id: context.task_id || null,
+      ok: result.ok,
+      ms,
+      error_code: result.ok ? null : (result.error?.code || null),
+      error_message: result.ok ? null : (result.error?.message || null),
+      cost: result.cost || null,
     });
   } catch (e) {
-    // Reliability bookkeeping must never break an invoke.
-    events.emit("invoke.reliability_update_failed", { capability_id: capabilityId, error: e.message });
+    events.emit("invoke.run_record_failed", { capability_id: capabilityId, error: e.message });
   }
 
   // 6. Emit finish event

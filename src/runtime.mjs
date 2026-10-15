@@ -4,6 +4,7 @@ import { EventLog } from "./events.mjs";
 import { loadConfig } from "./config.mjs";
 import { loadSeed } from "./seed.mjs";
 import { invoke } from "./invoke.mjs";
+import { startRollupTimer } from "./graph/runs.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -39,6 +40,13 @@ export class Runtime {
       if (cap.kind === "watch_instance") watcher.getWatches().set(cap.id, cap);
     }
     this.events.emit("runtime.boot.watches_loaded", { count: watcher.getWatches().size });
+
+    // v0.16.1 — periodic reliability rollup over runs.jsonl.
+    startRollupTimer(
+      this.graph,
+      this.events,
+      Number(process.env.AGENTRY_ROLLUP_MS) || 300000
+    );
 
     this.events.emit("runtime.boot.completed", {
       capabilities: this.graph.capabilities().size,
