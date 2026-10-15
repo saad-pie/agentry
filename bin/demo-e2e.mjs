@@ -15,7 +15,7 @@ const { Runtime } = await import("../src/runtime.mjs");
 const rt = new Runtime(); await rt.boot();
 rt.deps.invoke = (cap, input, ctx) => rt.invoke(cap, input, ctx);
 
-const TASK_TEXT = "Fetch https://example.com and return the HTTP status code and the body length in bytes.";
+const TASK_TEXT = "Take a screenshot of https://example.com and report the PNG byte size.";
 const WEAK_MODEL = "allam-2-7b";
 const CANDIDATE = {
   id: "node-fetch/node-fetch",
