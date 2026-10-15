@@ -3,7 +3,11 @@
 // Trial a synthesized handler in an isolated session.
 //
 //   1. Write a trial node so prepareSession can read `requires`.
-//   2. Prepare the trial session (npm + post_install via installer).
+//   1b. Composition pre-check: every id in requires.capability must be
+//       in the graph. A missing one fails fast with a named phase and
+//       records a gap against the *inner* id.
+//   2. Prepare the trial session (npm + post_install via installer,
+//      recursively including composed capabilities).
 //   3. import() the handler with cache-busting.
 //   4. Call accept().
 //   5. On pass: keep the node (clear trial marker), return {ok: true}.
@@ -12,10 +16,13 @@
 // Does NOT retire the gap. Does NOT email. Adopt owns that.
 // Does NOT copy the handler into src/handlers. The handler lives at
 // handler_file; the runtime lazy-loads it via the in_process_js patch.
+//
+// v0.15.25 — composition pre-check.
 
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
+import { recordComposedDepGap } from "./agentry.capability_gap.mjs";
 
 export default async function agentryTrial(input, ctx) {
   const { capability_id, handler_path, seed_path, session } = input || {};
@@ -62,16 +69,89 @@ export default async function agentryTrial(input, ctx) {
     };
   }
 
+  // ── 1b. Composition pre-check ──
+  // If this capability declares composed dependencies, verify they all
+  // exist in the graph. Missing inner → record the gap against the inner
+  // id and fail this trial with a phase adopt can name.
+  const composed = Array.isArray(trialNode.requires?.capability)
+    ? trialNode.requires.capability
+    : [];
+  for (const innerId of composed) {
+    const inner = graph.getCapability(innerId);
+    if (!inner) {
+      let gapId = null;
+      try {
+        const gap = recordComposedDepGap(
+          { graph, events },
+          {
+            outer_capability_id: capability_id,
+            missing_capability_id: innerId,
+          }
+        );
+        gapId = gap?.id || null;
+      } catch (e) {
+        events.emit("trial.composed_dep_gap_record_failed", {
+          capability_id,
+          missing_capability_id: innerId,
+          error: e.message,
+        });
+      }
+      events.emit("trial.composed_dep_missing", {
+        capability_id,
+        missing_capability_id: innerId,
+        gap_id: gapId,
+      });
+      _retire(ctx, capability_id, `trial composed_dep_missing: ${innerId}`);
+      return {
+        output: {
+          ok: false,
+          phase: "composed_dep_missing",
+          error: `composed dependency ${innerId} is not in the graph`,
+          missing_capability_id: innerId,
+          gap_id: gapId,
+          session: trialSession,
+          handler_path,
+        },
+        cost: { time_ms: Date.now() - started },
+      };
+    }
+  }
+
   // ── 2. Prepare session ──
   try {
     const { prepareSession } = await import("../runtime/installer.mjs");
     const prep = await prepareSession(ctx, { capId: capability_id, session: trialSession });
     events.emit("trial.prepared", { capability_id, session: trialSession, prep });
   } catch (e) {
-    events.emit("trial.prepare_failed", { capability_id, session: trialSession, error: e.message });
-    _retire(ctx, capability_id, `trial prepare: ${e.message}`);
+    // If installer throws a structured composed-dep error, name it.
+    const phase = e.phase === "composed_dep_missing" ? "composed_dep_missing"
+                : e.phase === "composed_dep_cycle"   ? "composed_dep_cycle"
+                : "prepare";
+    events.emit("trial.prepare_failed", {
+      capability_id, session: trialSession, phase, error: e.message,
+    });
+    if (phase === "composed_dep_missing" && e.missing_capability_id) {
+      try {
+        recordComposedDepGap(
+          { graph, events },
+          {
+            outer_capability_id: capability_id,
+            missing_capability_id: e.missing_capability_id,
+          }
+        );
+      } catch { /* best effort */ }
+    }
+    _retire(ctx, capability_id, `trial ${phase}: ${e.message}`);
     return {
-      output: { ok: false, phase: "prepare", error: e.message, session: trialSession, handler_path },
+      output: {
+        ok: false,
+        phase,
+        error: e.message,
+        missing_capability_id: e.missing_capability_id || null,
+        cycle: e.cycle || null,
+        session: trialSession,
+        handler_path,
+      },
       cost: { time_ms: Date.now() - started },
     };
   }

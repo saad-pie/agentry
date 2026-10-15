@@ -7,13 +7,43 @@
 // deps, this is a no-op (marked via a session env var).
 //
 // Batch 14 (the adoption pipeline) reuses this verbatim.
+//
+// v0.15.25 — composition.
+// A capability may declare `requires.capability: [<id>, ...]`. Before
+// installing its own npm/pip/post_install, prepareSession recursively
+// prepares each named inner capability in the same session. The inner's
+// deps land in the outer's session, so a composed handler can rely on
+// them (and, via glue.pre_invoke, invoke the inner capability directly).
+//
+// Two structured failure modes are named so callers can react:
+//   err.phase === "composed_dep_missing"  — an inner capability is not
+//                                            in the graph. err carries
+//                                            missing_capability_id and
+//                                            outer_capability_id.
+//   err.phase === "composed_dep_cycle"    — a capability transitively
+//                                            requires itself. err carries
+//                                            cycle (array of ids).
+//
+// Callers that want to record a gap against the *inner* capability should
+// check err.phase in their catch block. agentry.trial does this.
 
 const PREPARE_KEY = (capId) => `prepared:${capId}`;
 
-export async function prepareSession(deps, { capId, session }) {
+export async function prepareSession(deps, { capId, session, stack = [] }) {
   const { graph, events, invoke } = deps;
   const cap = graph.getCapability(capId);
   if (!cap) throw new Error(`prepareSession: unknown capability ${capId}`);
+
+  // Cycle detection: a capability may not transitively require itself.
+  if (stack.includes(capId)) {
+    const cycle = [...stack, capId];
+    const err = new Error(`prepareSession: cycle detected: ${cycle.join(" -> ")}`);
+    err.phase = "composed_dep_cycle";
+    err.cycle = cycle;
+    events.emit("installer.composed_dep_cycle", { capId, cycle });
+    throw err;
+  }
+  const nextStack = [...stack, capId];
 
   const requires = cap.requires || {};
 
@@ -31,7 +61,7 @@ export async function prepareSession(deps, { capId, session }) {
     );
   }
 
-  // Already prepared?
+  // Already prepared for this cap in this session?
   const sessionEnv = await getSessionEnv(invoke, session);
   if (sessionEnv[PREPARE_KEY(capId)]) {
     events.emit("installer.already_prepared", { capId, session });
@@ -40,7 +70,32 @@ export async function prepareSession(deps, { capId, session }) {
 
   const steps = [];
 
-  // npm
+  // ── Composition: prepare inner capabilities first ──
+  const composed = Array.isArray(requires.capability) ? requires.capability : [];
+  for (const innerId of composed) {
+    const inner = graph.getCapability(innerId);
+    if (!inner) {
+      const err = new Error(
+        `installer: composed dependency missing: ${innerId} (required by ${capId})`
+      );
+      err.phase = "composed_dep_missing";
+      err.missing_capability_id = innerId;
+      err.outer_capability_id = capId;
+      events.emit("installer.composed_dep_missing", {
+        capId,
+        missing_capability_id: innerId,
+      });
+      throw err;
+    }
+    events.emit("installer.composed_prepare", {
+      capId,
+      inner_capability_id: innerId,
+    });
+    await prepareSession(deps, { capId: innerId, session, stack: nextStack });
+    steps.push({ step: "composed", ok: true, inner_capability_id: innerId });
+  }
+
+  // ── npm ──
   if (Array.isArray(requires.npm) && requires.npm.length) {
     events.emit("installer.npm_starting", { capId, session, packages: requires.npm });
     const res = await invoke(
@@ -57,7 +112,7 @@ export async function prepareSession(deps, { capId, session }) {
     events.emit("installer.npm_complete", { capId, session, packages: requires.npm });
   }
 
-  // pip
+  // ── pip ──
   if (Array.isArray(requires.pip) && requires.pip.length) {
     events.emit("installer.pip_starting", { capId, session, packages: requires.pip });
     const res = await invoke(
@@ -74,7 +129,7 @@ export async function prepareSession(deps, { capId, session }) {
     events.emit("installer.pip_complete", { capId, session, packages: requires.pip });
   }
 
-  // post_install — a shell command run once after packages are installed.
+  // ── post_install — a shell command run once after packages are installed. ──
   if (typeof requires.post_install === "string" && requires.post_install.length) {
     events.emit("installer.post_install_starting", {
       capId,

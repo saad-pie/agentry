@@ -13,6 +13,12 @@
 // with `hits` incremented.
 //
 // The discovery loop reads recent gaps and creates watches to find candidates.
+//
+// v0.15.25: new export `recordComposedDepGap` for the composition case —
+// when capability A declares `requires.capability: ["B"]` and B isn't in
+// the graph, the gap must be recorded against B, not against A. Otherwise
+// discovery proposes candidates for the outer capability's kind, which is
+// the wrong problem to solve.
 
 import { errors } from "../errors.mjs";
 
@@ -20,6 +26,14 @@ const GAP_KINDS = new Set([
   "invalid_capability",  // A: capability id doesn't exist in the graph
   "invalid_spec",        // B: capability exists but no handler is registered
 ]);
+
+// Derive a wanted_kind from a dotted capability id. "bua.browser" → "bua".
+// Used in two places now (observeFailure and recordComposedDepGap) so it
+// lives in one.
+function deriveWantedKind(capabilityId) {
+  if (typeof capabilityId !== "string" || !capabilityId.includes(".")) return null;
+  return capabilityId.split(".")[0];
+}
 
 // Only treat specific invalid_spec reasons as gaps. "missing required input"
 // is a caller bug, not a gap. "no handler registered" is a real gap.
@@ -41,7 +55,7 @@ function isGapReason(code, message) {
  * a duplicate gap node.
  *
  * @param {object} deps       — { graph, events }
- * @param {object} gap        — { key, kind, wanted, reason, example_task_id? }
+ * @param {object} gap        — { key, wanted_kind, wanted_id, reason, example_task_id? }
  * @returns {object}          — the updated gap node
  */
 export function recordGap(deps, gap) {
@@ -101,20 +115,37 @@ export function observeFailure(deps, { capability_id, error, task_id }) {
   // capability_id exists but has no handler, the gap is the same shape —
   // we don't have a *working* <capability_id>.
   const key = `gap:${capability_id}`;
-  // The wanted_kind is a hint. If the capability_id contains a dot, take the
-  // part before the first dot as a kind — e.g. "bua.playwright" → "bua".
-  const wanted_kind = capability_id.includes(".")
-    ? capability_id.split(".")[0]
-    : null;
 
   return recordGap(deps, {
     key,
-    wanted_kind,
+    wanted_kind: deriveWantedKind(capability_id),
     wanted_id: capability_id,
     reason: error.code === "invalid_capability"
       ? "capability does not exist in graph"
       : "capability exists but has no handler",
     example_task_id: task_id || null,
+  });
+}
+
+/**
+ * v0.15.25 — Record a gap for a composed capability that is declared by
+ * another capability but does not exist in the graph. The gap is
+ * attributed to the *missing inner* capability, not the outer one.
+ * Discovery will then search for candidates of the inner's kind.
+ *
+ * @param {object} deps
+ * @param {object} args — { outer_capability_id, missing_capability_id, example_task_id? }
+ * @returns {object|null} — the gap node, or null if inputs are invalid
+ */
+export function recordComposedDepGap(deps, { outer_capability_id, missing_capability_id, example_task_id = null }) {
+  if (!outer_capability_id || !missing_capability_id) return null;
+  const key = `gap:${missing_capability_id}`;
+  return recordGap(deps, {
+    key,
+    wanted_kind: deriveWantedKind(missing_capability_id),
+    wanted_id: missing_capability_id,
+    reason: `composed capability ${outer_capability_id} requires it, but it is not in the graph`,
+    example_task_id,
   });
 }
 

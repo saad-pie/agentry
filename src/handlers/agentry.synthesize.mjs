@@ -4,17 +4,27 @@
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
 // v0.15.19:
-//   - Synthesized handlers now call prepareSession at the top of run().
-//     Previously only accept() called it, which meant trial worked but
-//     runtime invocations from a fresh session died with
-//     "Cannot find package 'playwright'" — the session had no node_modules.
-//     prepareSession is idempotent, so this is a no-op after the first call
-//     per session.
+//   - Synthesized handlers call prepareSession at the top of run().
 //
 // v0.15.12:
 //   - Fix double-escaped kernel_script from reasoning models.
+//
 // v0.15.11:
 //   - Synthesized handlers import installer.mjs via an absolute path.
+//
+// v0.15.25 — composition.
+//   The spec schema now accepts two new fields:
+//     capability.requires.capability: [<id>, ...]
+//         Other agentry capabilities this handler depends on. Each must
+//         exist in the graph or the trial fails with a named phase.
+//         prepareSession recurses through these so the outer's session
+//         has all inner deps installed.
+//     glue.pre_invoke: { <ENV_VAR>: { capability, input_map, extract } }
+//         Before running kernel_script, invoke each named capability and
+//         store an extracted field of its output in an env var the
+//         kernel script reads. This is how a composed handler actually
+//         uses the inner capability it declared.
+//   The prompt teaches the model to prefer composing over reinventing.
 
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -242,7 +252,8 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("    \"requires\": {");
   lines.push("      \"npm\": [\"<pkg>\"],");
   lines.push("      \"pip\": [\"<pkg>\"],");
-  lines.push("      \"post_install\": \"<shell cmd or null>\"");
+  lines.push("      \"post_install\": \"<shell cmd or null>\",");
+  lines.push("      \"capability\": [\"<other.cap.id>\"]");
   lines.push("    }");
   lines.push("  },");
   lines.push("  \"accept_spec\": {");
@@ -252,6 +263,13 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("  \"kernel_language\": \"node\" | \"python\",");
   lines.push("  \"kernel_script\": \"<the code that runs in the kernel session. Reads env vars set by the handler. Writes its result to stdout.>\",");
   lines.push("  \"glue\": {");
+  lines.push("    \"pre_invoke\": {");
+  lines.push("      \"<ENV_VAR>\": {");
+  lines.push("        \"capability\": \"<other.cap.id>\",");
+  lines.push("        \"input_map\": { \"<inner_input_key>\": \"<outer_input_key>\" },");
+  lines.push("        \"extract\": \"<dot.path into inner output>\"");
+  lines.push("      }");
+  lines.push("    },");
   lines.push("    \"env_map\": { \"<ENV_VAR>\": \"<input_key>\" },");
   lines.push("    \"result_parse\": \"stdout_text\" | \"stdout_json\",");
   lines.push("    \"output_map\": { \"<output_key>\": \"<dot.path into parsed result>\" }");
@@ -260,12 +278,32 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("");
   lines.push("Rules:");
   lines.push("- Output ONLY JSON. No prose. No fences.");
-  lines.push("- kernel_script runs in a kernel session. It reads env vars (from env_map)");
-  lines.push("  and writes its result to stdout. For binary outputs, write base64.");
+  lines.push("- kernel_script runs in a kernel session. It reads env vars (from env_map");
+  lines.push("  and pre_invoke) and writes its result to stdout. For binary outputs,");
+  lines.push("  write base64.");
   lines.push("- If you cannot produce a working handler, output: { \"error\": \"<reason>\" }");
   lines.push("- Prefer ONE npm package over five. Prefer an API call over spawning a browser.");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
+  lines.push("");
+  lines.push("COMPOSITION — read carefully:");
+  lines.push("- requires.capability lists OTHER agentry capabilities this handler needs.");
+  lines.push("  Each id must already exist in the graph or the trial will fail. Omit the");
+  lines.push("  field entirely (or use []) if there are none.");
+  lines.push("- glue.pre_invoke lets this handler actually USE those capabilities. Each");
+  lines.push("  entry invokes one capability before the kernel script runs and stores an");
+  lines.push("  extracted field of its output in an env var. input_map maps each inner");
+  lines.push("  input key to an outer input key. extract is a dot path into the inner's");
+  lines.push("  output object.");
+  lines.push("- Any capability used in glue.pre_invoke MUST also be listed in");
+  lines.push("  requires.capability. If you list one and not the other, the composition");
+  lines.push("  will not be prepared and the trial will fail.");
+  lines.push("- Prefer composing existing capabilities over reinventing their work. If a");
+  lines.push("  capability already exists that does part of the job, use pre_invoke to");
+  lines.push("  call it and build on its output rather than duplicating its logic in");
+  lines.push("  kernel_script.");
+  lines.push("- accept_spec.input must include values for every outer input key that a");
+  lines.push("  pre_invoke.input_map reads. Otherwise the acceptance probe cannot run.");
   lines.push("");
   lines.push("IMPORTANT — kernel_script escaping:");
   lines.push("- Inside the kernel_script string, each real newline must be a single");
@@ -298,6 +336,7 @@ function renderHandler(spec) {
   out.push("const PRODUCES = " + JSON.stringify(capability.produces || {}, null, 2) + ";");
   out.push("const REQUIRES = " + JSON.stringify(capability.requires || {}, null, 2) + ";");
   out.push("const ENV_MAP = " + JSON.stringify(glue.env_map || {}, null, 2) + ";");
+  out.push("const PRE_INVOKE = " + JSON.stringify(glue.pre_invoke || {}, null, 2) + ";");
   out.push("const OUTPUT_MAP = " + JSON.stringify(glue.output_map || {}, null, 2) + ";");
   out.push("const RESULT_PARSE = " + JSON.stringify(glue.result_parse || "stdout_text") + ";");
   out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
@@ -340,9 +379,8 @@ function renderHandler(spec) {
   out.push("  }");
   out.push("");
   // v0.15.19: ensure this session has the deps this capability declares.
-  // First call installs; subsequent calls are no-ops thanks to the
-  // installer's per-session `prepared:<capId>` marker. Makes the
-  // capability self-contained: any session, any caller, no external prep.
+  // v0.15.25: prepareSession recurses through requires.capability, so a
+  // composed handler also gets its inner capabilities' deps installed.
   out.push("  {");
   out.push("    const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
   out.push("    await prepareSession(ctx, { capId: CAP_ID, session });");
@@ -351,11 +389,29 @@ function renderHandler(spec) {
   out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session },");
   out.push("    { tenant: \"local\", by: CAP_ID });");
   out.push("");
+  // v0.15.25: pre_invoke. Call composed capabilities and store extracted
+  // fields in `pre` — they get merged into the kernel env below.
+  out.push("  const pre = {};");
+  out.push("  for (const [envKey, spec] of Object.entries(PRE_INVOKE)) {");
+  out.push("    const innerInput = {};");
+  out.push("    for (const [innerKey, outerKey] of Object.entries(spec.input_map || {})) {");
+  out.push("      innerInput[innerKey] = input[outerKey];");
+  out.push("    }");
+  out.push("    const innerRes = await ctx.invoke(spec.capability, innerInput);");
+  out.push("    if (!innerRes.ok) {");
+  out.push("      throw new Error(CAP_ID + \": pre_invoke \" + spec.capability + \" failed: \" + innerRes.error.code + \": \" + innerRes.error.message);");
+  out.push("    }");
+  out.push("    let v = innerRes.output;");
+  out.push("    for (const p of String(spec.extract || \"\").split(\".\")) v = v?.[p];");
+  out.push("    pre[envKey] = v === undefined || v === null ? \"\" : String(v);");
+  out.push("  }");
+  out.push("");
   out.push("  const env = {};");
   out.push("  for (const [envKey, inputKey] of Object.entries(ENV_MAP)) {");
   out.push("    const v = input[inputKey];");
   out.push("    env[envKey] = v === undefined || v === null ? \"\" : String(v);");
   out.push("  }");
+  out.push("  for (const [k, v] of Object.entries(pre)) env[k] = v;");
   out.push("");
   out.push("  const res = await ctx.invoke(\"agentry.os\", {");
   out.push("    action: KERNEL_ACTION,");
@@ -549,6 +605,32 @@ export default async function agentrySynthesize(input, ctx) {
     throw new Error("agentry.synthesize: spec missing capability.id, kernel_script, or glue");
   }
 
+  // v0.15.25 — composition coherence check.
+  // Any capability named in glue.pre_invoke must also be in
+  // requires.capability. The prompt tells the LLM this, but enforce it
+  // here so a forgetful model doesn't produce a spec that fails only
+  // at trial time.
+  const composedDeclared = new Set(
+    Array.isArray(spec.capability.requires?.capability)
+      ? spec.capability.requires.capability
+      : []
+  );
+  const preInvokeCaps = Object.values(spec.glue.pre_invoke || {})
+    .map(e => e?.capability)
+    .filter(Boolean);
+  const missingDecl = preInvokeCaps.filter(c => !composedDeclared.has(c));
+  if (missingDecl.length) {
+    events.emit("synthesize.composition_mismatch", {
+      proposal_id, candidate_id,
+      capability_id: spec.capability.id,
+      missing_declarations: missingDecl,
+    });
+    throw new Error(
+      "agentry.synthesize: pre_invoke references capabilities not declared in requires.capability: "
+      + missingDecl.join(", ")
+    );
+  }
+
   mkdirSync(HANDLERS_DIR, { recursive: true });
   mkdirSync(SEEDS_DIR, { recursive: true });
 
@@ -564,6 +646,8 @@ export default async function agentrySynthesize(input, ctx) {
     kind: spec.capability.kind,
     handler_path: handlerPath,
     seed_path: seedPath,
+    composed_capabilities: [...composedDeclared],
+    pre_invoke_count: preInvokeCaps.length,
     model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
     ms: Date.now() - started,
   });
@@ -578,6 +662,7 @@ export default async function agentrySynthesize(input, ctx) {
       repo_dir: facts.repo_dir,
       repo_read: facts.cloned,
       spec,
+      composed_capabilities: [...composedDeclared],
       model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : (llmRes.output.model || null),
     },
     cost: { time_ms: Date.now() - started },
