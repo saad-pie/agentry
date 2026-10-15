@@ -1,9 +1,7 @@
 // agentry/src/handlers/agentry.proposal.mjs
 // Turns a (gap, candidates) pair into a reviewed proposal.
 //
-// v0.15.15: at most one open proposal per gap. If a proposal for this
-// gap already exists and hasn't been terminally processed (adopted or
-// rejected or retired), dedupe against it instead of creating a new one.
+// v0.15.15: at most one open proposal per gap.
 //
 // v0.15.22: the "open" predicate was widened from
 //   (state === "pending" || state === "in_review")
@@ -12,9 +10,19 @@
 // The old predicate missed proposals in state "decided" that hadn't
 // yet been picked up by the discovery loop's adoption pass. That was
 // latent while every proposal went through human approval, but it
-// becomes a live bug the moment auto-adoption is introduced: an
-// auto-decided proposal would not block the next watch_result, and
-// the next tick would create a duplicate for the same gap.
+// becomes a live bug the moment auto-adoption is introduced.
+//
+// v0.15.23: auto-approval by kind whitelist. If the gap's wanted_kind
+// is in config.runtime.adoptionAutoKinds AND the reasoner recommended a
+// candidate with confidence "high", the proposal node is written in
+// state "decided" with a pre-filled decisions map and the approval
+// email is skipped. The discovery loop's Pass 2 picks it up on the
+// next tick exactly like a human-approved proposal.
+//
+// The whitelist is deterministic by design. Fit scores drift across
+// model swaps (we've seen three different models rank three different
+// top candidates for the same gap), so a numeric threshold is unstable.
+// A kind list is not. bua/cua/mua/memory stay human-gated.
 
 import { randomBytes } from "node:crypto";
 
@@ -183,6 +191,20 @@ function approvalTemplates() {
   };
 }
 
+// v0.15.23 — the auto-approval gate.
+// Returns the recommended candidate if this proposal qualifies for
+// automatic approval, else null. Null means "fall through to email".
+function shouldAutoApprove(gap, analysis, config) {
+  if (!analysis || !analysis.recommended_id) return null;
+  const autoKinds = config?.runtime?.adoptionAutoKinds;
+  if (!Array.isArray(autoKinds) || autoKinds.length === 0) return null;
+  if (!gap.wanted_kind || !autoKinds.includes(gap.wanted_kind)) return null;
+  const recommended = (analysis.candidates || []).find(c => c.id === analysis.recommended_id);
+  if (!recommended) return null;
+  if (recommended.confidence !== "high") return null;
+  return recommended;
+}
+
 function renderEmail({ gap, analysis, perCandidateTokens, approveBase }) {
   const lines = [];
   lines.push(`Gap: ${gap.wanted_kind || "?"}  (${gap.wanted_id || gap.id})`);
@@ -230,11 +252,7 @@ export default async function agentryProposal(input, ctx) {
     throw new Error("agentry.proposal requires ctx.invoke — was it invoked through the runtime?");
   }
 
-  // v0.15.22 — dedupe: at most one open proposal per gap.
-  // "Open" = a proposal node for this gap that has neither been
-  // terminally processed (adopted / rejected → adopted_at set) nor
-  // explicitly retired. This covers pending, in_review, and decided-
-  // but-not-yet-adopted proposals alike.
+  // Dedupe: at most one open proposal per gap.
   const openProposal = [...ctx.graph.capabilities().values()].find(
     (c) =>
       c.kind === "proposal" &&
@@ -288,10 +306,15 @@ export default async function agentryProposal(input, ctx) {
   gap._candidatesById = candidatesById;
   gap._proposalId = proposalId;
 
+  // v0.15.23 — auto-approval decision is made before the node is written,
+  // so the node goes into the graph already in its final state.
+  const autoApproved = shouldAutoApprove(gap, analysis, ctx.config);
+  const now = Date.now();
+
   const proposalNode = {
     id: proposalId,
     kind: "proposal",
-    state: "pending",
+    state: autoApproved ? "decided" : "pending",
     gap_id: gap.id,
     gap_wanted_kind: gap.wanted_kind || null,
     gap_wanted_id: gap.wanted_id || null,
@@ -310,9 +333,20 @@ export default async function agentryProposal(input, ctx) {
     })),
     tokens: tokenIndex,
     tokens_expires_at: expiresAt,
-    decisions: {},
-    created_at: Date.now(),
-    updated_at: Date.now(),
+    decisions: autoApproved
+      ? {
+          [autoApproved.id]: {
+            decision: "approved",
+            at: now,
+            auto: true,
+            confidence: autoApproved.confidence,
+            fit: autoApproved.fit,
+          },
+        }
+      : {},
+    auto_approved: Boolean(autoApproved),
+    created_at: now,
+    updated_at: now,
   };
   ctx.graph.putCapability(proposalNode);
   ctx.events.emit("proposal.created", {
@@ -322,35 +356,55 @@ export default async function agentryProposal(input, ctx) {
     model_used: modelUsed,
     provider_used: providerUsed,
     recommended_id: analysis.recommended_id || null,
+    auto_approved: Boolean(autoApproved),
   });
 
-  const approveBase = approvalTemplates();
-  const body = renderEmail({ gap, analysis, perCandidateTokens, approveBase });
-  const subject = `[agentry] proposal: ${analysis.recommended_id || `${candidates.length} candidates`} for ${gap.wanted_kind || gap.id}`;
+  let notified = false;
+  let deliveredVia = null;
+  let fallbackUsed = false;
 
-  const notifyRes = await deps.invoke("notify.fallback", {
-    subject,
-    body_markdown: body,
-    primary: notify,
-    fallback: "notify.console",
-  }, {
-    tenant: "local", by: "agentry.proposal",
-  });
-
-  if (!notifyRes.ok) {
-    ctx.events.emit("proposal.notify_failed", {
+  if (autoApproved) {
+    ctx.events.emit("proposal.auto_approved", {
       proposal_id: proposalId,
-      code: notifyRes.error.code,
-      message: notifyRes.error.message,
+      gap_id: gap.id,
+      gap_wanted_kind: gap.wanted_kind,
+      recommended_id: autoApproved.id,
+      confidence: autoApproved.confidence,
+      fit: autoApproved.fit ?? null,
+      reason: "kind_whitelist_high_confidence",
     });
   } else {
-    ctx.events.emit("proposal.notified", {
-      proposal_id: proposalId,
-      channel: notifyRes.output.channel,
-      primary_ok: notifyRes.output.primary_ok,
-      fallback_used: notifyRes.output.fallback_used,
-      message_id: notifyRes.output.message_id || null,
+    const approveBase = approvalTemplates();
+    const body = renderEmail({ gap, analysis, perCandidateTokens, approveBase });
+    const subject = `[agentry] proposal: ${analysis.recommended_id || `${candidates.length} candidates`} for ${gap.wanted_kind || gap.id}`;
+
+    const notifyRes = await deps.invoke("notify.fallback", {
+      subject,
+      body_markdown: body,
+      primary: notify,
+      fallback: "notify.console",
+    }, {
+      tenant: "local", by: "agentry.proposal",
     });
+
+    if (!notifyRes.ok) {
+      ctx.events.emit("proposal.notify_failed", {
+        proposal_id: proposalId,
+        code: notifyRes.error.code,
+        message: notifyRes.error.message,
+      });
+    } else {
+      notified = true;
+      deliveredVia = notifyRes.output.channel;
+      fallbackUsed = notifyRes.output.fallback_used;
+      ctx.events.emit("proposal.notified", {
+        proposal_id: proposalId,
+        channel: notifyRes.output.channel,
+        primary_ok: notifyRes.output.primary_ok,
+        fallback_used: notifyRes.output.fallback_used,
+        message_id: notifyRes.output.message_id || null,
+      });
+    }
   }
 
   return {
@@ -361,10 +415,12 @@ export default async function agentryProposal(input, ctx) {
       recommended_id: analysis.recommended_id || null,
       model_used: modelUsed,
       provider_used: providerUsed,
-      notified: notifyRes.ok,
-      delivered_via: notifyRes.ok ? notifyRes.output.channel : null,
-      fallback_used: notifyRes.ok ? notifyRes.output.fallback_used : false,
-      approval_urls_available: Boolean(approveBase),
+      auto_approved: Boolean(autoApproved),
+      auto_approved_candidate_id: autoApproved?.id || null,
+      notified,
+      delivered_via: deliveredVia,
+      fallback_used: fallbackUsed,
+      approval_urls_available: Boolean(APPROVAL_BASE_URL),
     },
     cost: { time_ms: Date.now() - started },
   };
