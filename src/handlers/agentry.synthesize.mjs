@@ -3,13 +3,16 @@
 // The teaching handler. Given an approved candidate, produce a working
 // handler for the gap it fills — following the shape of bua.screenshot.
 //
-// v0.15.12:
-//   - Fix double-escaped kernel_script from reasoning models. Some models
-//     (gpt-oss-120b) emit code with literal \n and \" sequences inside
-//     their JSON string output, which survives JSON.parse and lands in
-//     the kernel as one line. Detect that pattern (no real newlines but
-//     escaped ones present) and decode once before writing the file.
+// v0.15.19:
+//   - Synthesized handlers now call prepareSession at the top of run().
+//     Previously only accept() called it, which meant trial worked but
+//     runtime invocations from a fresh session died with
+//     "Cannot find package 'playwright'" — the session had no node_modules.
+//     prepareSession is idempotent, so this is a no-op after the first call
+//     per session.
 //
+// v0.15.12:
+//   - Fix double-escaped kernel_script from reasoning models.
 // v0.15.11:
 //   - Synthesized handlers import installer.mjs via an absolute path.
 
@@ -49,9 +52,7 @@ const MODEL_CHAIN = [
 // inside regex or string literals.
 function decodeIfDoubleEscaped(s) {
   if (typeof s !== "string" || !s.length) return s;
-  // Already has real newlines: assume it's fine.
   if (s.includes("\n")) return s;
-  // No real newlines but escaped ones present: double-escaped.
   if (!s.includes("\\n")) return s;
   return s
     .replace(/\\n/g, "\n")
@@ -336,6 +337,15 @@ function renderHandler(spec) {
   out.push("");
   out.push("  if (typeof ctx.invoke !== \"function\") {");
   out.push("    throw new Error(CAP_ID + \" requires ctx.invoke\");");
+  out.push("  }");
+  out.push("");
+  // v0.15.19: ensure this session has the deps this capability declares.
+  // First call installs; subsequent calls are no-ops thanks to the
+  // installer's per-session `prepared:<capId>` marker. Makes the
+  // capability self-contained: any session, any caller, no external prep.
+  out.push("  {");
+  out.push("    const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
+  out.push("    await prepareSession(ctx, { capId: CAP_ID, session });");
   out.push("  }");
   out.push("");
   out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session },");
