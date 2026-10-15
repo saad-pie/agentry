@@ -7,17 +7,21 @@
 // final JSON. No DSH, no gateway, no queue — just the model and a
 // tool loop we fully control.
 //
-// v0.15.16: openai/gpt-oss-120b on Groq is a reasoning model and
-// rejects any tool_choice value (400 tool_use_failed). Switched to
-// llama-3.3-70b-versatile primary, qwen/qwen3-32b fallback — both
-// support normal tool calling. Also removed tool_choice from the
-// request entirely.
+// v0.15.18: qwen/qwen3.8-27b on Groq is the only live non-reasoning
+// tool-capable model (verified: content="OK", no reasoning field).
+// openai/gpt-oss-20b and 120b both emit to a "reasoning" field and
+// return empty content, which breaks the tool loop.
+//
+// Model chain is now a list of {provider, model} pairs, so the
+// fallback can be a different provider: groq/qwen primary, google
+// gemini fallback.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
 const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "groq";
-const MODEL = process.env.AGENTRY_DEEP_MODEL || "llama-3.3-70b-versatile";
-const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "qwen/qwen3-32b";
+const MODEL = process.env.AGENTRY_DEEP_MODEL || "qwen/qwen3.8-27b";
+const FALLBACK_PROVIDER = process.env.AGENTRY_DEEP_FALLBACK_PROVIDER || "google";
+const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "gemini-2.5-flash";
 const MAX_TURNS = Number(process.env.AGENTRY_DEEP_MAX_TURNS || "5");
 const MAX_TOOL_CALLS_PER_TURN = 4;
 
@@ -230,17 +234,19 @@ export default async function agentryReasonDeep(input, ctx) {
   let finalContent = null;
   let modelUsed = null;
 
-  const modelChain = [MODEL];
-  if (FALLBACK_MODEL && FALLBACK_MODEL !== MODEL) modelChain.push(FALLBACK_MODEL);
+  const modelChain = [{ provider: PROVIDER, model: MODEL }];
+  if (FALLBACK_MODEL && (FALLBACK_MODEL !== MODEL || FALLBACK_PROVIDER !== PROVIDER)) {
+    modelChain.push({ provider: FALLBACK_PROVIDER, model: FALLBACK_MODEL });
+  }
 
   outer:
-  for (const model of modelChain) {
+  for (const { provider, model } of modelChain) {
     messages.length = 2;
     toolsUsed.length = 0;
 
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const r = await ctx.invoke("llm.openai_compat", {
-        provider: PROVIDER,
+        provider,
         model,
         messages,
         tools: TOOLS,
@@ -249,9 +255,9 @@ export default async function agentryReasonDeep(input, ctx) {
       }, { tenant: "local", by: "agentry.reason.deep" });
 
       if (!r.ok) {
-        attempts.push({ model, turn, ok: false, code: r.error.code, message: r.error.message });
+        attempts.push({ provider, model, turn, ok: false, code: r.error.code, message: r.error.message });
         ctx.events.emit("agentry.reason.deep.llm_failed", {
-          model, turn, code: r.error.code, message: r.error.message,
+          provider, model, turn, code: r.error.code, message: r.error.message,
         });
         continue outer;
       }
@@ -261,7 +267,7 @@ export default async function agentryReasonDeep(input, ctx) {
 
       if (toolCalls.length === 0) {
         finalContent = String(r.output.content || "");
-        attempts.push({ model, turn, ok: true, final: true });
+        attempts.push({ provider, model, turn, ok: true, final: true });
         break outer;
       }
 
@@ -362,7 +368,7 @@ export default async function agentryReasonDeep(input, ctx) {
       note: gap_id
         ? "A capability gap was recorded. A proposal will be generated in the background and emailed for approval."
         : "No gap recorded — this looks like a retry or in-session fix.",
-      model_used: `${PROVIDER}/${modelUsed || MODEL}`,
+      model_used: modelUsed || `${PROVIDER}/${MODEL}`,
       tools_used: toolsUsed,
     },
     cost: { time_ms: Date.now() - started, http_calls: attempts.length + toolsUsed.length },
