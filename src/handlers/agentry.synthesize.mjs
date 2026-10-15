@@ -1,47 +1,37 @@
 // agentry/src/handlers/agentry.synthesize.mjs
 //
 // The teaching handler. Given an approved candidate, produce a working
-// handler for the gap it fills — following the shape of bua.screenshot.
+// handler for the gap it fills.
 //
-// v0.15.19:
-//   - Synthesized handlers call prepareSession at the top of run().
+// v0.15.29 — fill-in-the-blanks synthesis.
+//   The old prompt handed the model a full reference handler and said
+//   "study this shape." The model copied it, and every new capability
+//   came out as the reference stretched to fit. The reference file
+//   itself drifted toward whatever the last synthesis produced.
+//   Replaced with: for the gap's wanted_kind, look up a shape from
+//   _shapes.mjs and ask the model to fill each slot for the specific
+//   capability. No reference code means no anchor to copy.
 //
-// v0.15.12:
-//   - Fix double-escaped kernel_script from reasoning models.
-//
-// v0.15.11:
-//   - Synthesized handlers import installer.mjs via an absolute path.
-//
-// v0.15.25 — composition.
-//   The spec schema now accepts two new fields:
-//     capability.requires.capability: [<id>, ...]
-//         Other agentry capabilities this handler depends on. Each must
-//         exist in the graph or the trial fails with a named phase.
-//         prepareSession recurses through these so the outer's session
-//         has all inner deps installed.
-//     glue.pre_invoke: { <ENV_VAR>: { capability, input_map, extract } }
-//         Before running kernel_script, invoke each named capability and
-//         store an extracted field of its output in an env var the
-//         kernel script reads. This is how a composed handler actually
-//         uses the inner capability it declared.
-//   The prompt teaches the model to prefer composing over reinventing.
+//   The spec now carries a plan field: one entry per shape step, each
+//   with verb / what / fails_if / code. The renderer compiles the plan
+//   into a single kernel script with each step as a labeled segment.
+//   Steps execute in the same process so state (browser handle, db
+//   connection) persists. The plan is also stored in the seed JSON for
+//   audit.
 
-import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getShape } from "./_shapes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR
   || "/tmp/home/.dsh/agentry-synthesized/handlers";
 const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR
   || "/tmp/home/.dsh/agentry-synthesized/seeds";
-const REFERENCE_FILE = "bua.screenshot.mjs";
 const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
 
-// Absolute path to installer.mjs, resolved once at load. Baked into every
-// synthesized handler so it can import prepareSession without depending
-// on relative path resolution.
 const INSTALLER_PATH = join(HERE, "..", "runtime", "installer.mjs").replace(/\\/g, "/");
 
 const MODEL_CHAIN = [
@@ -51,15 +41,6 @@ const MODEL_CHAIN = [
   { provider: "google", model: "gemini-2.5-flash" },
 ];
 
-// Some reasoning models emit code as a string with literal \n and \"
-// sequences inside their JSON, and those survive JSON.parse as two
-// characters instead of one. Symptom: the kernel script has no real
-// newlines but many "\n" substrings, and node fails to parse it.
-//
-// Detect that pattern precisely and decode once. If the string already
-// contains real newlines (which is what a well-behaved model emits), we
-// leave it alone — we don't want to touch legitimate escape sequences
-// inside regex or string literals.
 function decodeIfDoubleEscaped(s) {
   if (typeof s !== "string" || !s.length) return s;
   if (s.includes("\n")) return s;
@@ -72,10 +53,6 @@ function decodeIfDoubleEscaped(s) {
     .replace(/\\'/g, "'")
     .replace(/\\\\/g, "\\");
 }
-
-// ─────────────────────────────────────────────────────────────
-// Repo fact gathering — deterministic, no LLM
-// ─────────────────────────────────────────────────────────────
 
 async function readRepoTerritory(candidate, deps) {
   const session = "synth_" + candidate.id.replace(/[^a-z0-9_.-]/gi, "_") + "_" + Date.now().toString(36);
@@ -188,10 +165,10 @@ async function readRepoTerritory(candidate, deps) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// The prompt
+// The prompt — fill in the blanks, do not copy a reference
 // ─────────────────────────────────────────────────────────────
 
-function buildPrompt({ gap, candidate, facts, referenceHandler }) {
+function buildPrompt({ gap, candidate, facts, shape }) {
   const gapJson = JSON.stringify({
     id: gap.id,
     wanted_id: gap.wanted_id || gap.id.replace(/^gap:/, ""),
@@ -217,9 +194,11 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   const lines = [];
   lines.push("You are agentry's code synthesizer.");
   lines.push("");
-  lines.push("A gap has been approved for adoption. Produce a JSON spec that fills");
-  lines.push("slots in a handler template. The runtime renders your spec into a real");
-  lines.push(".mjs file. Do NOT write the handler yourself.");
+  lines.push("A gap has been approved for adoption. You will be given a SHAPE —");
+  lines.push("a fixed list of steps that every capability of this kind follows.");
+  lines.push("Your job is to fill in each step for THIS specific gap. You are");
+  lines.push("NOT copying a reference. You are reasoning about what this");
+  lines.push("capability needs to do, step by step, in the shape's order.");
   lines.push("");
   lines.push("Return ONLY a JSON object. No prose. No markdown fences.");
   lines.push("");
@@ -232,21 +211,23 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("=== REPO FACTS ===");
   lines.push(repoFacts);
   lines.push("");
-  lines.push("=== THE REFERENCE HANDLER — study this shape ===");
-  lines.push("The template exports capability, accept, and a default run(input, ctx).");
-  lines.push("It uses ctx.invoke(\"agentry.os\", { action: \"node.run\", session, code, env })");
-  lines.push("to run a Node script inside a kernel session. Your kernel_script will be");
-  lines.push("run the same way. The script's stdout becomes the handler's output.");
+  lines.push("=== THE SHAPE — fill every slot, do not add or skip steps ===");
+  lines.push("Kind: " + (gap.wanted_kind || "unknown"));
+  lines.push("Description: " + shape.description);
   lines.push("");
-  lines.push("--- BEGIN REFERENCE HANDLER ---");
-  lines.push(referenceHandler);
-  lines.push("--- END REFERENCE HANDLER ---");
-  lines.push("");
+  for (let i = 0; i < shape.steps.length; i++) {
+    const s = shape.steps[i];
+    lines.push("Step " + (i + 1) + " — " + s.verb);
+    lines.push("  why:      " + s.why);
+    lines.push("  fails if: " + s.fails_if);
+    lines.push("  produces: " + s.produces);
+    lines.push("");
+  }
   lines.push("=== PRODUCE THIS JSON ===");
   lines.push("{");
   lines.push("  \"capability\": {");
-  lines.push("    \"id\": \"<dotted id, e.g. 'bua.browser'>\",");
-  lines.push("    \"kind\": \"<bua|cua|mua|memory|tool|notify|web|harness|unknown>\",");
+  lines.push("    \"id\": \"<exact dotted id from THE GAP above>\",");
+  lines.push("    \"kind\": \"<" + (gap.wanted_kind || "unknown") + ">\",");
   lines.push("    \"accepts\": { \"<key>\": \"string\" | { \"type\": \"string|number|boolean\", \"optional\": true } },");
   lines.push("    \"produces\": { \"<output_key>\": \"string|number|boolean\" },");
   lines.push("    \"requires\": {");
@@ -256,12 +237,21 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("      \"capability\": [\"<other.cap.id>\"]");
   lines.push("    }");
   lines.push("  },");
+  lines.push("  \"plan\": [");
+  lines.push("    {");
+  lines.push("      \"step\": 1,");
+  lines.push("      \"verb\": \"<verb from the shape, exact>\",");
+  lines.push("      \"what\": \"<one sentence: what THIS capability does at this step>\",");
+  lines.push("      \"fails_if\": \"<the specific failure mode for THIS capability at this step>\",");
+  lines.push("      \"code\": \"<the code that runs at this step, in the SAME kernel process. Use variables set by earlier steps. One statement per line.>\"");
+  lines.push("    }");
+  lines.push("    // ... one entry per shape step, in order");
+  lines.push("  ],");
   lines.push("  \"accept_spec\": {");
   lines.push("    \"input\": { \"<key>\": \"<value for the acceptance probe>\" },");
   lines.push("    \"min_bytes\": 500");
   lines.push("  },");
   lines.push("  \"kernel_language\": \"node\" | \"python\",");
-  lines.push("  \"kernel_script\": \"<the code that runs in the kernel session. Reads env vars set by the handler. Writes its result to stdout.>\",");
   lines.push("  \"glue\": {");
   lines.push("    \"pre_invoke\": {");
   lines.push("      \"<ENV_VAR>\": {");
@@ -278,50 +268,58 @@ function buildPrompt({ gap, candidate, facts, referenceHandler }) {
   lines.push("");
   lines.push("Rules:");
   lines.push("- Output ONLY JSON. No prose. No fences.");
-  lines.push("- kernel_script runs in a kernel session. It reads env vars (from env_map");
-  lines.push("  and pre_invoke) and writes its result to stdout. For binary outputs,");
-  lines.push("  write base64.");
-  lines.push("- If you cannot produce a working handler, output: { \"error\": \"<reason>\" }");
-  lines.push("- Prefer ONE npm package over five. Prefer an API call over spawning a browser.");
+  lines.push("- The plan array MUST have exactly " + shape.steps.length + " entries, in the shape's order.");
+  lines.push("- Each plan entry's verb MUST match the shape's verb for that step.");
+  lines.push("- Code from step N runs in the same process as code from step N-1. Variables declared in one step are visible in the next. Do NOT redeclare with const/let across steps — use unique names or assign to outer variables.");
+  lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
   lines.push("");
-  lines.push("COMPOSITION — read carefully:");
+  lines.push("COMPOSITION:");
   lines.push("- requires.capability lists OTHER agentry capabilities this handler needs.");
-  lines.push("  Each id must already exist in the graph or the trial will fail. Omit the");
-  lines.push("  field entirely (or use []) if there are none.");
-  lines.push("- glue.pre_invoke lets this handler actually USE those capabilities. Each");
-  lines.push("  entry invokes one capability before the kernel script runs and stores an");
-  lines.push("  extracted field of its output in an env var. input_map maps each inner");
-  lines.push("  input key to an outer input key. extract is a dot path into the inner's");
-  lines.push("  output object.");
-  lines.push("- Any capability used in glue.pre_invoke MUST also be listed in");
-  lines.push("  requires.capability. If you list one and not the other, the composition");
-  lines.push("  will not be prepared and the trial will fail.");
-  lines.push("- Prefer composing existing capabilities over reinventing their work. If a");
-  lines.push("  capability already exists that does part of the job, use pre_invoke to");
-  lines.push("  call it and build on its output rather than duplicating its logic in");
-  lines.push("  kernel_script.");
-  lines.push("- accept_spec.input must include values for every outer input key that a");
-  lines.push("  pre_invoke.input_map reads. Otherwise the acceptance probe cannot run.");
+  lines.push("- glue.pre_invoke lets this handler USE those capabilities. Each entry invokes");
+  lines.push("  one capability before the kernel script runs and stores an extracted field");
+  lines.push("  of its output in an env var. Any capability used in pre_invoke MUST also be");
+  lines.push("  listed in requires.capability.");
+  lines.push("- Prefer composing existing capabilities over reinventing their work.");
   lines.push("");
-  lines.push("IMPORTANT — kernel_script escaping:");
-  lines.push("- Inside the kernel_script string, each real newline must be a single");
-  lines.push("  backslash-n in the JSON, which the JSON parser turns into a newline.");
+  lines.push("ESCAPING:");
+  lines.push("- Inside code strings, each real newline must be a single backslash-n in");
+  lines.push("  the JSON. The JSON parser turns it into a real newline.");
   lines.push("- Do NOT add extra backslashes. Write \"playwright\", not \\\"playwright\\\".");
-  lines.push("  If you emit extra backslashes, the runtime receives a one-line script");
-  lines.push("  full of \\n sequences and node fails to parse it.");
 
   return lines.join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────
-// Rendering — spec → .mjs + .json
+// Rendering — plan → single kernel script + seed JSON
 // ─────────────────────────────────────────────────────────────
 
+function indentBlock(s, prefix) {
+  return String(s || "").split("\n").map(line => prefix + line).join("\n");
+}
+
+function compilePlanToScript(plan) {
+  const parts = [];
+  parts.push("(async () => {");
+  for (const step of plan) {
+    parts.push("");
+    parts.push("  // -- step " + step.step + ": " + step.verb + " --");
+    if (step.what) parts.push("  // what: " + String(step.what).replace(/\n/g, "\n  // "));
+    if (step.fails_if) parts.push("  // fails_if: " + String(step.fails_if).replace(/\n/g, "\n  // "));
+    parts.push("  // BEGIN " + step.verb);
+    const code = String(step.code || "").trim();
+    if (code) parts.push(indentBlock(code, "  "));
+    parts.push("  // END " + step.verb);
+  }
+  parts.push("");
+  parts.push("})().catch(e => { console.error(String((e && e.stack) || e)); process.exit(1); });");
+  return parts.join("\n");
+}
+
 function renderHandler(spec) {
-  const { capability, glue, kernel_script, kernel_language } = spec;
-  const lang = kernel_language === "python" ? "python" : "node";
+  const { capability, glue } = spec;
+  const lang = spec.kernel_language === "python" ? "python" : "node";
   const action = lang === "python" ? "python.run" : "node.run";
 
   const out = [];
@@ -340,7 +338,8 @@ function renderHandler(spec) {
   out.push("const OUTPUT_MAP = " + JSON.stringify(glue.output_map || {}, null, 2) + ";");
   out.push("const RESULT_PARSE = " + JSON.stringify(glue.result_parse || "stdout_text") + ";");
   out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
-  const cleanScript = decodeIfDoubleEscaped(kernel_script || "");
+  const compiled = compilePlanToScript(spec.plan || []);
+  const cleanScript = decodeIfDoubleEscaped(compiled);
   out.push("const KERNEL_SCRIPT = " + JSON.stringify(cleanScript) + ";");
   out.push("");
   out.push("const DEFAULT_TIMEOUT_MS = 90000;");
@@ -378,9 +377,6 @@ function renderHandler(spec) {
   out.push("    throw new Error(CAP_ID + \" requires ctx.invoke\");");
   out.push("  }");
   out.push("");
-  // v0.15.19: ensure this session has the deps this capability declares.
-  // v0.15.25: prepareSession recurses through requires.capability, so a
-  // composed handler also gets its inner capabilities' deps installed.
   out.push("  {");
   out.push("    const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
   out.push("    await prepareSession(ctx, { capId: CAP_ID, session });");
@@ -389,8 +385,6 @@ function renderHandler(spec) {
   out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session },");
   out.push("    { tenant: \"local\", by: CAP_ID });");
   out.push("");
-  // v0.15.25: pre_invoke. Call composed capabilities and store extracted
-  // fields in `pre` — they get merged into the kernel env below.
   out.push("  const pre = {};");
   out.push("  for (const [envKey, spec] of Object.entries(PRE_INVOKE)) {");
   out.push("    const innerInput = {};");
@@ -475,8 +469,9 @@ function renderSeed(spec, handlerPath) {
     accepts: capability.accepts || {},
     produces: capability.produces || {},
     requires: capability.requires || {},
+    plan: spec.plan || null,
     source: "synthesized:agentry.synthesize",
-    notes: "Auto-generated. Regenerate rather than edit.",
+    notes: "Auto-generated. Regenerate rather than edit. Plan is auditable.",
   };
 }
 
@@ -489,6 +484,42 @@ function extractJson(text) {
   const last = s.lastIndexOf("}");
   if (first === -1 || last <= first) return null;
   try { return JSON.parse(s.slice(first, last + 1)); } catch { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Plan validation — the shape's step list is the contract
+// ─────────────────────────────────────────────────────────────
+
+function validatePlan(plan, shape, capability_id) {
+  if (!Array.isArray(plan)) {
+    throw new Error("agentry.synthesize: spec.plan is not an array (" + capability_id + ")");
+  }
+  if (plan.length !== shape.steps.length) {
+    throw new Error(
+      "agentry.synthesize: plan length " + plan.length +
+      " does not match shape length " + shape.steps.length +
+      " for " + capability_id
+    );
+  }
+  for (let i = 0; i < shape.steps.length; i++) {
+    const entry = plan[i];
+    const expectedVerb = shape.steps[i].verb;
+    if (!entry || typeof entry !== "object") {
+      throw new Error("agentry.synthesize: plan[" + i + "] is not an object");
+    }
+    if (entry.verb !== expectedVerb) {
+      throw new Error(
+        "agentry.synthesize: plan[" + i + "].verb \"" + entry.verb +
+        "\" does not match shape verb \"" + expectedVerb + "\""
+      );
+    }
+    if (!entry.what || typeof entry.what !== "string" || !entry.what.trim()) {
+      throw new Error("agentry.synthesize: plan[" + i + "] (" + expectedVerb + ") missing 'what'");
+    }
+    if (!entry.code || typeof entry.code !== "string" || !entry.code.trim()) {
+      throw new Error("agentry.synthesize: plan[" + i + "] (" + expectedVerb + ") missing 'code'");
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -513,9 +544,13 @@ export default async function agentrySynthesize(input, ctx) {
   const gap = proposal.gap_id ? graph.getCapability(proposal.gap_id) : null;
   if (!gap) throw new Error("agentry.synthesize: gap " + proposal.gap_id + " not found");
 
+  const shape = getShape(gap.wanted_kind || "unknown");
+
   events.emit("synthesize.started", {
     proposal_id, candidate_id, gap_id: gap.id,
     candidate_kind: candidate.kind,
+    wanted_kind: gap.wanted_kind || null,
+    shape_verbs: shape.steps.map(s => s.verb),
   });
 
   let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null, repo_dir: null };
@@ -535,8 +570,7 @@ export default async function agentrySynthesize(input, ctx) {
     }
   }
 
-  const referenceHandler = readFileSync(join(HERE, REFERENCE_FILE), "utf8");
-  const prompt = buildPrompt({ gap, candidate, facts, referenceHandler });
+  const prompt = buildPrompt({ gap, candidate, facts, shape });
 
   const messages = [
     { role: "system", content: "You output only JSON. No prose. No fences." },
@@ -601,15 +635,22 @@ export default async function agentrySynthesize(input, ctx) {
     events.emit("synthesize.refused", { proposal_id, candidate_id, reason: spec.error });
     throw new Error("agentry.synthesize: LLM declined — " + spec.error);
   }
-  if (!spec.capability?.id || !spec.kernel_script || !spec.glue) {
-    throw new Error("agentry.synthesize: spec missing capability.id, kernel_script, or glue");
+  if (!spec.capability?.id || !spec.glue) {
+    throw new Error("agentry.synthesize: spec missing capability.id or glue");
   }
 
-  // v0.15.25 — composition coherence check.
-  // Any capability named in glue.pre_invoke must also be in
-  // requires.capability. The prompt tells the LLM this, but enforce it
-  // here so a forgetful model doesn't produce a spec that fails only
-  // at trial time.
+  try {
+    validatePlan(spec.plan, shape, spec.capability.id);
+  } catch (e) {
+    events.emit("synthesize.plan_invalid", {
+      proposal_id, candidate_id,
+      capability_id: spec.capability.id,
+      wanted_kind: gap.wanted_kind || null,
+      error: e.message,
+    });
+    throw e;
+  }
+
   const composedDeclared = new Set(
     Array.isArray(spec.capability.requires?.capability)
       ? spec.capability.requires.capability
@@ -644,6 +685,9 @@ export default async function agentrySynthesize(input, ctx) {
     proposal_id, candidate_id, gap_id: gap.id,
     capability_id: spec.capability.id,
     kind: spec.capability.kind,
+    wanted_kind: gap.wanted_kind || null,
+    shape_steps: shape.steps.length,
+    plan_steps: spec.plan.length,
     handler_path: handlerPath,
     seed_path: seedPath,
     composed_capabilities: [...composedDeclared],
@@ -662,6 +706,7 @@ export default async function agentrySynthesize(input, ctx) {
       repo_dir: facts.repo_dir,
       repo_read: facts.cloned,
       spec,
+      plan_steps: spec.plan.length,
       composed_capabilities: [...composedDeclared],
       model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : (llmRes.output.model || null),
     },
