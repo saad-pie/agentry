@@ -49,6 +49,9 @@ function okResult(cap, reason) {
         capability_id: cap.id,
         kind: cap.kind,
         handler_file: cap.handler_file || null,
+        accepts: cap.accepts || null,
+        produces: cap.produces || null,
+        requires: cap.requires || null,
         reason,
       }, null, 2),
     }],
@@ -269,18 +272,131 @@ export function registerAgentryTools(deps) {
     }
   );
 
+  // --- agentry.invoke ---
+  registerTool(
+    {
+      name: "invoke",
+      description:
+        "Run a capability by id and return its output. Use this after ensure_capability confirms a capability exists and you need to actually execute it. The response contains the capability's output object. If you are unsure what input shape a capability takes, call ensure_capability first (it returns accepts/produces) or status. Do NOT call this for capabilities that do not exist yet — call ensure_capability first, then invoke. Errors are returned as isError results with the capability's error code and message.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          capability_id: {
+            type: "string",
+            description: "Dotted capability id, e.g. 'bua.browser' or 'bua.screenshot'.",
+          },
+          input: {
+            type: "object",
+            description: "The capability's input object. See the capability's accepts block via ensure_capability or status.",
+          },
+          timeout_ms: {
+            type: "number",
+            description: "Optional. Overrides the capability's default timeout.",
+          },
+          session_id: {
+            type: "string",
+            description: "Optional. Pass a session id to reuse an existing kernel session.",
+          },
+        },
+        required: ["capability_id"],
+      },
+    },
+    async (args, _ctx) => {
+      const capabilityId = String(args.capability_id || "").trim();
+      if (!capabilityId) {
+        return {
+          content: [{ type: "text", text: "invoke: capability_id is required" }],
+          isError: true,
+        };
+      }
+      const input = (args.input && typeof args.input === "object") ? { ...args.input } : {};
+      if (args.session_id && !input.session) input.session = String(args.session_id);
+      if (args.timeout_ms && !input.timeout_ms) input.timeout_ms = Number(args.timeout_ms);
+
+      const startedAt = Date.now();
+      const res = await deps.invoke(capabilityId, input, {
+        tenant: "mcp", by: "mcp.invoke",
+      });
+      const ms = Date.now() - startedAt;
+
+      if (!res.ok) {
+        deps.events.emit("mcp.invoke.failed", {
+          capability_id: capabilityId,
+          code: res.error?.code || null,
+          ms,
+        });
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ok: false,
+              capability_id: capabilityId,
+              error: { code: res.error?.code || null, message: res.error?.message || "unknown" },
+              ms,
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
+
+      deps.events.emit("mcp.invoke.succeeded", {
+        capability_id: capabilityId,
+        ms,
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            ok: true,
+            capability_id: capabilityId,
+            ms,
+            output: res.output,
+          }, null, 2),
+        }],
+      };
+    }
+  );
+
   // --- agentry.status ---
+  // v0.16.2 — richer output so a caller can decide what to invoke
+  // without a second round-trip. Lists each live invokable capability
+  // with its accepts/produces. The bare counts are still present for
+  // callers that only want a summary.
   registerTool(
     {
       name: "status",
       description:
-        "Return agentry's current state: number of capabilities, recent gaps, active watches. Cheap; call this to know what agentry can help with right now.",
-      inputSchema: { type: "object", properties: {} },
+        "Return agentry's current state. Includes: number of capabilities, per-kind counts, a list of every live invokable capability with its accepts/produces schema, recent gaps, and active watches. Call this to know what agentry can do right now and how to invoke it.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          verbose: {
+            type: "boolean",
+            description: "Default true. Set false to omit the per-capability list and return only counts.",
+          },
+        },
+      },
     },
-    async (_args, _ctx) => {
+    async (args, _ctx) => {
+      const verbose = args?.verbose !== false;
       const caps = deps.graph.capabilities();
       const byKind = {};
-      for (const c of caps.values()) byKind[c.kind] = (byKind[c.kind] || 0) + 1;
+      const invokable = [];
+      for (const c of caps.values()) {
+        byKind[c.kind] = (byKind[c.kind] || 0) + 1;
+        if (c.retired_at) continue;
+        if (!c.invoked_via) continue;
+        if (c.kind === "edge") continue;
+        invokable.push({
+          id: c.id,
+          kind: c.kind,
+          accepts: c.accepts || null,
+          produces: c.produces || null,
+        });
+      }
+      invokable.sort((a, b) => a.id.localeCompare(b.id));
+
       const gaps = [];
       for (const c of caps.values()) {
         if (c.kind === "capability_gap" && !c.retired_at) {
@@ -288,21 +404,26 @@ export function registerAgentryTools(deps) {
         }
       }
       gaps.sort((a, b) => b.hits - a.hits);
+
       const watches = [];
       for (const c of caps.values()) {
-        if (c.kind === "watch_instance") {
+        if (c.kind === "watch_instance" && !c.retired_at) {
           watches.push({ id: c.id, source: c.source, reason: c.reason });
         }
       }
+
+      const out = {
+        capabilities: caps.size,
+        by_kind: byKind,
+        gaps: gaps.slice(0, 20),
+        watches: watches.slice(0, 20),
+      };
+      if (verbose) out.invokable = invokable;
+
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
-            capabilities: caps.size,
-            by_kind: byKind,
-            gaps: gaps.slice(0, 20),
-            watches: watches.slice(0, 20),
-          }, null, 2),
+          text: JSON.stringify(out, null, 2),
         }],
       };
     }
