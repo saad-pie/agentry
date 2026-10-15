@@ -135,8 +135,9 @@ async function readRepoTerritory(candidate, deps) {
         session,
         path: repoDir + "/" + name,
       }, { tenant: "local", by: "agentry.synthesize" });
-      if (r.ok && r.output?.content) {
-        facts.readme = String(r.output.content).slice(0, MAX_README_CHARS);
+      const readmeContent = r.output?.result?.content ?? r.output?.content;
+      if (r.ok && readmeContent) {
+        facts.readme = String(readmeContent).slice(0, MAX_README_CHARS);
         break;
       }
     }
@@ -151,8 +152,9 @@ async function readRepoTerritory(candidate, deps) {
         session,
         path: repoDir + "/" + name,
       }, { tenant: "local", by: "agentry.synthesize" });
-      if (r.ok && r.output?.content) {
-        facts.manifest = String(r.output.content).slice(0, MAX_MANIFEST_CHARS);
+      const manifestContent = r.output?.result?.content ?? r.output?.content;
+      if (r.ok && manifestContent) {
+        facts.manifest = String(manifestContent).slice(0, MAX_MANIFEST_CHARS);
         facts.manifest_path = name;
         break;
       }
@@ -637,6 +639,18 @@ export default async function agentrySynthesize(input, ctx) {
   }
   if (!spec.capability?.id || !spec.glue) {
     throw new Error("agentry.synthesize: spec missing capability.id or glue");
+  }
+
+  if (typeof spec.capability.id === "string" && spec.capability.id.startsWith("gap:")) {
+    const stripped = spec.capability.id.slice(4);
+    if (stripped) {
+      events.emit("synthesize.id_stripped", {
+        proposal_id, candidate_id,
+        original: spec.capability.id,
+        normalized: stripped,
+      });
+      spec.capability.id = stripped;
+    }
   }
 
   try {
