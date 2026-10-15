@@ -310,7 +310,12 @@ function compilePlanToScript(plan) {
     if (step.what) parts.push("  // what: " + String(step.what).replace(/\n/g, "\n  // "));
     if (step.fails_if) parts.push("  // fails_if: " + String(step.fails_if).replace(/\n/g, "\n  // "));
     parts.push("  // BEGIN " + step.verb);
-    const code = String(step.code || "").trim();
+    // Decode each step's code individually BEFORE joining. The outer
+    // decode below is a no-op because the joined string always contains
+    // real newlines; per-step is the only place literal \n sequences
+    // can be detected and fixed.
+    const rawCode = String(step.code || "").trim();
+    const code = decodeIfDoubleEscaped(rawCode);
     if (code) parts.push(indentBlock(code, "  "));
     parts.push("  // END " + step.verb);
   }
