@@ -12,9 +12,13 @@
 // openai/gpt-oss-20b and 120b both emit to a "reasoning" field and
 // return empty content, which breaks the tool loop.
 //
-// Model chain is now a list of {provider, model} pairs, so the
-// fallback can be a different provider: groq/qwen primary, google
-// gemini fallback.
+// v0.15.21: emit agentry.reason.deep.model_switched whenever the
+// outer loop advances to the next model, whether because the current
+// one failed at the LLM layer (rate limit, auth, network) or because
+// it exhausted MAX_TURNS without landing on a final answer. Groq's
+// free tier for qwen can rate-limit mid-loop; previously the swap to
+// google/gemini-2.5-flash happened silently and could only be
+// inferred from the completed event's model_used field.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -240,7 +244,8 @@ export default async function agentryReasonDeep(input, ctx) {
   }
 
   outer:
-  for (const { provider, model } of modelChain) {
+  for (let mi = 0; mi < modelChain.length; mi++) {
+    const { provider, model } = modelChain[mi];
     messages.length = 2;
     toolsUsed.length = 0;
 
@@ -259,6 +264,17 @@ export default async function agentryReasonDeep(input, ctx) {
         ctx.events.emit("agentry.reason.deep.llm_failed", {
           provider, model, turn, code: r.error.code, message: r.error.message,
         });
+        const next = modelChain[mi + 1];
+        if (next) {
+          ctx.events.emit("agentry.reason.deep.model_switched", {
+            from: { provider, model },
+            to: { provider: next.provider, model: next.model },
+            reason: "llm_failed",
+            turn,
+            error_code: r.error.code,
+            error_message: r.error.message,
+          });
+        }
         continue outer;
       }
 
@@ -299,6 +315,17 @@ export default async function agentryReasonDeep(input, ctx) {
     }
 
     if (finalContent) break;
+
+    // Exhausted MAX_TURNS on this model without a final answer. Advance.
+    const next = modelChain[mi + 1];
+    if (next) {
+      ctx.events.emit("agentry.reason.deep.model_switched", {
+        from: { provider, model },
+        to: { provider: next.provider, model: next.model },
+        reason: "no_final_content",
+        turns: MAX_TURNS,
+      });
+    }
   }
 
   if (!finalContent) {

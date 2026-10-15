@@ -7,6 +7,15 @@
 // matter (a capability was just adopted) survive a crash in the
 // window between ticks.
 //
+// v0.15.21: the push is no longer --force, and staging is limited
+// to the state allow-list (capabilities.jsonl, events.jsonl,
+// agentry-synthesized/). Previously this handler did `git add .`
+// with `--force` on push, which could clobber the remote backup
+// with whatever happened to be in the working tree — including
+// stale session locks, credentials, and health-check text. It was
+// the third mechanism (after the old autosave and npm i) that
+// could destroy a good capability record on GitHub.
+//
 // Contract:
 //   input:  { reason?, paths? }
 //   output: { committed, pushed, sha, reason }
@@ -19,6 +28,15 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const STATE_DIR = process.env.AGENTRY_STATE_DIR || "/tmp/home/.dsh";
+
+// Only these paths are staged by default. Kept in sync with the
+// entrypoint's autosave allow-list. Adding a path here means it
+// will be committed out-of-cycle on every checkpoint.
+const DEFAULT_PATHS = [
+  "agentry/capabilities.jsonl",
+  "agentry/events.jsonl",
+  "agentry-synthesized",
+];
 
 function git(args, opts = {}) {
   const r = spawnSync("git", args, {
@@ -34,6 +52,21 @@ function git(args, opts = {}) {
     exit_code: r.status,
     error: r.error ? r.error.message : null,
   };
+}
+
+// Reject anything that tries to escape the state directory. Accepts
+// only relative paths under STATE_DIR with no `..` segments.
+function safePaths(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return DEFAULT_PATHS;
+  const out = [];
+  for (const p of paths) {
+    const s = String(p);
+    if (!s || s.startsWith("/") || s.includes("..")) {
+      throw new Error(`checkpoint: refusing path outside state dir: ${s}`);
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 export default async function agentryCheckpoint(input, ctx) {
@@ -53,10 +86,9 @@ export default async function agentryCheckpoint(input, ctx) {
     };
   }
 
-  // Stage
-  const add = paths && paths.length
-    ? git(["add", "--", ...paths])
-    : git(["add", "."]);
+  // Stage — allow-list only.
+  const stagePaths = safePaths(paths);
+  const add = git(["add", "--", ...stagePaths]);
   if (add.exit_code !== 0) {
     throw new Error(`checkpoint: git add failed — ${add.stderr.slice(0, 200)}`);
   }
@@ -89,8 +121,9 @@ export default async function agentryCheckpoint(input, ctx) {
   const shaMatch = commit.stdout.match(/\[[^\]]+\s+([0-9a-f]{7,40})\]/);
   const sha = shaMatch ? shaMatch[1] : null;
 
-  // Push
-  const push = git(["push", "-u", "origin", "HEAD", "--force"], { timeout: 60000 });
+  // Push — no --force. If origin moved, fail loudly; the next checkpoint
+  // or the entrypoint autosave loop will reconcile.
+  const push = git(["push", "-u", "origin", "HEAD"], { timeout: 60000 });
   if (push.exit_code !== 0) {
     ctx.events.emit("checkpoint.push_failed", {
       reason,

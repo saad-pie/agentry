@@ -1,9 +1,13 @@
 // agentry/src/handlers/agentry.reason.mjs
 // The reasoning capability the harness calls when it hits a wall.
 //
-// v0.15.10: Groq-first chain (gpt-oss-120b / gpt-oss-20b / qwen3.8-27b),
-// Google fallback. max_tokens raised 800 → 3000: reasoning models burn
-// budget on the reasoning field before emitting JSON.
+// v0.15.21: model chain reordered to match agentry.reason.deep.
+// qwen first (tool-capable, non-reasoning, returns real content on
+// Groq), then gemini via the atria proxy, then the gpt-oss models
+// last. The old order led with gpt-oss-120b, which returns empty
+// content on the tool-use path — the deep reasoner documents this
+// exact failure mode and the fast path had never been reconciled.
+// max_tokens stays at 3000.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -13,10 +17,10 @@ function buildModelChain(input) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
   chain.push(
-    { provider: "groq", model: "openai/gpt-oss-120b", source: "primary" },
-    { provider: "groq", model: "openai/gpt-oss-20b", source: "fallback" },
-    { provider: "groq", model: "qwen/qwen3.8-27b", source: "fallback" },
+    { provider: "groq", model: "qwen/qwen3.8-27b", source: "primary" },
     { provider: "google", model: "gemini-2.5-flash", source: "fallback" },
+    { provider: "groq", model: "openai/gpt-oss-120b", source: "fallback" },
+    { provider: "groq", model: "openai/gpt-oss-20b", source: "fallback" },
   );
   const seen = new Set();
   return chain.filter(c => {

@@ -132,16 +132,29 @@ export async function pollWatch(deps, watch) {
     });
   }
 
+  // v0.15.21: one batched notify per poll, not one per candidate.
+  // Previously a watch that returned 30 fresh candidates sent 30
+  // emails. Now it sends one email listing all of them. The
+  // on_new handler may still fan out if it wants to; this layer
+  // does not.
   let notified = 0;
-  for (const { candidate } of fresh) {
+  if (fresh.length > 0) {
     try {
       await invoke(deps, watch.on_new, {
-        subject: `[agentry] new from ${watch.source}`,
-        body_markdown: renderCandidate(watch, candidate),
+        subject: `[agentry] ${fresh.length} new from ${watch.source}`,
+        body_markdown: renderBatch(watch, fresh),
         priority: "normal",
+        candidate_count: fresh.length,
+        candidate_ids: fresh
+          .map(f => f.candidate?.id || f.candidate?.url || null)
+          .filter(Boolean),
       }, { task_id: null, tenant: "local", by: "runtime" });
-      notified++;
-      events.emit("watch.notified", { watch_id: watch.id, source: watch.source, key: candidate?.id || candidate?.url });
+      notified = 1;
+      events.emit("watch.notified", {
+        watch_id: watch.id,
+        source: watch.source,
+        candidate_count: fresh.length,
+      });
     } catch (e) {
       events.emit("watch.notify_failed", { watch_id: watch.id, error: e.message });
     }
@@ -161,6 +174,21 @@ function computeDedupe(expr, obj) {
   return values.length ? values.join("|") : null;
 }
 
-function renderCandidate(watch, c) {
-  return [`**Watch:** \`${watch.id}\``, `**Source:** \`${watch.source}\``, "", "```json", JSON.stringify(c, null, 2), "```"].join("\n");
+function renderBatch(watch, fresh) {
+  const lines = [];
+  lines.push(`**Watch:** \`${watch.id}\``);
+  lines.push(`**Source:** \`${watch.source}\``);
+  lines.push(`**New candidates:** ${fresh.length}`);
+  lines.push("");
+  for (const { candidate } of fresh) {
+    const id = candidate?.id || candidate?.url || "(unknown id)";
+    const name = candidate?.name || candidate?.title || null;
+    const url = candidate?.url || null;
+    const desc = (candidate?.description || candidate?.snippet || "").slice(0, 140);
+    lines.push(`- \`${id}\``);
+    if (name && name !== id) lines.push(`  - name: ${name}`);
+    if (url && url !== id) lines.push(`  - url: ${url}`);
+    if (desc) lines.push(`  - ${desc}`);
+  }
+  return lines.join("\n");
 }
