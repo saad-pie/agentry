@@ -3,11 +3,15 @@
 //
 // v0.15.21: model chain reordered to match agentry.reason.deep.
 //
-// v0.15.26 — grounded capability resolution. Same change as the deep
-// reasoner: inject the current capability list into the system prompt,
-// resolve any invented wanted_id against the graph (exact -> prefix ->
-// none), and if the resolved id already exists, return it in
-// existing_capability instead of recording a gap.
+// v0.15.26: grounded capability resolution. Same shape as the deep
+// reasoner: reasoner sees the graph, invented wanted_id is resolved
+// (exact -> prefix -> none), existing capability returned for direct
+// invocation instead of recording a duplicate gap.
+//
+// v0.15.27: rule inversion. When an existing capability solves the
+// problem, still fill missing.wanted_id with its exact id. missing:null
+// is now reserved for retryable / in-session / config problems. Also,
+// retire any prior false gap recorded under the proposed id.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -58,12 +62,14 @@ function systemPrompt(graph) {
     "=== CAPABILITIES CURRENTLY IN THE GRAPH ===\n" +
     capLines + "\n\n" +
     "CRITICAL RULE about the list above:\n" +
-    "  - Before you decide a capability is missing, check the list. If a\n" +
-    "    capability already exists that could do what the task needs, set\n" +
-    "    \"missing\" to null and name that capability in \"immediate_action\".\n" +
+    "  - If an existing capability already does the job, put ITS EXACT ID\n" +
+    "    in missing.wanted_id with confidence high. The caller will invoke\n" +
+    "    it directly. Do NOT set missing to null in this case.\n" +
     "  - Do NOT invent a new capability id that only differs in punctuation\n" +
     "    or word order from one you see in the list.\n" +
-    "  - Only set \"missing\" when NO existing capability can do the job.\n\n" +
+    "  - Set missing to null ONLY when no capability -- existing or new --\n" +
+    "    would solve the problem. That means: retryable error, in-session\n" +
+    "    bug, or config problem (missing API key, missing credential).\n\n" +
     "Return ONLY a JSON object with this shape, nothing else:\n" +
     "{\n" +
     "  \"analysis\": \"<2-3 sentences on what actually happened and why>\",\n" +
@@ -77,11 +83,10 @@ function systemPrompt(graph) {
     "}\n\n" +
     "Rules:\n" +
     "- Output only JSON. No prose.\n" +
-    "- If an existing capability solves the problem, set \"missing\" to null\n" +
-    "  and name it in \"immediate_action\".\n" +
-    "- If the failure is due to a missing capability (and none exists), fill in \"missing\".\n" +
-    "- If the failure is a bug or a retry-able error, set \"missing\" to null\n" +
-    "  and put the retry strategy in \"immediate_action\".\n" +
+    "- If an existing capability solves the problem, still fill in missing\n" +
+    "  with its exact wanted_id. Do NOT set missing to null.\n" +
+    "- Set missing to null ONLY for retryable errors, in-session bugs, or\n" +
+    "  config problems (missing API keys, credentials).\n" +
     "- Be specific. Prefer named projects over generic advice.";
 }
 
@@ -234,6 +239,24 @@ export default async function agentryReason(input, ctx) {
         matched_id: existing.id,
         matched_via,
       });
+      if (proposed_id && proposed_id !== resolved_id) {
+        const stale = ctx.graph.getCapability("gap:" + proposed_id);
+        if (stale && !stale.retired_at) {
+          try {
+            ctx.graph.retireCapability("gap:" + proposed_id,
+              "superseded: " + resolved_id + " already exists");
+            ctx.events.emit("agentry.reason.false_gap_retired", {
+              retired_gap_id: "gap:" + proposed_id,
+              superseded_by: resolved_id,
+            });
+          } catch (e) {
+            ctx.events.emit("agentry.reason.false_gap_retire_failed", {
+              gap_id: "gap:" + proposed_id,
+              error: e.message,
+            });
+          }
+        }
+      }
     } else {
       const key = "gap:" + resolved_id;
       try {
@@ -295,10 +318,10 @@ export default async function agentryReason(input, ctx) {
     : null;
 
   const note = existing_capability
-    ? "Capability " + existing_capability.id + " already exists in the graph. Invoke it directly — no gap recorded."
+    ? "Capability " + existing_capability.id + " already exists in the graph. Invoke it directly."
     : (gap_id
-        ? "A capability gap was recorded. A proposal will be generated in the background and emailed for approval."
-        : "No gap recorded — this looks like a retry or in-session fix.");
+        ? "A capability gap was recorded. A proposal will be generated in the background."
+        : "No gap recorded. Retryable, in-session, or config problem.");
 
   return {
     output: {
