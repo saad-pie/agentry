@@ -2,23 +2,21 @@
 //
 // Deep reasoning on Groq with native tool use.
 //
-// The model can call web_search and fetch_url before answering. It
-// iterates in a loop until it stops calling tools and produces the
-// final JSON. No DSH, no gateway, no queue — just the model and a
-// tool loop we fully control.
-//
 // v0.15.18: qwen/qwen3.8-27b on Groq is the only live non-reasoning
-// tool-capable model (verified: content="OK", no reasoning field).
-// openai/gpt-oss-20b and 120b both emit to a "reasoning" field and
-// return empty content, which breaks the tool loop.
+// tool-capable model. openai/gpt-oss-20b and 120b both emit to a
+// "reasoning" field and return empty content, breaking the tool loop.
 //
-// v0.15.21: emit agentry.reason.deep.model_switched whenever the
-// outer loop advances to the next model, whether because the current
-// one failed at the LLM layer (rate limit, auth, network) or because
-// it exhausted MAX_TURNS without landing on a final answer. Groq's
-// free tier for qwen can rate-limit mid-loop; previously the swap to
-// google/gemini-2.5-flash happened silently and could only be
-// inferred from the completed event's model_used field.
+// v0.15.21: emit agentry.reason.deep.model_switched when the outer
+// loop advances to the next model.
+//
+// v0.15.26 — grounded capability resolution. The reasoner used to
+// invent capability ids it had never seen (e.g. "bua.browser.screenshot"
+// when both "bua.browser" and "bua.screenshot" already existed). Two
+// changes: the system prompt now lists the current graph, and any
+// invented wanted_id is resolved against the graph before acting.
+// Exact match wins; otherwise progressively shorter prefixes of the
+// dotted id are tried. If the resolved id already exists, no gap is
+// recorded — the existing capability is returned for direct invocation.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -29,13 +27,16 @@ const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "gemini-2.5-fl
 const MAX_TURNS = Number(process.env.AGENTRY_DEEP_MAX_TURNS || "5");
 const MAX_TOOL_CALLS_PER_TURN = 4;
 
+const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
+const MAX_CAP_LIST = 60;
+
 const TOOLS = [
   {
     type: "function",
     function: {
       name: "web_search",
       description:
-        "Search the web. Returns a list of {title, url, snippet} objects. Use this to look up libraries, projects, or error messages you don't recognize.",
+        "Search the web. Returns a list of {title, url, snippet} objects. Use this to look up libraries, projects, or error messages you do not recognize.",
       parameters: {
         type: "object",
         properties: {
@@ -63,49 +64,76 @@ const TOOLS = [
   },
 ];
 
-function systemPrompt() {
-  return `You are agentry's deep reasoner.
-
-An agent hit a wall. Your job: figure out what actually happened, name
-the missing capability if there is one, and give a concrete next step.
-
-You have tools. Use them. Do not answer from memory when a search
-would tell you the truth. Specifically:
-  - If you don't recognize a project name in the failure, web_search it.
-  - If a specific library or repo is named, fetch_url its README.
-  - If the failure mentions an error you've never seen, search the error.
-  - Iterate: search → read → think → answer. Two rounds is often enough.
-
-When you have enough, STOP calling tools and reply with ONLY a JSON
-object, no prose, no fences:
-
-{
-  "analysis": "<2-3 sentences: what actually happened and why>",
-  "missing": {
-    "kind": "<bua|cua|mua|memory|tool|notify|web|harness|unknown>",
-    "wanted_id": "<dotted capability id, e.g. bua.browser>",
-    "confidence": "high" | "medium" | "low"
-  } | null,
-  "immediate_action": "<one concrete thing the caller can try right now, or 'none'>",
-  "suggestions": ["<up to 3 short candidate fixes / projects>"]
+function listLiveCapabilities(graph) {
+  const out = [];
+  for (const cap of graph.capabilities().values()) {
+    if (cap.retired_at) continue;
+    if (!cap.invoked_via) continue;
+    if (INTERNAL_KINDS.has(cap.kind)) continue;
+    out.push({ id: cap.id, kind: cap.kind });
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out.slice(0, MAX_CAP_LIST);
 }
 
-Rules:
-- Output only the JSON object as your final message.
-- If the failure is a missing capability, fill in "missing".
-- If it's a retryable error or an in-session bug, set "missing" to null
-  and describe the retry strategy in "immediate_action".
-- Prefer naming a specific project and version over generic advice.
-- If you searched, name what you found in "analysis".`;
+function systemPrompt(graph) {
+  const caps = listLiveCapabilities(graph);
+  const capLines = caps.length
+    ? caps.map(c => "  " + c.id + "  (" + c.kind + ")").join("\n")
+    : "  (none)";
+
+  return "You are agentry's deep reasoner.\n\n" +
+    "An agent hit a wall. Your job: figure out what actually happened, name\n" +
+    "the missing capability if there is one, and give a concrete next step.\n\n" +
+    "You have tools. Use them. Do not answer from memory when a search\n" +
+    "would tell you the truth. Specifically:\n" +
+    "  - If you do not recognize a project name in the failure, web_search it.\n" +
+    "  - If a specific library or repo is named, fetch_url its README.\n" +
+    "  - If the failure mentions an error you have never seen, search the error.\n" +
+    "  - Iterate: search -> read -> think -> answer. Two rounds is often enough.\n\n" +
+    "=== CAPABILITIES CURRENTLY IN THE GRAPH ===\n" +
+    capLines + "\n\n" +
+    "CRITICAL RULE about the list above:\n" +
+    "  - Before you decide a capability is missing, check the list. If a\n" +
+    "    capability already exists that could do what the task needs, set\n" +
+    "    \"missing\" to null and name that capability in \"immediate_action\"\n" +
+    "    (e.g. \"invoke bua.browser\").\n" +
+    "  - Do NOT invent a new capability id that only differs in punctuation\n" +
+    "    or word order from one you see in the list. If the existing one\n" +
+    "    does the job, use its exact id.\n" +
+    "  - Only set \"missing\" when NO existing capability can do the job. Use\n" +
+    "    the exact dotted id you would want, following the naming of the\n" +
+    "    list (e.g. \"bua.browser\", \"cua.file_write\").\n\n" +
+    "When you have enough, STOP calling tools and reply with ONLY a JSON\n" +
+    "object, no prose, no fences:\n\n" +
+    "{\n" +
+    "  \"analysis\": \"<2-3 sentences: what actually happened and why>\",\n" +
+    "  \"missing\": {\n" +
+    "    \"kind\": \"<bua|cua|mua|memory|tool|notify|web|harness|unknown>\",\n" +
+    "    \"wanted_id\": \"<dotted capability id, e.g. bua.browser>\",\n" +
+    "    \"confidence\": \"high\" | \"medium\" | \"low\"\n" +
+    "  } | null,\n" +
+    "  \"immediate_action\": \"<one concrete thing the caller can try right now, or none>\",\n" +
+    "  \"suggestions\": [\"<up to 3 short candidate fixes / projects>\"]\n" +
+    "}\n\n" +
+    "Rules:\n" +
+    "- Output only the JSON object as your final message.\n" +
+    "- If an existing capability solves the problem, set \"missing\" to null\n" +
+    "  and name it in \"immediate_action\".\n" +
+    "- If the failure is a missing capability (and none exists), fill in \"missing\".\n" +
+    "- If it is a retryable error or an in-session bug, set \"missing\" to null\n" +
+    "  and describe the retry strategy in \"immediate_action\".\n" +
+    "- Prefer naming a specific project and version over generic advice.\n" +
+    "- If you searched, name what you found in \"analysis\".";
 }
 
 function userPrompt(input) {
   const { failure, attempted, intent, workspace_id, session_id } = input || {};
   const lines = [];
-  if (intent) lines.push(`USER INTENT: ${intent}`);
-  if (workspace_id) lines.push(`WORKSPACE: ${workspace_id}`);
-  if (session_id) lines.push(`SESSION: ${session_id}`);
-  if (attempted) lines.push(`WHAT WAS ATTEMPTED: ${JSON.stringify(attempted)}`);
+  if (intent) lines.push("USER INTENT: " + intent);
+  if (workspace_id) lines.push("WORKSPACE: " + workspace_id);
+  if (session_id) lines.push("SESSION: " + session_id);
+  if (attempted) lines.push("WHAT WAS ATTEMPTED: " + JSON.stringify(attempted));
   lines.push("");
   lines.push("FAILURE / CONTEXT:");
   lines.push(typeof failure === "string" ? failure : JSON.stringify(failure, null, 2));
@@ -124,7 +152,22 @@ function parseJson(text) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
-// ─── tool implementations ───────────────────────────────────────────
+function resolveWantedId(graph, wantedId) {
+  if (!wantedId) return { resolved: wantedId, matched_via: "none" };
+  const exact = graph.getCapability(wantedId);
+  if (exact && !exact.retired_at) {
+    return { resolved: wantedId, matched_via: "exact" };
+  }
+  const segments = String(wantedId).split(".");
+  for (let i = segments.length - 1; i >= 1; i--) {
+    const candidate = segments.slice(0, i).join(".");
+    const cap = graph.getCapability(candidate);
+    if (cap && !cap.retired_at) {
+      return { resolved: candidate, matched_via: "prefix" };
+    }
+  }
+  return { resolved: wantedId, matched_via: "none" };
+}
 
 async function runWebSearch(ctx, args) {
   const query = String(args?.query || "").slice(0, 500);
@@ -134,7 +177,7 @@ async function runWebSearch(ctx, args) {
   const res = await ctx.invoke("discovery.web_search", { query, limit },
     { tenant: "local", by: "agentry.reason.deep" });
   if (!res.ok) {
-    return { error: `web_search failed: ${res.error.code}: ${res.error.message}` };
+    return { error: "web_search failed: " + res.error.code + ": " + res.error.message };
   }
   const candidates = res.output?.candidates || [];
   return {
@@ -155,19 +198,19 @@ async function runFetchUrl(ctx, args) {
 
   const session = "deep_fetch_" + Date.now().toString(36);
 
-  const script = `
-    const url = process.env.FETCH_URL;
-    const res = await fetch(url, {
-      headers: { "user-agent": "agentry-deep-reasoner/0.1" },
-      signal: AbortSignal.timeout(15000),
-    });
-    const text = await res.text();
-    process.stdout.write(JSON.stringify({
-      status: res.status,
-      content_type: res.headers.get("content-type") || "",
-      text: text.slice(0, 20000),
-    }));
-  `;
+  const script = [
+    "const url = process.env.FETCH_URL;",
+    "const res = await fetch(url, {",
+    "  headers: { \"user-agent\": \"agentry-deep-reasoner/0.1\" },",
+    "  signal: AbortSignal.timeout(15000),",
+    "});",
+    "const text = await res.text();",
+    "process.stdout.write(JSON.stringify({",
+    "  status: res.status,",
+    "  content_type: res.headers.get(\"content-type\") || \"\",",
+    "  text: text.slice(0, 20000),",
+    "}));",
+  ].join("\n");
 
   const r = await ctx.invoke("agentry.os", {
     action: "node.run",
@@ -178,7 +221,7 @@ async function runFetchUrl(ctx, args) {
   }, { tenant: "local", by: "agentry.reason.deep" });
 
   if (!r.ok) {
-    return { error: `fetch_url kernel call failed: ${r.error.code}: ${r.error.message}` };
+    return { error: "fetch_url kernel call failed: " + r.error.code + ": " + r.error.message };
   }
 
   const raw = String(r.output?.result?.stdout || "");
@@ -209,18 +252,16 @@ async function executeTool(ctx, call) {
   const name = call?.function?.name;
   let args = {};
   try { args = JSON.parse(call?.function?.arguments || "{}"); }
-  catch (e) { return { error: `tool args not JSON: ${e.message}` }; }
+  catch (e) { return { error: "tool args not JSON: " + e.message }; }
 
   try {
     if (name === "web_search") return await runWebSearch(ctx, args);
     if (name === "fetch_url") return await runFetchUrl(ctx, args);
-    return { error: `unknown tool: ${name}` };
+    return { error: "unknown tool: " + name };
   } catch (e) {
-    return { error: `tool ${name} threw: ${e.message}` };
+    return { error: "tool " + name + " threw: " + e.message };
   }
 }
-
-// ─── the handler ────────────────────────────────────────────────────
 
 export default async function agentryReasonDeep(input, ctx) {
   const { failure, intent, workspace_id, session_id } = input || {};
@@ -229,7 +270,7 @@ export default async function agentryReasonDeep(input, ctx) {
 
   const started = Date.now();
   const messages = [
-    { role: "system", content: systemPrompt() },
+    { role: "system", content: systemPrompt(ctx.graph) },
     { role: "user", content: userPrompt(input) },
   ];
 
@@ -316,7 +357,6 @@ export default async function agentryReasonDeep(input, ctx) {
 
     if (finalContent) break;
 
-    // Exhausted MAX_TURNS on this model without a final answer. Advance.
     const next = modelChain[mi + 1];
     if (next) {
       ctx.events.emit("agentry.reason.deep.model_switched", {
@@ -335,7 +375,7 @@ export default async function agentryReasonDeep(input, ctx) {
       model_chain: modelChain,
     });
     throw new Error(
-      `agentry.reason.deep: no final answer after ${MAX_TURNS} turns on ${modelChain.length} model(s). Last attempt: ${JSON.stringify(attempts[attempts.length - 1] || null)}`
+      "agentry.reason.deep: no final answer after " + MAX_TURNS + " turns on " + modelChain.length + " model(s). Last attempt: " + JSON.stringify(attempts[attempts.length - 1] || null)
     );
   }
 
@@ -345,35 +385,70 @@ export default async function agentryReasonDeep(input, ctx) {
       preview: finalContent.slice(0, 300),
     });
     throw new Error(
-      `agentry.reason.deep: could not parse JSON from final answer. Raw: ${finalContent.slice(0, 300)}`
+      "agentry.reason.deep: could not parse JSON from final answer. Raw: " + finalContent.slice(0, 300)
     );
   }
 
   let gap_id = null;
-  if (parsed.missing && parsed.missing.wanted_id) {
-    const key = `gap:${parsed.missing.wanted_id}`;
-    try {
-      const gap = recordGap(
-        { graph: ctx.graph, events: ctx.events },
-        {
-          key,
-          wanted_kind: parsed.missing.kind || "unknown",
-          wanted_id: parsed.missing.wanted_id,
-          reason: `deep reasoning: ${parsed.analysis?.slice(0, 200) || "unspecified"}`,
-          example_task_id: session_id || null,
-        }
-      );
-      gap_id = gap.id;
-      ctx.events.emit("agentry.reason.deep.gap_recorded", {
-        gap_id,
-        wanted_kind: gap.wanted_kind,
-        hits: gap.hits,
+  let existing_capability = null;
+  let proposed_id = null;
+  let resolved_id = null;
+  let matched_via = null;
+
+  const rawMissing = parsed.missing;
+  if (rawMissing && rawMissing.wanted_id) {
+    proposed_id = rawMissing.wanted_id;
+    const res = resolveWantedId(ctx.graph, proposed_id);
+    resolved_id = res.resolved;
+    matched_via = res.matched_via;
+
+    if (resolved_id !== proposed_id) {
+      ctx.events.emit("agentry.reason.deep.wanted_id_resolved", {
+        proposed: proposed_id,
+        resolved: resolved_id,
+        matched_via,
       });
-    } catch (e) {
-      ctx.events.emit("agentry.reason.deep.gap_record_failed", {
-        error: e.message,
-        wanted_id: parsed.missing.wanted_id,
+    }
+
+    const existing = ctx.graph.getCapability(resolved_id);
+    if (existing && !existing.retired_at) {
+      existing_capability = {
+        id: existing.id,
+        kind: existing.kind,
+        handler_file: existing.handler_file || null,
+      };
+      ctx.events.emit("agentry.reason.deep.existing_capability_matched", {
+        proposed: proposed_id,
+        matched_id: existing.id,
+        matched_via,
       });
+    } else {
+      const key = "gap:" + resolved_id;
+      try {
+        const gap = recordGap(
+          { graph: ctx.graph, events: ctx.events },
+          {
+            key,
+            wanted_kind: rawMissing.kind || "unknown",
+            wanted_id: resolved_id,
+            reason: "deep reasoning: " + (parsed.analysis?.slice(0, 200) || "unspecified"),
+            example_task_id: session_id || null,
+          }
+        );
+        gap_id = gap.id;
+        ctx.events.emit("agentry.reason.deep.gap_recorded", {
+          gap_id,
+          wanted_kind: gap.wanted_kind,
+          hits: gap.hits,
+          proposed_id,
+          resolved_id,
+        });
+      } catch (e) {
+        ctx.events.emit("agentry.reason.deep.gap_record_failed", {
+          error: e.message,
+          wanted_id: resolved_id,
+        });
+      }
     }
   }
 
@@ -382,20 +457,32 @@ export default async function agentryReasonDeep(input, ctx) {
     turns: attempts.filter(a => a.ok).length,
     tools_used: toolsUsed,
     gap_id,
+    existing_capability_id: existing_capability?.id || null,
     ms: Date.now() - started,
   });
+
+  const missing = rawMissing
+    ? Object.assign({}, rawMissing, {
+        wanted_id: resolved_id || rawMissing.wanted_id,
+      }, proposed_id && resolved_id !== proposed_id ? { proposed_id } : {})
+    : null;
+
+  const note = existing_capability
+    ? "Capability " + existing_capability.id + " already exists in the graph. Invoke it directly — no gap recorded."
+    : (gap_id
+        ? "A capability gap was recorded. A proposal will be generated in the background and emailed for approval."
+        : "No gap recorded — this looks like a retry or in-session fix.");
 
   return {
     output: {
       analysis: parsed.analysis,
-      missing: parsed.missing,
+      missing,
       immediate_action: parsed.immediate_action,
       suggestions: parsed.suggestions || [],
       gap_recorded: gap_id,
-      note: gap_id
-        ? "A capability gap was recorded. A proposal will be generated in the background and emailed for approval."
-        : "No gap recorded — this looks like a retry or in-session fix.",
-      model_used: modelUsed || `${PROVIDER}/${MODEL}`,
+      existing_capability,
+      note,
+      model_used: modelUsed || (PROVIDER + "/" + MODEL),
       tools_used: toolsUsed,
     },
     cost: { time_ms: Date.now() - started, http_calls: attempts.length + toolsUsed.length },
