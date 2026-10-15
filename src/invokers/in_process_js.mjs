@@ -95,6 +95,46 @@ async function inProcessJsInvoker(cap, input, context) {
     }
   }
 
+  // v0.15.28 — invoker-managed session preparation.
+  // Any capability that declares `requires` (npm / pip / post_install /
+  // capability) has those deps installed before its handler function
+  // runs. prepareSession is idempotent per (session, capId), so this
+  // is cheap after the first call. Makes "capability self-contained"
+  // true for seeds too, not just for synthesized handlers whose
+  // template already bakes the call in.
+  if (cap.requires && typeof cap.requires === "object") {
+    const hasAny =
+      (Array.isArray(cap.requires.npm) && cap.requires.npm.length > 0) ||
+      (Array.isArray(cap.requires.pip) && cap.requires.pip.length > 0) ||
+      (typeof cap.requires.post_install === "string" && cap.requires.post_install.length > 0) ||
+      (Array.isArray(cap.requires.capability) && cap.requires.capability.length > 0);
+    if (hasAny) {
+      const prepSession = input?.session || (cap.id + "-default");
+      try {
+        const { prepareSession } = await import("../runtime/installer.mjs");
+        await prepareSession(
+          { graph: context.graph, events: context.events, invoke: context.invoke },
+          { capId: cap.id, session: prepSession }
+        );
+        context.events?.emit("invoker.session_prepared", {
+          capability_id: cap.id,
+          session: prepSession,
+        });
+      } catch (e) {
+        context.events?.emit("invoker.session_prepare_failed", {
+          capability_id: cap.id,
+          session: prepSession,
+          error: e.message,
+          phase: e.phase || null,
+        });
+        throw errors.invokerFailed(cap.invoked_via, e, {
+          capability_id: cap.id,
+          phase: "prepareSession",
+        });
+      }
+    }
+  }
+
   const started = Date.now();
   // Pass invoke down so composite handlers can call other capabilities
   // through the same dispatch boundary. Set by invoke.mjs in step 4.

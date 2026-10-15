@@ -419,6 +419,7 @@ export default async function agentryReasonDeep(input, ctx) {
         id: existing.id,
         kind: existing.kind,
         handler_file: existing.handler_file || null,
+        handler: existing.handler || null,
       };
       ctx.events.emit("agentry.reason.deep.existing_capability_matched", {
         proposed: proposed_id,

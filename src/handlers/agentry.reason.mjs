@@ -233,6 +233,7 @@ export default async function agentryReason(input, ctx) {
         id: existing.id,
         kind: existing.kind,
         handler_file: existing.handler_file || null,
+        handler: existing.handler || null,
       };
       ctx.events.emit("agentry.reason.existing_capability_matched", {
         proposed: proposed_id,
