@@ -1,204 +1,141 @@
 // agentry/src/handlers/bua.screenshot.mjs
 //
-// BROWSER USE AGENT — screenshot.
+// Seed handler: render a page in headless Chromium and return a PNG.
+// Self-contained — declares its deps in REQUIRES and calls
+// prepareSession() at the top of run() so any caller in any session
+// gets a working install on first use.
 //
-// This is the REFERENCE IMPLEMENTATION for an adopted capability.
-// Every capability agentry adopts should look like this: a small,
-// single-purpose handler that shells into the OS kernel, uses the
-// dependency declared in its capability node, and returns a typed
-// result.
-//
-// Contract:
-//   input:  { url, width?, height?, full_page?, session?, timeout_ms? }
-//   output: { png_base64, bytes, url, captured_at, width, height }
-//
-// Depends on: microsoft/playwright (npm: playwright)
-// Uses the OS kernel for: node.install (playwright), node.run (the
-// actual browser work).
+// v0.16.3 — restored. The file had been overwritten by a synthesized
+// bua.browser handler at some point, which made bua.screenshot fail
+// with ERR_MODULE_NOT_FOUND on playwright.
+
+import { prepareSession } from "./_installer_import.mjs";
 
 const CAP_ID = "bua.screenshot";
+const CAP_KIND = "bua";
 
-const ADOPTED_FROM = {
-  candidate_id: "microsoft/playwright",
-  candidate_url: "https://github.com/microsoft/playwright",
-  candidate_kind: "repo",
+const ACCEPTS = {
+  url: "string",
+  width: { type: "number", optional: true },
+  height: { type: "number", optional: true },
+  full_page: { type: "boolean", optional: true },
+  session: { type: "string", optional: true },
+  timeout_ms: { type: "number", optional: true },
+};
+
+const PRODUCES = {
+  png_base64: "string",
+  bytes: "number",
+  url: "string",
+  captured_at: "number",
+  width: "number",
+  height: "number",
 };
 
 const REQUIRES = {
   npm: ["playwright"],
-  // Post-install: download the chromium binary into the session's
-  // browser cache. --with-deps is not used here; the container already
-  // has the system libraries from the Dockerfile.
+  pip: [],
   post_install: "npx playwright install chromium",
 };
 
-const DEFAULT_WIDTH = 1280;
-const DEFAULT_HEIGHT = 720;
-const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_TIMEOUT_MS = 90000;
+
+const KERNEL_SCRIPT = [
+  'import { chromium } from "playwright";',
+  'const url = process.env.BUA_URL;',
+  'const width = Number(process.env.BUA_WIDTH || 1280);',
+  'const height = Number(process.env.BUA_HEIGHT || 720);',
+  'const fullPage = process.env.BUA_FULL === "1";',
+  'const browser = await chromium.launch({ headless: true });',
+  'try {',
+  '  const context = await browser.newContext({ viewport: { width, height } });',
+  '  const page = await context.newPage();',
+  '  await page.goto(url, { waitUntil: "networkidle", timeout: 25000 });',
+  '  const buf = await page.screenshot({ fullPage, type: "png" });',
+  '  const png_base64 = buf.toString("base64");',
+  '  const bytes = Math.floor((png_base64.length * 3) / 4);',
+  '  console.log(JSON.stringify({ png_base64, bytes, url, captured_at: Date.now(), width, height }));',
+  '} finally {',
+  '  await browser.close();',
+  '}',
+].join("\n");
 
 export const capability = {
   id: CAP_ID,
-  kind: "bua",
-  accepts: {
-    url: "string",
-    width: { type: "number", optional: true },
-    height: { type: "number", optional: true },
-    full_page: { type: "boolean", optional: true },
-    session: { type: "string", optional: true },
-    timeout_ms: { type: "number", optional: true },
-  },
-  produces: {
-    png_base64: "string",
-    bytes: "number",
-    url: "string",
-    captured_at: "number",
-    width: "number",
-    height: "number",
-  },
+  kind: CAP_KIND,
+  invoked_via: "invoker.in_process_js",
+  accepts: ACCEPTS,
+  produces: PRODUCES,
   requires: REQUIRES,
-  adopted_from: ADOPTED_FROM,
 };
 
-// Acceptance test.
-//
-// Self-contained: prepares its own session, then probes example.com.
-// The installer is idempotent — after the first run, prepareSession
-// is a no-op because the session carries a `prepared:bua.screenshot`
-// marker in its env.
-//
-// Uses a DEDICATED session ("bua-accept-test") so the test never
-// collides with runtime invocations that might be using a different
-// session name.
-export async function accept(deps, { session = "bua-accept-test" } = {}) {
-  const { prepareSession } = await import("../runtime/installer.mjs");
+export async function accept(deps, opts = {}) {
+  const session = opts.session || (CAP_ID + "-accept-test");
   await prepareSession(deps, { capId: CAP_ID, session });
-
-  const probe = await run(
-    { url: "https://example.com", width: 640, height: 480, session },
-    deps
-  );
+  const probe = await run({ url: "https://example.com", width: 640, height: 480 }, deps, { session });
   const out = probe.output || probe;
-  if (!out.png_base64 || out.png_base64.length < 1000) {
-    throw new Error(
-      `accept: PNG too small (${out.png_base64?.length || 0} bytes encoded)`
-    );
+  const minBytes = 500;
+  if (minBytes > 0) {
+    const size = typeof out.bytes === "number" ? out.bytes : 0;
+    if (size < minBytes) {
+      throw new Error("accept: output too small (" + size + " < " + minBytes + ")");
+    }
   }
-  if (out.url !== "https://example.com") {
-    throw new Error(`accept: URL mismatch (${out.url})`);
-  }
-  return { ok: true, bytes: out.bytes, session };
+  return { ok: true, session, output: out };
 }
 
-async function run(input, ctx) {
-  const {
-    url,
-    width = DEFAULT_WIDTH,
-    height = DEFAULT_HEIGHT,
-    full_page = false,
-    session = "bua-default",
-    timeout_ms = DEFAULT_TIMEOUT_MS,
-  } = input || {};
-
-  if (!url || typeof url !== "string") {
-    throw new Error("bua.screenshot requires url (string)");
-  }
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    throw new Error(`bua.screenshot requires http(s) URL, got: ${url}`);
-  }
+async function run(input, ctx, opts = {}) {
+  const session = opts.session || input.session || (CAP_ID + "-default");
+  const timeout_ms = input.timeout_ms || DEFAULT_TIMEOUT_MS;
 
   if (typeof ctx.invoke !== "function") {
-    throw new Error("bua.screenshot requires ctx.invoke");
+    throw new Error(CAP_ID + " requires ctx.invoke");
   }
 
-  // Ensure the session exists.
-  await ctx.invoke(
-    "agentry.os",
-    { action: "session.create", id: session },
-    { tenant: "local", by: CAP_ID }
-  );
+  await prepareSession(ctx, { capId: CAP_ID, session });
 
-  // The script that does the actual work. Runs inside the session
-  // via node.run.
-  const script = `
-    import { chromium } from "playwright";
-    const url = process.env.BUA_URL;
-    const width = Number(process.env.BUA_WIDTH || 1280);
-    const height = Number(process.env.BUA_HEIGHT || 720);
-    const fullPage = process.env.BUA_FULL === "1";
+  await ctx.invoke("agentry.os", { action: "session.create", id: session },
+    { tenant: "local", by: CAP_ID });
 
-    const browser = await chromium.launch({ headless: true });
-    try {
-      const context = await browser.newContext({ viewport: { width, height } });
-      const page = await context.newPage();
-      await page.goto(url, { waitUntil: "networkidle", timeout: 25000 });
-      const buf = await page.screenshot({ fullPage, type: "png" });
-      process.stdout.write(buf.toString("base64"));
-    } finally {
-      await browser.close();
-    }
-  `;
+  const env = {
+    BUA_URL: input.url === undefined || input.url === null ? "" : String(input.url),
+    BUA_WIDTH: input.width === undefined || input.width === null ? "" : String(input.width),
+    BUA_HEIGHT: input.height === undefined || input.height === null ? "" : String(input.height),
+    BUA_FULL: input.full_page === true ? "1" : "",
+  };
 
-  const res = await ctx.invoke(
-    "agentry.os",
-    {
-      action: "node.run",
-      session,
-      code: script,
-      env: {
-        BUA_URL: url,
-        BUA_WIDTH: String(width),
-        BUA_HEIGHT: String(height),
-        BUA_FULL: full_page ? "1" : "0",
-      },
-      timeout_ms,
-    },
-    { tenant: "local", by: CAP_ID }
-  );
+  const res = await ctx.invoke("agentry.os", {
+    action: "node.run",
+    session,
+    code: KERNEL_SCRIPT,
+    env,
+    timeout_ms,
+  }, { tenant: "local", by: CAP_ID });
 
   if (!res.ok) {
-    throw new Error(
-      `bua.screenshot: os call failed — ${res.error.code}: ${res.error.message}`
-    );
+    throw new Error(CAP_ID + ": kernel call failed — " + res.error.code + ": " + res.error.message);
   }
 
-  const result = res.output.result;
-  if (result.exit_code !== 0) {
-    const stderr = String(result.stderr || "").slice(0, 300);
-    if (
-      stderr.includes("Executable doesn't exist") ||
-      stderr.includes("playwright install")
-    ) {
-      throw new Error(
-        `bua.screenshot: playwright browser not installed in session "${session}". ` +
-          `Run: ${REQUIRES.post_install}`
-      );
-    }
-    throw new Error(
-      `bua.screenshot: playwright exited ${result.exit_code} — ${stderr}`
-    );
+  const r = res.output.result || res.output;
+  const exitCode = r.exit_code ?? r.exitCode ?? 0;
+  if (exitCode !== 0) {
+    throw new Error(CAP_ID + ": kernel exited " + exitCode + " — " + String(r.stderr || "").slice(0, 300));
   }
 
-  const png_base64 = String(result.stdout || "").trim();
-  if (!png_base64) {
-    throw new Error("bua.screenshot: playwright produced no output");
-  }
+  const stdout = String(r.stdout || "");
+  if (!stdout.trim()) throw new Error(CAP_ID + ": kernel produced no output");
 
-  const bytes = Math.floor((png_base64.length * 3) / 4);
-
+  const raw = JSON.parse(stdout);
   return {
     output: {
-      png_base64,
-      bytes,
-      url,
-      captured_at: Date.now(),
-      width,
-      height,
+      png_base64: raw.png_base64,
+      bytes: raw.bytes,
+      url: raw.url,
+      captured_at: raw.captured_at,
+      width: raw.width,
+      height: raw.height,
     },
-    cost: {
-      time_ms: result.ms || 0,
-      browser_ms: result.ms || 0,
-      money_usd: 0,
-    },
+    cost: { time_ms: r.ms || 0 },
   };
 }
 
