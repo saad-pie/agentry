@@ -313,6 +313,14 @@ export function registerAgentryTools(deps) {
       if (args.session_id && !input.session) input.session = String(args.session_id);
       if (args.timeout_ms && !input.timeout_ms) input.timeout_ms = Number(args.timeout_ms);
 
+      // v0.17.12 — MCP runs in its own process with its own graph cache.
+      // The discovery loop and the shell bridge write capabilities to
+      // capabilities.jsonl from other processes. Without an invalidate
+      // here, invoke() reads a stale map and refuses to see newly
+      // adopted capabilities until MCP restarts. Same reason
+      // ensure_capability already invalidates in checkAvailable.
+      if (typeof deps.graph.invalidateCache === "function") deps.graph.invalidateCache();
+
       const startedAt = Date.now();
       const res = await deps.invoke(capabilityId, input, {
         tenant: "mcp", by: "mcp.invoke",
