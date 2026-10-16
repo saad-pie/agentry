@@ -4,20 +4,12 @@
 // handler for the gap it fills.
 //
 // v0.15.29 — fill-in-the-blanks synthesis.
-//   The old prompt handed the model a full reference handler and said
-//   "study this shape." The model copied it, and every new capability
-//   came out as the reference stretched to fit. The reference file
-//   itself drifted toward whatever the last synthesis produced.
-//   Replaced with: for the gap's wanted_kind, look up a shape from
-//   _shapes.mjs and ask the model to fill each slot for the specific
-//   capability. No reference code means no anchor to copy.
-//
-//   The spec now carries a plan field: one entry per shape step, each
-//   with verb / what / fails_if / code. The renderer compiles the plan
-//   into a single kernel script with each step as a labeled segment.
-//   Steps execute in the same process so state (browser handle, db
-//   connection) persists. The plan is also stored in the seed JSON for
-//   audit.
+// v0.17.4 — npm candidate support (readNpmPackage).
+// v0.17.5 — prompt says session starts empty.
+// v0.17.6 — ESM rule (wrong, corrected in v0.17.9).
+// v0.17.7 — cross-section spec consistency validator.
+// v0.17.8 — cross-step state via globalThis.
+// v0.17.9 — correct module-loading rule: dynamic import only.
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -353,7 +345,7 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("      \"verb\": \"<verb from the shape, exact>\",");
   lines.push("      \"what\": \"<one sentence: what THIS capability does at this step>\",");
   lines.push("      \"fails_if\": \"<the specific failure mode for THIS capability at this step>\",");
-  lines.push("      \"code\": \"<the code that runs at this step, in the SAME kernel process. Use variables set by earlier steps. One statement per line.>\"");
+  lines.push("      \"code\": \"<the code that runs at this step. See MODULE LOADING and STATE BETWEEN STEPS below.>\"");
   lines.push("    }");
   lines.push("    // ... one entry per shape step, in order");
   lines.push("  ],");
@@ -380,43 +372,54 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("- Output ONLY JSON. No prose. No fences.");
   lines.push("- The plan array MUST have exactly " + shape.steps.length + " entries, in the shape's order.");
   lines.push("- Each plan entry's verb MUST match the shape's verb for that step.");
-  lines.push("- Code from step N runs in the same process as code from step N-1.");
-  lines.push("- CRITICAL: Pass state between steps via globalThis. Assign to globalThis.X in");
-  lines.push("  an earlier step and read globalThis.X in a later step. Do NOT pass state via");
+  lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
+  lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
+  lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
+  lines.push("- The kernel session starts EMPTY. Any file your code reads must have been");
+  lines.push("  written by an EARLIER step in your plan. If your execute step reads a file,");
+  lines.push("  your prepare step MUST write that file first with fs.writeFileSync. Do NOT");
+  lines.push("  assume files exist. Do NOT reference paths you did not create.");
+  lines.push("");
+  lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:");
+  lines.push("- The whole plan runs inside ONE async function body (an async IIFE).");
+  lines.push("- Inside a function body, these do NOT work:");
+  lines.push("    * static import (import x from 'x') — SYNTAX ERROR, cannot appear inside a function");
+  lines.push("    * require() — DOES NOT EXIST in ES modules");
+  lines.push("- To load ANY module, you MUST use dynamic import with await:");
+  lines.push("    Node built-in:");
+  lines.push("      const fs = await import('node:fs');");
+  lines.push("      fs.writeFileSync('/path/file', data);");
+  lines.push("    Built-in with destructuring:");
+  lines.push("      const { writeFileSync } = await import('node:fs');");
+  lines.push("    npm package (ESM, named export):");
+  lines.push("      const { marked } = await import('marked');");
+  lines.push("    npm package (CJS, most common case):");
+  lines.push("      const markdownpdf = (await import('markdown-pdf')).default;");
+  lines.push("    npm package (CJS, named function via default):");
+  lines.push("      const Pkg = (await import('some-pkg')).default;");
+  lines.push("      const result = Pkg.doThing();");
+  lines.push("- If you do not know whether the package is ESM or CJS, use .default first.");
+  lines.push("");
+  lines.push("STATE BETWEEN STEPS:");
+  lines.push("- Pass state between steps via globalThis. Assign to globalThis.X in an");
+  lines.push("  earlier step and read globalThis.X in a later step. Do NOT pass state via");
   lines.push("  bare variables. The compiled script puts every step inside ONE async IIFE");
   lines.push("  but a variable typo across 4000 tokens of spec is a silent runtime failure;");
   lines.push("  globalThis.X fails loudly the moment it is referenced undefined.");
   lines.push("  Correct: prepare step writes `globalThis.inputPath = path;`.");
   lines.push("           execute step reads `const p = globalThis.inputPath;`.");
-  lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
-  lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
-  lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
-  lines.push("- The kernel script is an ES module. require() is NOT defined. Use");
-  lines.push("  import, or `const x = (await import(\"pkg\")).default` for CJS modules.");
-  lines.push("- The kernel session starts EMPTY. Any file your code reads must have been");
-  lines.push("  written by an EARLIER step in your plan. If your execute step reads a file,");
-  lines.push("  your prepare step MUST write that file first with fs.writeFileSync. Do NOT");
-  lines.push("  assume files exist. Do NOT reference paths you did not create.");
   lines.push("");
   if (facts.source_kind === "npm" && facts.npm_package_name) {
     lines.push("NPM CANDIDATE — this is an npm package, not a GitHub repo.");
     lines.push("- The package is already installed in the synth session at");
     lines.push("  node_modules/" + facts.npm_package_name + ".");
     lines.push("- Your synthesized handler MUST declare requires.npm: [\"" + facts.npm_package_name + "\"].");
-    lines.push("- In your plan's code, IMPORT the package. Do NOT reimplement what it does.");
-    lines.push("- Common import patterns for this package:");
-    lines.push("    import pkg from '" + facts.npm_package_name + "';           // ESM default");
-    lines.push("    import { fn } from '" + facts.npm_package_name + "';        // ESM named");
-    lines.push("    const pkg = (await import('" + facts.npm_package_name + "')).default;  // ESM dynamic default");
-    lines.push("    const mod = await import('" + facts.npm_package_name + "');  // ESM dynamic namespace");
-    lines.push("- Read the README carefully. It shows the exact usage pattern.");
-    lines.push("- CRITICAL: The kernel script runs as an ES module (.mjs).");
-    lines.push("  require() DOES NOT EXIST. Every reference in the README that uses");
-    lines.push("  require() must be rewritten as import, or as await import() inside");
-    lines.push("  an async function (the plan already runs inside an async IIFE).");
-    lines.push("  CJS packages with module.exports are reachable as:");
+    lines.push("- LOAD the package with dynamic import ONLY. Two valid forms:");
     lines.push("    const pkg = (await import('" + facts.npm_package_name + "')).default;");
-    lines.push("  If the CJS module exports a function, .default is that function.");
+    lines.push("    const { fn } = await import('" + facts.npm_package_name + "');");
+    lines.push("- Do NOT use require(). Do NOT use static import. Both will fail at runtime.");
+    lines.push("- Read the README carefully for the API. If the README uses require() or");
+    lines.push("  static import, REWRITE it to use dynamic import as shown above.");
     lines.push("");
   }
   lines.push("COMPOSITION:");
@@ -452,10 +455,6 @@ function compilePlanToScript(plan) {
     if (step.what) parts.push("  // what: " + String(step.what).replace(/\n/g, "\n  // "));
     if (step.fails_if) parts.push("  // fails_if: " + String(step.fails_if).replace(/\n/g, "\n  // "));
     parts.push("  // BEGIN " + step.verb);
-    // Decode each step's code individually BEFORE joining. The outer
-    // decode below is a no-op because the joined string always contains
-    // real newlines; per-step is the only place literal \n sequences
-    // can be detected and fixed.
     const rawCode = String(step.code || "").trim();
     const code = decodeIfDoubleEscaped(rawCode);
     if (code) parts.push(indentBlock(code, "  "));
@@ -671,20 +670,8 @@ function validatePlan(plan, shape, capability_id) {
   }
 }
 
-// v0.17.7 — spec consistency. The LLM writes one JSON document but
-// rarely holds the same name across all its sections. Example from
-// real output: plan code reads process.env.MARKDOWN_PATH, but
-// env_map declares MARKDOWN and accept_spec supplies "markdown".
-// Three names, one concept, three different keys. Nothing in the
-// plan validator catches that. Nothing in the trial catches it either
-// — the trial just fails at runtime with "Missing markdown_path"
-// and we pay a full trial cycle for a bug we could detect statically.
-//
-// This function cross-references the four sections that must agree:
-//   plan[].code           — the actual code that runs
-//   glue.env_map          — declares which input key maps to which env var
-//   accept_spec.input     — supplies the values used by the trial probe
-//   capability.produces   — declares what the emit step must output
+// v0.17.7 — spec consistency. Cross-references the four sections that
+// must agree: plan code, env_map, accept_spec, produces.
 function validateSpecConsistency(spec, capability_id) {
   const plan = Array.isArray(spec.plan) ? spec.plan : [];
   const glue = spec.glue || {};
@@ -692,8 +679,6 @@ function validateSpecConsistency(spec, capability_id) {
   const acceptInput = spec.accept_spec && spec.accept_spec.input ? spec.accept_spec.input : {};
   const produces = spec.capability && spec.capability.produces ? spec.capability.produces : {};
 
-  // Check 1 — every process.env.X referenced in plan code must be a
-  // key in env_map. Catches MARKDOWN_PATH vs MARKDOWN.
   const envKeysUsed = new Set();
   for (const step of plan) {
     const code = String(step.code || "");
@@ -715,9 +700,6 @@ function validateSpecConsistency(spec, capability_id) {
     }
   }
 
-  // Check 2 — every env_map value (the input key on the outer side)
-  // must exist as a key in accept_spec.input. Catches "env_map needs
-  // input markdown but the trial probe supplies nothing."
   const acceptKeys = new Set(Object.keys(acceptInput));
   for (const [envKey, inputKey] of Object.entries(envMap)) {
     if (typeof inputKey !== "string") continue;
@@ -730,13 +712,10 @@ function validateSpecConsistency(spec, capability_id) {
     }
   }
 
-  // Check 3 — every key declared in capability.produces must appear as
-  // a literal substring in the emit step's code. Catches "produces
-  // declares pdf_path but emit writes { pdf: ... }".
   const emitStep = plan.find(s => s && s.verb === "emit");
   const emitCode = emitStep ? String(emitStep.code || "") : "";
   for (const key of Object.keys(produces)) {
-    if (key === "captured_at" || key === "bytes") continue; // runtime-injected
+    if (key === "captured_at" || key === "bytes") continue;
     if (!emitCode.includes(key)) {
       return {
         ok: false,
@@ -905,9 +884,6 @@ export default async function agentrySynthesize(input, ctx) {
     throw e;
   }
 
-  // v0.17.7 — cross-section consistency. Rejects the spec before a
-  // trial cycle if the plan, env_map, accept_spec, and produces
-  // sections disagree with each other.
   const consistency = validateSpecConsistency(spec, spec.capability.id);
   if (!consistency.ok) {
     events.emit("synthesize.spec_inconsistent", {
