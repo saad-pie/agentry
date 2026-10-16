@@ -25,7 +25,10 @@ const MCP_REGISTRY_CANDIDATES = [
 ];
 
 const DEFAULT_LIMIT = 20;
-const DEFAULT_SOURCES = ["local", "npm", "mcp", "github", "web"];
+// mcp disabled pending the correct registry URL (as of 2026-10-16
+// the public endpoint is not at any of the guessed hostnames). It can
+// still be requested explicitly via input.sources = ["mcp", ...].
+const DEFAULT_SOURCES = ["local", "npm", "github", "web"];
 
 // Source credibility. Local wins because it is already tested and
 // installed. MCP is agent-native and curated. npm is the largest
@@ -66,6 +69,13 @@ function recencyBoost(iso) {
   return 0;
 }
 
+function clamp01(n) {
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return Number(n.toFixed(3));
+}
+
 function starsBoost(stars) {
   if (!Number.isFinite(stars) || stars <= 0) return 0;
   if (stars > 10000) return 0.2;
@@ -95,7 +105,7 @@ async function searchLocal(graph, queryTokens, limit) {
       description: c.notes || null,
       produces: c.produces || null,
       accepts: c.accepts || null,
-      fit: Number(fit.toFixed(3)),
+      fit: clamp01(fit),
       exists_locally: true,
     });
   }
@@ -134,7 +144,7 @@ async function searchNpm(query, queryTokens, limit) {
       description: p.description || null,
       version: p.version || null,
       published_at: p.date || null,
-      fit: Number(Math.min(fit, 1).toFixed(3)),
+      fit: clamp01(fit),
       exists_locally: false,
     });
   }
@@ -175,7 +185,7 @@ async function searchMcp(query, queryTokens, limit) {
           url: s.url || s.homepage || s.repository || null,
           description: desc || null,
           version: s.version || (s.server && s.server.version) || null,
-          fit: Number(fit.toFixed(3)),
+          fit: clamp01(fit),
           exists_locally: false,
         });
       }
@@ -202,7 +212,8 @@ async function searchGithub(ctx, query, queryTokens, limit) {
       const text = [r.name || "", r.description || "", (r.topics || []).join(" ")].join(" ");
       const overlap = keywordOverlap(queryTokens, text);
       if (overlap === 0) continue;
-      const fit = SOURCE_WEIGHTS.github * overlap + recencyBoost(r.pushed_at) + starsBoost(r.stars);
+      const boost = (recencyBoost(r.pushed_at) + starsBoost(r.stars)) * 0.3;
+      const fit = SOURCE_WEIGHTS.github * overlap + boost;
       out.push({
         id: r.id,
         source: "github",
