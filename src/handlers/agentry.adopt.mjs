@@ -161,6 +161,37 @@ export default async function agentryAdopt(input, ctx) {
     return { output: { adopted: [], failed: [], retired_gap: null, retired_watches: [], notified: false, reason: `state_is_${proposal.state || "unknown"}` }, cost: { time_ms: Date.now() - started } };
   }
 
+  // v0.17.5 — retry cap. A proposal whose synthesis repeatedly fails
+  // used to be re-processed on every discovery tick, sending a fresh
+  // email each time. Now: up to MAX_RETRIES attempts, then rejected.
+  const MAX_RETRIES = Number(process.env.AGENTRY_ADOPT_MAX_RETRIES || "3");
+  const priorAttempts = Number(proposal.synthesis_attempt_count || 0);
+  if (priorAttempts >= MAX_RETRIES) {
+    events.emit("adoption.retry_exhausted", {
+      proposal_id,
+      attempts: priorAttempts,
+      last_phase: proposal.last_failed_phase || null,
+      last_error: String(proposal.last_failed_error || "").slice(0, 200),
+    });
+    try {
+      graph.putCapability({
+        id: proposal.id,
+        kind: "proposal",
+        state: "rejected",
+        adopted_at: Date.now(),
+        retry_exhausted: true,
+        retry_count: priorAttempts,
+        notes: "Retry cap (" + MAX_RETRIES + ") reached after repeated synthesis failures.",
+      });
+    } catch (e) {
+      events.emit("adoption.retry_reject_failed", { proposal_id, error: e.message });
+    }
+    return {
+      output: { adopted: [], failed: [], retired_gap: null, retired_watches: [], notified: false, reason: "retry_exhausted", attempts: priorAttempts },
+      cost: { time_ms: Date.now() - started },
+    };
+  }
+
   const decisions = proposal.decisions || {};
   const approved = Object.entries(decisions)
     .filter(([, d]) => d?.decision === "approved")
@@ -438,11 +469,21 @@ export default async function agentryAdopt(input, ctx) {
     }
   }
 
+  // v0.17.5 — attempt counting. Every failed tick increments; at
+  // MAX_RETRIES we reject. Otherwise the proposal stays "decided" and
+  // will be retried on the next discovery tick. No email on retries.
+  const lastFailed = failed.length ? failed[failed.length - 1] : null;
+  const newAttempts = priorAttempts + (failed.length > 0 && adopted.length === 0 ? 1 : 0);
+  const wasAdopted = adopted.length > 0;
+  const retryExhausted = !wasAdopted && newAttempts >= MAX_RETRIES;
+  const scheduledRetry = !wasAdopted && !retryExhausted && failed.length > 0;
+  const terminal = !scheduledRetry;
+
   graph.putCapability({
     id: proposal.id,
     kind: "proposal",
-    adopted_at: now,
-    state: adopted.length > 0 ? "adopted" : "rejected",
+    ...(terminal ? { adopted_at: now } : {}),
+    state: wasAdopted ? "adopted" : (retryExhausted ? "rejected" : (scheduledRetry ? "decided" : "rejected")),
     adopted_capability_ids: adopted.map(a => a.capability_id),
     failed_syntheses: failed.map(f => ({
       candidate_id: f.candidate_id,
@@ -450,14 +491,41 @@ export default async function agentryAdopt(input, ctx) {
       phase: f.phase,
       error: f.error,
     })),
+    synthesis_attempt_count: newAttempts,
+    last_failed_phase: lastFailed ? lastFailed.phase : (proposal.last_failed_phase || null),
+    last_failed_error: lastFailed ? String(lastFailed.error || "").slice(0, 400) : (proposal.last_failed_error || null),
+    retry_exhausted: retryExhausted || undefined,
     retired_gap_id: retiredGap,
     retired_watch_ids: retiredWatches,
   });
+
+  if (scheduledRetry) {
+    events.emit("adoption.retry_scheduled", {
+      proposal_id,
+      attempt: newAttempts,
+      max_retries: MAX_RETRIES,
+      last_phase: lastFailed ? lastFailed.phase : null,
+    });
+    return {
+      output: {
+        adopted, failed,
+        retired_gap: retiredGap,
+        retired_watches: retiredWatches,
+        notified: false,
+        reason: "retry_scheduled",
+        attempt: newAttempts,
+        max_retries: MAX_RETRIES,
+      },
+      cost: { time_ms: Date.now() - started },
+    };
+  }
 
   events.emit("proposal.adopted", {
     proposal_id, adopted, failed,
     retired_gap: retiredGap, retired_watches: retiredWatches,
     decision: adopted.length > 0 ? "adopted" : "rejected",
+    attempt: newAttempts,
+    retry_exhausted: retryExhausted,
   });
 
   // ─── Checkpoint on growth ───

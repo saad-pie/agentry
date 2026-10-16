@@ -384,6 +384,10 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
+  lines.push("- The kernel session starts EMPTY. Any file your code reads must have been");
+  lines.push("  written by an EARLIER step in your plan. If your execute step reads a file,");
+  lines.push("  your prepare step MUST write that file first with fs.writeFileSync. Do NOT");
+  lines.push("  assume files exist. Do NOT reference paths you did not create.");
   lines.push("");
   if (facts.source_kind === "npm" && facts.npm_package_name) {
     lines.push("NPM CANDIDATE — this is an npm package, not a GitHub repo.");
