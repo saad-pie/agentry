@@ -1,0 +1,20 @@
+{
+  "id": "agentry.discover",
+  "kind": "agentry",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.discover",
+  "accepts": {
+    "query": "string",
+    "sources": { "type": "array", "optional": true },
+    "limit": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "candidates": "array<object>",
+    "searched": "array<string>",
+    "recommendation": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 3000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "Search local graph, npm registry, MCP server registry, GitHub, and web for existing tools that could solve a problem. Returns ranked candidates with fit scores. Use this before synthesizing a new capability from scratch."
+}

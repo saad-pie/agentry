@@ -66,6 +66,22 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "discover_capability",
+      description:
+        "Search agentry's capability graph, the npm registry, the MCP server registry, GitHub, and the web for existing tools that could solve a problem. Returns ranked candidates with fit scores. Use this BEFORE deciding a capability is missing \u2014 the right tool may already exist somewhere.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Short description of what is needed, e.g. 'generate PDF from markdown'." },
+          sources: { type: "array", items: { type: "string" }, description: "Optional subset of: local, npm, mcp, github, web." },
+        },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 function listLiveCapabilities(graph) {
@@ -103,9 +119,15 @@ function systemPrompt(graph) {
     "    invoke it directly. Do NOT set missing to null in this case.\n" +
     "  - Do NOT invent a new capability id that only differs in punctuation\n" +
     "    or word order from one you see in the list.\n" +
-    "  - Set missing to null ONLY when no capability -- existing or new --\n" +
-    "    would solve the problem. That means: a retryable error, an\n" +
-    "    in-session bug, or a config problem (missing API key, missing\n" +
+    "  - If NO existing capability solves the problem, call the\n" +
+    "    discover_capability tool with a short query describing what is\n" +
+    "    needed (e.g. \"generate PDF from markdown\"). It searches npm,\n" +
+    "    the MCP registry, GitHub, and the web. If its top candidate\n" +
+    "    scores fit >= 0.6, prefer that candidate: set missing.wanted_id\n" +
+    "    to the candidate's id.\n" +
+    "  - Set missing to null ONLY when no capability -- existing, discovered,\n" +
+    "    or new -- would solve the problem. That means: a retryable error,\n" +
+    "    an in-session bug, or a config problem (missing API key, missing\n" +
     "    credential). In those cases, describe the fix in immediate_action.\n\n" +
     "When you have enough, STOP calling tools and reply with ONLY a JSON\n" +
     "object, no prose, no fences:\n\n" +
@@ -251,6 +273,34 @@ async function runFetchUrl(ctx, args) {
   };
 }
 
+async function runDiscover(ctx, args) {
+  const query = String(args?.query || "").slice(0, 500);
+  if (!query) return { error: "discover_capability: query is required" };
+  const sources = Array.isArray(args?.sources) && args.sources.length ? args.sources : undefined;
+  const res = await ctx.invoke("agentry.discover", {
+    query,
+    sources,
+    limit: 10,
+  }, { tenant: "local", by: "agentry.reason.deep" });
+  if (!res.ok) {
+    return { error: "discover_capability failed: " + res.error.code + ": " + res.error.message };
+  }
+  const candidates = (res.output?.candidates || []).slice(0, 10).map(c => ({
+    id: c.id,
+    source: c.source,
+    kind: c.kind,
+    name: c.name,
+    description: String(c.description || "").slice(0, 200),
+    fit: c.fit,
+    exists_locally: c.exists_locally,
+  }));
+  return {
+    query,
+    candidates,
+    recommendation: res.output?.recommendation || null,
+  };
+}
+
 async function executeTool(ctx, call) {
   const name = call?.function?.name;
   let args = {};
@@ -260,6 +310,7 @@ async function executeTool(ctx, call) {
   try {
     if (name === "web_search") return await runWebSearch(ctx, args);
     if (name === "fetch_url") return await runFetchUrl(ctx, args);
+    if (name === "discover_capability") return await runDiscover(ctx, args);
     return { error: "unknown tool: " + name };
   } catch (e) {
     return { error: "tool " + name + " threw: " + e.message };

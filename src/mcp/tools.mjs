@@ -358,6 +358,57 @@ export function registerAgentryTools(deps) {
     }
   );
 
+  // --- agentry.discover ---
+  registerTool(
+    {
+      name: "discover",
+      description:
+        "Search for existing capabilities, npm packages, MCP servers, GitHub repos, and web resources that could solve a problem. Use this BEFORE synthesizing a new capability from scratch \u2014 the right tool may already exist. Returns ranked candidates with fit scores (0-1) and a recommendation string. If the top candidate scores >= 0.6, prefer it over building.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Short description of what is needed, e.g. 'generate PDF from markdown'.",
+          },
+          sources: {
+            type: "array",
+            items: { type: "string", enum: ["local", "npm", "mcp", "github", "web"] },
+            description: "Optional. Default: all.",
+          },
+          limit: {
+            type: "number",
+            description: "Optional. Max candidates returned. Default 20.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+    async (args, _ctx) => {
+      const query = String(args.query || "").trim();
+      if (!query) {
+        return {
+          content: [{ type: "text", text: "discover: query is required" }],
+          isError: true,
+        };
+      }
+      const res = await deps.invoke("agentry.discover", {
+        query,
+        sources: Array.isArray(args.sources) && args.sources.length ? args.sources : undefined,
+        limit: Math.min(Number(args.limit) || 20, 50),
+      }, { tenant: "mcp", by: "mcp.discover" });
+      if (!res.ok) {
+        return {
+          content: [{ type: "text", text: `discover failed: ${res.error.code}: ${res.error.message}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(res.output, null, 2) }],
+      };
+    }
+  );
+
   // --- agentry.status ---
   // v0.16.2 — richer output so a caller can decide what to invoke
   // without a second round-trip. Lists each live invokable capability
