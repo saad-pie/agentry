@@ -204,6 +204,25 @@ export function defaultPreamble() {
   ].join("\n");
 }
 
+// v0.20.2 — provider chain. Groq rate limits are real and long. If
+// the primary throws rate_limited (or any hard fail), try the next
+// provider in the chain. Same model family if possible.
+function buildChain(provider, model) {
+  const chain = [];
+  if (provider && model) chain.push({ provider, model });
+  // Fallback order: gemini via the atria proxy, then back to groq
+  // with a smaller model. Skip duplicates.
+  const extra = [
+    { provider: "google", model: "gemini-2.5-flash" },
+    { provider: "groq", model: "openai/gpt-oss-20b" },
+  ];
+  for (const e of extra) {
+    if (chain.some(c => c.provider === e.provider && c.model === e.model)) continue;
+    chain.push(e);
+  }
+  return chain;
+}
+
 export async function runSkill({
   ctx,
   session,
@@ -226,15 +245,43 @@ export async function runSkill({
   ];
 
   let lastContent = null;
+  const chain = buildChain(provider, model);
+  let chainIdx = 0;
+  let currentProvider = chain[chainIdx].provider;
+  let currentModel = chain[chainIdx].model;
 
   for (let turn = 0; turn < maxTurns; turn++) {
     const r = await ctx.invoke("llm.openai_compat", {
-      provider, model, messages, tools: TOOL_DEFS,
+      provider: currentProvider, model: currentModel, messages, tools: TOOL_DEFS,
       temperature, max_tokens: maxTokens,
     }, { tenant: "local", by: capId });
 
     if (!r.ok) {
-      throw new Error(capId + ": LLM call failed — " + r.error.code + ": " + r.error.message);
+      const code = r.error.code || "";
+      const msg = String(r.error.message || "");
+      const isRateLimit = code === "rate_limited" || /rate limit|429/i.test(msg);
+      // v0.20.2 — fail over to the next provider on rate limit or
+      // transient failures. Non-transient (invalid spec, missing key)
+      // still throw.
+      const canFailOver = isRateLimit
+        || /invoker_failed/i.test(code)
+        || code === "internal";
+      if (canFailOver && chainIdx + 1 < chain.length) {
+        chainIdx += 1;
+        currentProvider = chain[chainIdx].provider;
+        currentModel = chain[chainIdx].model;
+        ctx.events.emit("skill_runner.provider_switched", {
+          capability_id: capId,
+          from: { provider, model },
+          to: { provider: currentProvider, model: currentModel },
+          reason: isRateLimit ? "rate_limited" : code,
+          turn,
+        });
+        // Retry the same turn on the new provider.
+        turn -= 1;
+        continue;
+      }
+      throw new Error(capId + ": LLM call failed — " + code + ": " + msg);
     }
 
     const toolCalls = Array.isArray(r.output.tool_calls) ? r.output.tool_calls : [];
