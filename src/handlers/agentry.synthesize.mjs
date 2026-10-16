@@ -375,6 +375,11 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
+  lines.push("- accept_spec.min_bytes is the MINIMUM byte size the acceptance probe's");
+  lines.push("  output must reach for the trial to pass. Set it to 0 when the capability");
+  lines.push("  produces text (HTML, JSON, plain strings, snippets). Set it to 500 or");
+  lines.push("  higher only when the capability produces a binary blob (PNG, PDF, base64).");
+  lines.push("  Setting it too high will fail the trial even when the plan works correctly.");
   lines.push("- The kernel session starts EMPTY. Any file your code reads must have been");
   lines.push("  written by an EARLIER step in your plan. If your execute step reads a file,");
   lines.push("  your prepare step MUST write that file first with fs.writeFileSync. Do NOT");
