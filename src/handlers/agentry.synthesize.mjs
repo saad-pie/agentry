@@ -980,6 +980,7 @@ function renderSkillHandler(spec) {
   out.push("");
   out.push("  const output = {};");
   out.push("  for (const key of Object.keys(PRODUCES)) output[key] = parsed[key];");
+  out.push("  output.content = parsed.content !== undefined ? parsed.content : null;");
   out.push("  output.status = parsed.status || \"complete\";");
   out.push("  output.turn = history.filter(m => m.role === \"user\").length + 1;");
   out.push("  if (conversationId) output.conversation_id = conversationId;");
