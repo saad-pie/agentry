@@ -419,9 +419,14 @@ function buildPrompt({ gap, candidate, facts, shape }) {
     lines.push("- The package is already installed in the synth session at");
     lines.push("  node_modules/" + facts.npm_package_name + ".");
     lines.push("- Your synthesized handler MUST declare requires.npm: [\"" + facts.npm_package_name + "\"].");
-    lines.push("- LOAD the package with dynamic import ONLY. Two valid forms:");
-    lines.push("    const pkg = (await import('" + facts.npm_package_name + "')).default;");
+    lines.push("- LOAD the package with dynamic import. The SAFEST pattern that works");
+    lines.push("  for both ESM and CJS packages:");
+    lines.push("    const mod = await import('" + facts.npm_package_name + "');");
+    lines.push("    const fn = mod.default || mod;   // handles both ESM default and CJS namespace");
+    lines.push("  If the package is known to use named exports, this also works:");
     lines.push("    const { fn } = await import('" + facts.npm_package_name + "');");
+    lines.push("- Do NOT do (await import('pkg')).default without the || mod fallback.");
+    lines.push("  Many modern packages export names and .default is undefined.");
     lines.push("- Do NOT use require(). Do NOT use static import. Both will fail at runtime.");
     lines.push("- Read the README carefully for the API. If the README uses require() or");
     lines.push("  static import, REWRITE it to use dynamic import as shown above.");
