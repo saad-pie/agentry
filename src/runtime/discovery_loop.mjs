@@ -334,39 +334,44 @@ export async function tick(deps, opts = {}) {
           };
         } else {
           // Skill candidate — extract the raw id and figure out a URL.
+          // v0.19.1: source is set to match the adapter name so
+          // readAgentSkill() can branch correctly.
           let rawId = wantedId;
           let url = null;
           let kind = "agent_skill";
+          let src = null;
           if (isClawhub) {
             rawId = wantedId.slice("clawhub:".length);
             const parts = rawId.split("/").filter(Boolean);
             url = parts.length >= 2
               ? ("https://clawhub.ai/" + parts[0] + "/skills/" + parts[parts.length - 1])
               : null;
+            src = "clawhub";
           } else if (isAgentskills) {
             rawId = wantedId.slice("agentskills:".length);
-            // agentskills:<repo>:<path>  → url = https://github.com/<repo>/blob/HEAD/<path>
             const idx = rawId.indexOf(":");
             if (idx > 0) {
               const repo = rawId.slice(0, idx);
               const path = rawId.slice(idx + 1);
-              url = "https://github.com/" + repo + "/blob/HEAD/" + path;
+              // Raw URL — this is what readAgentSkill() actually fetches.
+              url = "https://raw.githubusercontent.com/" + repo + "/HEAD/" + path;
             }
+            src = "agentskills_code";
           } else if (isHermesAtlas) {
             rawId = wantedId.slice("hermes_atlas:".length);
             url = "https://github.com/" + rawId;
             kind = "hermes_repo";
+            src = "hermes_atlas";
           }
           candidate = {
             id: wantedId,
+            source: src,
             kind,
             name: rawId,
             url,
             description: "Reasoner-chosen from agentry.discover results.",
             meta: {},
           };
-          // For agentskills, extract repo+path into meta so readAgentSkill
-          // can fetch the raw SKILL.md without parsing the id.
           if (isAgentskills) {
             const idx = rawId.indexOf(":");
             if (idx > 0) {

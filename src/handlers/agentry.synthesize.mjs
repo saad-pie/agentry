@@ -286,7 +286,13 @@ async function readAgentSkill(candidate, deps) {
         signal: AbortSignal.timeout(15000),
       });
       if (!res.ok) { facts.error = "fetch " + rawUrl + " HTTP " + res.status; return facts; }
-      const raw = await res.text();
+      let raw = await res.text();
+      const htmlExtract = extractFromHtml(raw);
+      if (htmlExtract) raw = htmlExtract;
+      if (!raw || raw.length < 50 || /^\s*<!doctype html/i.test(raw) || /^\s*<html/i.test(raw)) {
+        facts.error = "agentskills fetch returned HTML or empty content (" + raw.length + " bytes) from " + rawUrl;
+        return facts;
+      }
       const parsed = parseSkillMarkdown(raw);
       facts.skill_name = parsed.name || meta.skill_name || "skill";
       facts.skill_body = parsed.body;
@@ -309,8 +315,11 @@ async function readAgentSkill(candidate, deps) {
           });
           if (!res.ok) continue;
           const data = await res.json();
-          const content = data.content || data.body || data.markdown || null;
+          let content = data.content || data.body || data.markdown || null;
           if (!content) continue;
+          const htmlExtract = extractFromHtml(content);
+          if (htmlExtract) content = htmlExtract;
+          if (!content || content.length < 50) continue;
           const parsed = parseSkillMarkdown(content);
           facts.skill_source_url = url;
           facts.skill_name = parsed.name || candidate.name || "skill";
@@ -348,6 +357,32 @@ async function readAgentSkill(candidate, deps) {
     facts.error = "skill read threw: " + e.message;
     return facts;
   }
+}
+
+// v0.19.1 — HTML safety net. If a fetch returns GitHub's blob-view HTML
+// or any other HTML wrapper, extract the actual markdown from the first
+// <pre> block. If nothing can be extracted, return null so the caller
+// knows to fail cleanly rather than feed 250 KB of HTML to the LLM.
+function extractFromHtml(raw) {
+  const text = String(raw || "");
+  if (!/^\s*<!doctype html/i.test(text) && !/^\s*<html/i.test(text)) {
+    return null;   // not HTML, caller should use as-is
+  }
+  // GitHub blob view wraps file content in <div class="highlight ...">
+  // with a <pre> containing the raw text. Try that first.
+  const preMatch = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  if (preMatch) {
+    let inner = preMatch[1];
+    // Strip syntax-highlight spans but keep text.
+    inner = inner.replace(/<[^>]+>/g, "");
+    // Decode the basic HTML entities GitHub uses in code.
+    inner = inner.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+                 .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+                 .replace(/&amp;/g, "&");
+    inner = inner.trim();
+    if (inner.length > 100) return inner;
+  }
+  return null;
 }
 
 // Parse a SKILL.md file into { name, description, frontmatter, body }.
