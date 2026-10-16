@@ -664,6 +664,84 @@ function validatePlan(plan, shape, capability_id) {
   }
 }
 
+// v0.17.7 — spec consistency. The LLM writes one JSON document but
+// rarely holds the same name across all its sections. Example from
+// real output: plan code reads process.env.MARKDOWN_PATH, but
+// env_map declares MARKDOWN and accept_spec supplies "markdown".
+// Three names, one concept, three different keys. Nothing in the
+// plan validator catches that. Nothing in the trial catches it either
+// — the trial just fails at runtime with "Missing markdown_path"
+// and we pay a full trial cycle for a bug we could detect statically.
+//
+// This function cross-references the four sections that must agree:
+//   plan[].code           — the actual code that runs
+//   glue.env_map          — declares which input key maps to which env var
+//   accept_spec.input     — supplies the values used by the trial probe
+//   capability.produces   — declares what the emit step must output
+function validateSpecConsistency(spec, capability_id) {
+  const plan = Array.isArray(spec.plan) ? spec.plan : [];
+  const glue = spec.glue || {};
+  const envMap = glue.env_map || {};
+  const acceptInput = spec.accept_spec && spec.accept_spec.input ? spec.accept_spec.input : {};
+  const produces = spec.capability && spec.capability.produces ? spec.capability.produces : {};
+
+  // Check 1 — every process.env.X referenced in plan code must be a
+  // key in env_map. Catches MARKDOWN_PATH vs MARKDOWN.
+  const envKeysUsed = new Set();
+  for (const step of plan) {
+    const code = String(step.code || "");
+    for (const m of code.matchAll(/process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      envKeysUsed.add(m[1]);
+    }
+    for (const m of code.matchAll(/process\.env\[["']([A-Za-z_][A-Za-z0-9_]*)["']\]/g)) {
+      envKeysUsed.add(m[1]);
+    }
+  }
+  const envMapKeys = new Set(Object.keys(envMap));
+  for (const key of envKeysUsed) {
+    if (!envMapKeys.has(key)) {
+      return {
+        ok: false,
+        check: "env_var_not_in_env_map",
+        detail: "plan reads process.env." + key + " but env_map has no such key. env_map keys: " + ([...envMapKeys].join(", ") || "(none)"),
+      };
+    }
+  }
+
+  // Check 2 — every env_map value (the input key on the outer side)
+  // must exist as a key in accept_spec.input. Catches "env_map needs
+  // input markdown but the trial probe supplies nothing."
+  const acceptKeys = new Set(Object.keys(acceptInput));
+  for (const [envKey, inputKey] of Object.entries(envMap)) {
+    if (typeof inputKey !== "string") continue;
+    if (!acceptKeys.has(inputKey)) {
+      return {
+        ok: false,
+        check: "env_map_input_not_in_accept_spec",
+        detail: "env_map[\"" + envKey + "\"] maps from input \"" + inputKey + "\" but accept_spec.input has no such key. accept_spec.input keys: " + ([...acceptKeys].join(", ") || "(none)"),
+      };
+    }
+  }
+
+  // Check 3 — every key declared in capability.produces must appear as
+  // a literal substring in the emit step's code. Catches "produces
+  // declares pdf_path but emit writes { pdf: ... }".
+  const emitStep = plan.find(s => s && s.verb === "emit");
+  const emitCode = emitStep ? String(emitStep.code || "") : "";
+  for (const key of Object.keys(produces)) {
+    if (key === "captured_at" || key === "bytes") continue; // runtime-injected
+    if (!emitCode.includes(key)) {
+      return {
+        ok: false,
+        check: "produces_key_not_emitted",
+        detail: "produces declares \"" + key + "\" but the emit step never references it.",
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
 // ─────────────────────────────────────────────────────────────
 // The handler
 // ─────────────────────────────────────────────────────────────
@@ -818,6 +896,21 @@ export default async function agentrySynthesize(input, ctx) {
       error: e.message,
     });
     throw e;
+  }
+
+  // v0.17.7 — cross-section consistency. Rejects the spec before a
+  // trial cycle if the plan, env_map, accept_spec, and produces
+  // sections disagree with each other.
+  const consistency = validateSpecConsistency(spec, spec.capability.id);
+  if (!consistency.ok) {
+    events.emit("synthesize.spec_inconsistent", {
+      proposal_id, candidate_id,
+      capability_id: spec.capability.id,
+      check: consistency.check,
+      detail: consistency.detail,
+      model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
+    });
+    throw new Error("agentry.synthesize: spec failed consistency check [" + consistency.check + "]: " + consistency.detail);
   }
 
   const composedDeclared = new Set(
