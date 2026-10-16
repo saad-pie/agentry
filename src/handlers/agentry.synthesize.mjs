@@ -380,7 +380,14 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("- Output ONLY JSON. No prose. No fences.");
   lines.push("- The plan array MUST have exactly " + shape.steps.length + " entries, in the shape's order.");
   lines.push("- Each plan entry's verb MUST match the shape's verb for that step.");
-  lines.push("- Code from step N runs in the same process as code from step N-1. Variables declared in one step are visible in the next. Do NOT redeclare with const/let across steps — use unique names or assign to outer variables.");
+  lines.push("- Code from step N runs in the same process as code from step N-1.");
+  lines.push("- CRITICAL: Pass state between steps via globalThis. Assign to globalThis.X in");
+  lines.push("  an earlier step and read globalThis.X in a later step. Do NOT pass state via");
+  lines.push("  bare variables. The compiled script puts every step inside ONE async IIFE");
+  lines.push("  but a variable typo across 4000 tokens of spec is a silent runtime failure;");
+  lines.push("  globalThis.X fails loudly the moment it is referenced undefined.");
+  lines.push("  Correct: prepare step writes `globalThis.inputPath = path;`.");
+  lines.push("           execute step reads `const p = globalThis.inputPath;`.");
   lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
