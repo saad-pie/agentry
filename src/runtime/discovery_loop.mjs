@@ -302,6 +302,67 @@ export async function tick(deps, opts = {}) {
   let createdThisTick = 0;
 
   for (const gap of gaps) {
+    // v0.17.4 — reasoner-discovered candidates. If the gap's wanted_id
+    // is prefixed with "npm:" or "mcp:", the reasoner picked it from
+    // agentry.discover results. Do NOT create watches (there is nothing
+    // to search for) — build a decided proposal directly.
+    const wantedId = String(gap.wanted_id || "");
+    if (wantedId.startsWith("npm:") || wantedId.startsWith("mcp:")) {
+      const hasProposal = [...graph.capabilities().values()].some(c =>
+        c.kind === "proposal" &&
+        !c.adopted_at &&
+        !c.retired_at &&
+        c.gap_id === gap.id
+      );
+      if (!hasProposal) {
+        const isNpm = wantedId.startsWith("npm:");
+        const pkgName = wantedId.slice(4);
+        const candidate = {
+          id: wantedId,
+          kind: isNpm ? "npm_package" : "mcp_server",
+          name: pkgName,
+          url: isNpm ? "https://www.npmjs.com/package/" + pkgName : null,
+          description: "Reasoner-chosen from agentry.discover results.",
+        };
+        const proposalId = "proposal_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+        graph.putCapability({
+          id: proposalId,
+          kind: "proposal",
+          state: "decided",
+          gap_id: gap.id,
+          gap_wanted_kind: gap.wanted_kind || "tool",
+          gap_wanted_id: wantedId,
+          analysis: {
+            candidates: [{
+              id: wantedId,
+              fit: 1,
+              confidence: "high",
+              why: "Reasoner picked this from agentry.discover results.",
+              risks: [],
+            }],
+            recommended_id: wantedId,
+            summary: "Reasoner discovered " + wantedId + " via agentry.discover.",
+          },
+          candidates: [candidate],
+          decisions: {
+            [wantedId]: { decision: "approved", at: Date.now(), auto: true, source: "reasoner_discover" },
+          },
+          auto_approved: true,
+          model_used: "reasoner",
+          provider_used: "reasoner",
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        });
+        events.emit("discovery.reasoner_candidate_proposed", {
+          gap_id: gap.id,
+          wanted_id: wantedId,
+          proposal_id: proposalId,
+          source: isNpm ? "npm" : "mcp",
+        });
+      }
+      continue;
+    }
+
     const sources = SOURCES_BY_KIND[gap.wanted_kind] || defaultSources(gap);
 
     let gapHasAnyUncovered = false;

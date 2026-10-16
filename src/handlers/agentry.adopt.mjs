@@ -324,7 +324,11 @@ export default async function agentryAdopt(input, ctx) {
       accepts: synthesis.spec?.capability?.accepts || null,
       produces: synthesis.spec?.capability?.produces || null,
       requires: synthesis.spec?.capability?.requires || {},
-      source: `synthesized:${candidate.kind === "repo" ? "github" : "web"}:${candidate.id}`,
+      source: "synthesized:" + (
+        candidate.kind === "npm_package" ? "npm" :
+        candidate.kind === "mcp_server" ? "mcp" :
+        candidate.kind === "repo" ? "github" : "web"
+      ) + ":" + candidate.id,
       notes: candidate.url || null,
       trial: false,
       trial_passed_at: Date.now(),

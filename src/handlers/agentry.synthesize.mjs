@@ -166,6 +166,104 @@ async function readRepoTerritory(candidate, deps) {
   return facts;
 }
 
+// v0.17.4 — read an npm package as the candidate source. Installs
+// it into a synth session, reads README + package.json from
+// node_modules, and returns a facts object shaped like the one
+// readRepoTerritory produces. The prompt builder branches on
+// facts.source_kind to render npm-specific guidance.
+async function readNpmPackage(candidate, deps) {
+  const session = "synth_npm_" + candidate.id.replace(/[^a-z0-9_.-]/gi, "_") + "_" + Date.now().toString(36);
+  const { invoke } = deps;
+
+  await invoke("agentry.os", { action: "session.create", id: session },
+    { tenant: "local", by: "agentry.synthesize" });
+
+  const facts = {
+    session,
+    cloned: false,
+    readme: null,
+    manifest: null,
+    manifest_path: null,
+    top_level: [],
+    repo_dir: null,
+    error: null,
+    source_kind: "npm",
+    npm_package_name: null,
+    npm_main_entry: null,
+  };
+
+  let pkgName = String(candidate.id || "");
+  if (pkgName.startsWith("npm:")) pkgName = pkgName.slice(4);
+  if (!pkgName) {
+    facts.error = "candidate.id missing npm package name";
+    return facts;
+  }
+  facts.npm_package_name = pkgName;
+
+  try {
+    const installRes = await invoke("agentry.os", {
+      action: "node.install",
+      session,
+      packages: [pkgName],
+    }, { tenant: "local", by: "agentry.synthesize" });
+
+    if (!installRes.ok) {
+      facts.error = "npm install failed: " + installRes.error.message;
+      return facts;
+    }
+    facts.cloned = true;
+
+    const pkgDir = "node_modules/" + pkgName;
+
+    const listRes = await invoke("agentry.os", {
+      action: "fs.list",
+      session,
+      path: pkgDir,
+    }, { tenant: "local", by: "agentry.synthesize" });
+
+    let entries = [];
+    if (listRes.ok) {
+      const e = listRes.output?.result?.entries || listRes.output?.entries || [];
+      entries = Array.isArray(e) ? e.map(x => typeof x === "string" ? x : x.name) : [];
+    }
+    facts.top_level = entries.slice(0, 40);
+    facts.repo_dir = pkgDir;
+
+    const readmeCandidates = ["README.md", "README.rst", "README.txt", "readme.md"];
+    for (const name of readmeCandidates) {
+      const r = await invoke("agentry.os", {
+        action: "fs.read",
+        session,
+        path: pkgDir + "/" + name,
+      }, { tenant: "local", by: "agentry.synthesize" });
+      const content = r.output?.result?.content ?? r.output?.content;
+      if (r.ok && content) {
+        facts.readme = String(content).slice(0, MAX_README_CHARS);
+        break;
+      }
+    }
+
+    const manifestRes = await invoke("agentry.os", {
+      action: "fs.read",
+      session,
+      path: pkgDir + "/package.json",
+    }, { tenant: "local", by: "agentry.synthesize" });
+    const manifestContent = manifestRes.output?.result?.content ?? manifestRes.output?.content;
+    if (manifestRes.ok && manifestContent) {
+      facts.manifest = String(manifestContent).slice(0, MAX_MANIFEST_CHARS);
+      facts.manifest_path = "package.json";
+      try {
+        const pkgJson = JSON.parse(facts.manifest);
+        facts.npm_main_entry = pkgJson.main || pkgJson.module || pkgJson.exports ? (pkgJson.main || pkgJson.module || "exports") : null;
+      } catch (e) {}
+    }
+  } catch (e) {
+    facts.error = "npm read threw: " + e.message;
+  }
+
+  return facts;
+}
+
 // ─────────────────────────────────────────────────────────────
 // The prompt — fill in the blanks, do not copy a reference
 // ─────────────────────────────────────────────────────────────
@@ -186,12 +284,22 @@ function buildPrompt({ gap, candidate, facts, shape }) {
     description: candidate.description || null,
   }, null, 2);
 
-  const repoFacts = facts.cloned
-    ? "Repo directory: " + (facts.repo_dir || "(unknown)") + "\n"
+  let repoFacts;
+  if (facts.source_kind === "npm") {
+    repoFacts = "NPM PACKAGE: " + (facts.npm_package_name || "(unknown name)") + "\n"
+      + "Install path (relative to session): " + (facts.repo_dir || "(unknown)") + "\n"
+      + (facts.npm_main_entry ? "Main entry per package.json: " + facts.npm_main_entry + "\n" : "")
+      + "Files in package:\n" + (facts.top_level.join("\n") || "(none listed)") + "\n\n"
+      + (facts.readme ? "README:\n<<<\n" + facts.readme + "\n>>>\n\n" : "")
+      + (facts.manifest ? "package.json:\n<<<\n" + facts.manifest + "\n>>>\n" : "");
+  } else if (facts.cloned) {
+    repoFacts = "Repo directory: " + (facts.repo_dir || "(unknown)") + "\n"
       + "Top-level files:\n" + (facts.top_level.join("\n") || "(none listed)") + "\n\n"
       + (facts.readme ? "README:\n<<<\n" + facts.readme + "\n>>>\n\n" : "")
-      + (facts.manifest ? (facts.manifest_path + ":\n<<<\n" + facts.manifest + "\n>>>\n") : "")
-    : "(no repo facts available — candidate kind is " + candidate.kind + ")";
+      + (facts.manifest ? (facts.manifest_path + ":\n<<<\n" + facts.manifest + "\n>>>\n") : "");
+  } else {
+    repoFacts = "(no repo facts available — candidate kind is " + candidate.kind + ")";
+  }
 
   const lines = [];
   lines.push("You are agentry's code synthesizer.");
@@ -277,6 +385,21 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
   lines.push("");
+  if (facts.source_kind === "npm" && facts.npm_package_name) {
+    lines.push("NPM CANDIDATE — this is an npm package, not a GitHub repo.");
+    lines.push("- The package is already installed in the synth session at");
+    lines.push("  node_modules/" + facts.npm_package_name + ".");
+    lines.push("- Your synthesized handler MUST declare requires.npm: [\"" + facts.npm_package_name + "\"].");
+    lines.push("- In your plan's code, IMPORT the package. Do NOT reimplement what it does.");
+    lines.push("- Common import patterns for this package:");
+    lines.push("    const pkg = require('" + facts.npm_package_name + "');        // CJS default");
+    lines.push("    const { fn } = require('" + facts.npm_package_name + "');     // CJS named");
+    lines.push("    import pkg from '" + facts.npm_package_name + "';            // ESM default");
+    lines.push("    import { fn } from '" + facts.npm_package_name + "';         // ESM named");
+    lines.push("- Read the README carefully. It shows the exact usage pattern.");
+    lines.push("- The kernel script runs with 'import' syntax available (node ESM).");
+    lines.push("");
+  }
   lines.push("COMPOSITION:");
   lines.push("- requires.capability lists OTHER agentry capabilities this handler needs.");
   lines.push("- glue.pre_invoke lets this handler USE those capabilities. Each entry invokes");
@@ -560,10 +683,25 @@ export default async function agentrySynthesize(input, ctx) {
     shape_verbs: shape.steps.map(s => s.verb),
   });
 
-  let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null, repo_dir: null };
-  if (candidate.kind === "repo" && candidate.url) {
+  let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null, repo_dir: null, source_kind: null };
+  if (candidate.kind === "npm_package") {
+    try {
+      facts = await readNpmPackage(candidate, ctx);
+      events.emit("synthesize.npm_read", {
+        proposal_id, candidate_id,
+        installed: facts.cloned, error: facts.error,
+        npm_package_name: facts.npm_package_name,
+        readme_len: facts.readme ? facts.readme.length : 0,
+        manifest: facts.manifest_path,
+        top_level_count: facts.top_level.length,
+      });
+    } catch (e) {
+      events.emit("synthesize.npm_read_failed", { proposal_id, candidate_id, error: e.message });
+    }
+  } else if (candidate.kind === "repo" && candidate.url) {
     try {
       facts = await readRepoTerritory(candidate, ctx);
+      facts.source_kind = "github";
       events.emit("synthesize.repo_read", {
         proposal_id, candidate_id,
         cloned: facts.cloned, error: facts.error,
