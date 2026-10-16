@@ -76,6 +76,14 @@ export const SHAPES = {
       { verb: "emit",    why: "Write ONE JSON object to stdout with exactly the fields promised in produces.", fails_if: "malformed JSON or a promised field is undefined", produces: "stdout JSON" }
     ]
   },
+  agent_skill: {
+    description: "Wrap an agent SKILL.md as a capability. The skill's instructions become the system prompt; the caller's input becomes the user message. The skill produces structured JSON.",
+    steps: [
+      { verb: "load_skill", why: "Verify the SKILL.md content is present and parse its frontmatter (name, description).", fails_if: "SKILL.md missing, malformed, or empty", produces: "parsed skill metadata" },
+      { verb: "invoke_llm", why: "Send the skill instructions + caller input to the LLM and get a structured JSON response.", fails_if: "LLM call fails, rate limited, or returns content that is not valid JSON", produces: "parsed JSON response" },
+      { verb: "emit", why: "Write ONE JSON object to stdout with exactly the fields promised in produces.", fails_if: "malformed JSON or a promised field is undefined", produces: "stdout JSON" }
+    ]
+  },
   default: {
     description: "Unknown kind. Reason about what this specific capability needs.",
     steps: [

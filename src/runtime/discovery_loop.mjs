@@ -307,7 +307,14 @@ export async function tick(deps, opts = {}) {
     // agentry.discover results. Do NOT create watches (there is nothing
     // to search for) — build a decided proposal directly.
     const wantedId = String(gap.wanted_id || "");
-    if (wantedId.startsWith("npm:") || wantedId.startsWith("mcp:")) {
+    const isNpm = wantedId.startsWith("npm:");
+    const isMcp = wantedId.startsWith("mcp:");
+    const isClawhub = wantedId.startsWith("clawhub:");
+    const isAgentskills = wantedId.startsWith("agentskills:");
+    const isHermesAtlas = wantedId.startsWith("hermes_atlas:");
+    const isSkillCandidate = isClawhub || isAgentskills || isHermesAtlas;
+
+    if (isNpm || isMcp || isSkillCandidate) {
       const hasProposal = [...graph.capabilities().values()].some(c =>
         c.kind === "proposal" &&
         !c.adopted_at &&
@@ -315,15 +322,62 @@ export async function tick(deps, opts = {}) {
         c.gap_id === gap.id
       );
       if (!hasProposal) {
-        const isNpm = wantedId.startsWith("npm:");
-        const pkgName = wantedId.slice(4);
-        const candidate = {
-          id: wantedId,
-          kind: isNpm ? "npm_package" : "mcp_server",
-          name: pkgName,
-          url: isNpm ? "https://www.npmjs.com/package/" + pkgName : null,
-          description: "Reasoner-chosen from agentry.discover results.",
-        };
+        let candidate;
+        if (isNpm || isMcp) {
+          const pkgName = wantedId.slice(4);
+          candidate = {
+            id: wantedId,
+            kind: isNpm ? "npm_package" : "mcp_server",
+            name: pkgName,
+            url: isNpm ? "https://www.npmjs.com/package/" + pkgName : null,
+            description: "Reasoner-chosen from agentry.discover results.",
+          };
+        } else {
+          // Skill candidate — extract the raw id and figure out a URL.
+          let rawId = wantedId;
+          let url = null;
+          let kind = "agent_skill";
+          if (isClawhub) {
+            rawId = wantedId.slice("clawhub:".length);
+            const parts = rawId.split("/").filter(Boolean);
+            url = parts.length >= 2
+              ? ("https://clawhub.ai/" + parts[0] + "/skills/" + parts[parts.length - 1])
+              : null;
+          } else if (isAgentskills) {
+            rawId = wantedId.slice("agentskills:".length);
+            // agentskills:<repo>:<path>  → url = https://github.com/<repo>/blob/HEAD/<path>
+            const idx = rawId.indexOf(":");
+            if (idx > 0) {
+              const repo = rawId.slice(0, idx);
+              const path = rawId.slice(idx + 1);
+              url = "https://github.com/" + repo + "/blob/HEAD/" + path;
+            }
+          } else if (isHermesAtlas) {
+            rawId = wantedId.slice("hermes_atlas:".length);
+            url = "https://github.com/" + rawId;
+            kind = "hermes_repo";
+          }
+          candidate = {
+            id: wantedId,
+            kind,
+            name: rawId,
+            url,
+            description: "Reasoner-chosen from agentry.discover results.",
+            meta: {},
+          };
+          // For agentskills, extract repo+path into meta so readAgentSkill
+          // can fetch the raw SKILL.md without parsing the id.
+          if (isAgentskills) {
+            const idx = rawId.indexOf(":");
+            if (idx > 0) {
+              candidate.meta.repo = rawId.slice(0, idx);
+              candidate.meta.path = rawId.slice(idx + 1);
+            }
+          }
+          if (isClawhub) {
+            candidate.meta.install_reference = rawId;
+          }
+        }
         const proposalId = "proposal_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
         graph.putCapability({
           id: proposalId,
@@ -357,7 +411,12 @@ export async function tick(deps, opts = {}) {
           gap_id: gap.id,
           wanted_id: wantedId,
           proposal_id: proposalId,
-          source: isNpm ? "npm" : "mcp",
+          source: isNpm ? "npm"
+                : isMcp ? "mcp"
+                : isClawhub ? "clawhub"
+                : isAgentskills ? "agentskills"
+                : isHermesAtlas ? "hermes_atlas"
+                : "unknown",
         });
       }
       continue;

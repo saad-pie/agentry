@@ -256,6 +256,130 @@ async function readNpmPackage(candidate, deps) {
   return facts;
 }
 
+// v0.19.0 — read an agent SKILL.md as the candidate source.
+// Fetches the raw file (for agentskills_code) or the ClawHub API
+// detail (for clawhub), extracts frontmatter + body, and returns
+// a facts object with source_kind = "skill".
+async function readAgentSkill(candidate, deps) {
+  const facts = {
+    source_kind: "skill",
+    skill_name: null,
+    skill_body: null,
+    skill_frontmatter: null,
+    skill_source_url: null,
+    error: null,
+  };
+
+  const src = String(candidate.source || "");
+  const id = String(candidate.id || "");
+  const meta = candidate.meta || {};
+  const session = "synth_skill_" + id.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 40) + "_" + Date.now().toString(36);
+
+  try {
+    if (src === "agentskills_code" && meta.repo && meta.path) {
+      // Raw GitHub URL. HEAD works because raw.githubusercontent.com
+      // resolves HEAD to the default branch.
+      const rawUrl = "https://raw.githubusercontent.com/" + meta.repo + "/HEAD/" + meta.path;
+      facts.skill_source_url = rawUrl;
+      const res = await fetch(rawUrl, {
+        headers: { "user-agent": "agentry/0.1.0" },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) { facts.error = "fetch " + rawUrl + " HTTP " + res.status; return facts; }
+      const raw = await res.text();
+      const parsed = parseSkillMarkdown(raw);
+      facts.skill_name = parsed.name || meta.skill_name || "skill";
+      facts.skill_body = parsed.body;
+      facts.skill_frontmatter = parsed.frontmatter;
+      return facts;
+    }
+
+    if (src === "clawhub") {
+      // ClawHub: try the skill detail API first.
+      const ref = meta.install_reference || (candidate.id || "").replace(/^clawhub:/, "");
+      const tries = [
+        "https://clawhub.ai/api/v1/skills/" + ref,
+        "https://clawhub.ai/api/v1/skills/" + ref + "/content",
+      ];
+      for (const url of tries) {
+        try {
+          const res = await fetch(url, {
+            headers: { "accept": "application/json", "user-agent": "agentry/0.1.0" },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const content = data.content || data.body || data.markdown || null;
+          if (!content) continue;
+          const parsed = parseSkillMarkdown(content);
+          facts.skill_source_url = url;
+          facts.skill_name = parsed.name || candidate.name || "skill";
+          facts.skill_body = parsed.body;
+          facts.skill_frontmatter = parsed.frontmatter;
+          return facts;
+        } catch (e) { continue; }
+      }
+      facts.error = "clawhub skill fetch failed for " + ref;
+      return facts;
+    }
+
+    // Fallback: if we have a URL, try to fetch it as raw text.
+    if (candidate.url) {
+      try {
+        const res = await fetch(candidate.url, {
+          headers: { "user-agent": "agentry/0.1.0" },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res.ok) {
+          const raw = await res.text();
+          const parsed = parseSkillMarkdown(raw);
+          facts.skill_source_url = candidate.url;
+          facts.skill_name = parsed.name || candidate.name || "skill";
+          facts.skill_body = parsed.body;
+          facts.skill_frontmatter = parsed.frontmatter;
+          return facts;
+        }
+      } catch (e) { /* fall through */ }
+    }
+
+    facts.error = "unsupported skill source: " + src + " (id " + id + ")";
+    return facts;
+  } catch (e) {
+    facts.error = "skill read threw: " + e.message;
+    return facts;
+  }
+}
+
+// Parse a SKILL.md file into { name, description, frontmatter, body }.
+// Frontmatter is YAML between --- lines at the top of the file. We only
+// extract a handful of scalar fields; complex YAML is left as raw text.
+function parseSkillMarkdown(raw) {
+  const text = String(raw || "");
+  const out = { name: null, description: null, frontmatter: null, body: text };
+
+  const m = text.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  if (!m) return out;
+
+  const fmText = m[1];
+  const body = m[2];
+  out.body = body;
+
+  const fm = {};
+  for (const line of fmText.split("\n")) {
+    const mm = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(.+)$/);
+    if (!mm) continue;
+    let v = mm[2].trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    fm[mm[1]] = v;
+  }
+  out.frontmatter = fm;
+  out.name = fm.name || null;
+  out.description = fm.description || null;
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────
 // The prompt — fill in the blanks, do not copy a reference
 // ─────────────────────────────────────────────────────────────
@@ -277,7 +401,13 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   }, null, 2);
 
   let repoFacts;
-  if (facts.source_kind === "npm") {
+  if (facts.source_kind === "skill") {
+    repoFacts = "AGENT SKILL: " + (facts.skill_name || "(unknown)") + "\n"
+      + "Source URL: " + (facts.skill_source_url || "(unknown)") + "\n"
+      + "Frontmatter:\n" + JSON.stringify(facts.skill_frontmatter || {}, null, 2) + "\n\n"
+      + "Body (this becomes your system prompt for the wrapped capability):\n"
+      + "<<<\n" + (facts.skill_body || "(empty)").slice(0, 6000) + "\n>>>\n";
+  } else if (facts.source_kind === "npm") {
     repoFacts = "NPM PACKAGE: " + (facts.npm_package_name || "(unknown name)") + "\n"
       + "Install path (relative to session): " + (facts.repo_dir || "(unknown)") + "\n"
       + (facts.npm_main_entry ? "Main entry per package.json: " + facts.npm_main_entry + "\n" : "")
@@ -430,6 +560,49 @@ function buildPrompt({ gap, candidate, facts, shape }) {
     lines.push("- Do NOT use require(). Do NOT use static import. Both will fail at runtime.");
     lines.push("- Read the README carefully for the API. If the README uses require() or");
     lines.push("  static import, REWRITE it to use dynamic import as shown above.");
+    lines.push("");
+  }
+  if (facts.source_kind === "skill") {
+    lines.push("SKILL CANDIDATE — this is an agent SKILL.md, not code. It is a set of");
+    lines.push("instructions that go into an LLM system prompt.");
+    lines.push("");
+    lines.push("You must produce a spec of type \"skill_wrapper\", NOT a plan spec. Emit:");
+    lines.push("{");
+    lines.push("  \"type\": \"skill_wrapper\",");
+    lines.push("  \"capability\": {");
+    lines.push("    \"id\": \"<from THE GAP above, with any prefix like 'clawhub:' or 'agentskills:' removed>\",");
+    lines.push("    \"kind\": \"agent_skill\",");
+    lines.push("    \"accepts\": { \"<key>\": \"string\" | { \"type\": \"string|number|boolean\", \"optional\": true } },");
+    lines.push("    \"produces\": { \"<output_key>\": \"string|number|boolean\" },");
+    lines.push("    \"requires\": { \"npm\": [], \"pip\": [], \"post_install\": null, \"capability\": [] }");
+    lines.push("  },");
+    lines.push("  \"skill\": {");
+    lines.push("    \"name\": \"<from frontmatter name, or skill name>\",");
+    lines.push("    \"body\": \"<the full skill body markdown as a single JSON string. Use backslash-n for newlines.>\"");
+    lines.push("  },");
+    lines.push("  \"llm\": {");
+    lines.push("    \"provider\": \"groq\",");
+    lines.push("    \"model\": \"qwen/qwen3.8-27b\",");
+    lines.push("    \"temperature\": 0.2,");
+    lines.push("    \"max_tokens\": 4000");
+    lines.push("  },");
+    lines.push("  \"input_map\": { \"<input_key>\": \"<label that describes this input in the user message>\" },");
+    lines.push("  \"accept_spec\": {");
+    lines.push("    \"input\": { \"<key>\": \"<example value for the acceptance probe>\" },");
+    lines.push("    \"min_bytes\": 0");
+    lines.push("  }");
+    lines.push("}");
+    lines.push("");
+    lines.push("Rules for the skill wrapper spec:");
+    lines.push("- Output ONLY the JSON above. No plan field. No kernel_script. No glue.");
+    lines.push("- accepts must include every input key the skill needs to do its job.");
+    lines.push("- produces must include at least one output field. The LLM is prompted to");
+    lines.push("  respond with JSON matching this exact shape. Add 'content' if you want the");
+    lines.push("  raw LLM text as a fallback output field.");
+    lines.push("- input_map lists each input key and a short label that will appear in the");
+    lines.push("  user message preamble. Example: \"order_data\": \"Order JSON\".");
+    lines.push("- accept_spec.input must supply values for every input key.");
+    lines.push("- min_bytes: use 0. The LLM output is text, not a binary.");
     lines.push("");
   }
   lines.push("COMPOSITION:");
@@ -616,6 +789,118 @@ function renderHandler(spec) {
   return out.join("\n");
 }
 
+// v0.19.0 — render a skill_wrapper spec into a handler.
+// Different from renderHandler: no kernel script, no plan. The handler
+// embeds the SKILL.md body as the system prompt, calls the LLM with a
+// user message built from input_map, parses JSON from the response,
+// and returns the fields declared in produces.
+function renderSkillHandler(spec) {
+  const { capability, skill, llm, input_map } = spec;
+  const out = [];
+  out.push("// agentry — skill-wrapped handler for " + capability.id);
+  out.push("// Generated by agentry.synthesize. Regenerate, do not hand-edit.");
+  out.push("// Kind: agent_skill");
+  out.push("// Source: " + (skill.name || "(unnamed skill)"));
+  out.push("");
+  out.push("const CAP_ID = " + JSON.stringify(capability.id) + ";");
+  out.push("const CAP_KIND = " + JSON.stringify(capability.kind || "agent_skill") + ";");
+  out.push("const ACCEPTS = " + JSON.stringify(capability.accepts || {}, null, 2) + ";");
+  out.push("const PRODUCES = " + JSON.stringify(capability.produces || {}, null, 2) + ";");
+  out.push("const REQUIRES = " + JSON.stringify(capability.requires || { npm: [], pip: [], post_install: null, capability: [] }, null, 2) + ";");
+  out.push("const INPUT_MAP = " + JSON.stringify(input_map || {}, null, 2) + ";");
+  out.push("const LLM_PROVIDER = " + JSON.stringify((llm && llm.provider) || "groq") + ";");
+  out.push("const LLM_MODEL = " + JSON.stringify((llm && llm.model) || "qwen/qwen3.8-27b") + ";");
+  out.push("const LLM_TEMPERATURE = " + JSON.stringify((llm && llm.temperature) != null ? llm.temperature : 0.2) + ";");
+  out.push("const LLM_MAX_TOKENS = " + JSON.stringify((llm && llm.max_tokens) || 4000) + ";");
+  out.push("const SKILL_BODY = " + JSON.stringify(String((skill && skill.body) || "")) + ";");
+  out.push("");
+  out.push("export const capability = {");
+  out.push("  id: CAP_ID,");
+  out.push("  kind: CAP_KIND,");
+  out.push("  invoked_via: \"invoker.in_process_js\",");
+  out.push("  accepts: ACCEPTS,");
+  out.push("  produces: PRODUCES,");
+  out.push("  requires: REQUIRES,");
+  out.push("};");
+  out.push("");
+  out.push("async function run(input, ctx, opts = {}) {");
+  out.push("  if (typeof ctx.invoke !== \"function\") {");
+  out.push("    throw new Error(CAP_ID + \" requires ctx.invoke\");");
+  out.push("  }");
+  out.push("");
+  out.push("  const parts = [];");
+  out.push("  for (const [inputKey, label] of Object.entries(INPUT_MAP)) {");
+  out.push("    const v = input[inputKey];");
+  out.push("    if (v === undefined || v === null) {");
+  out.push("      const spec = ACCEPTS[inputKey];");
+  out.push("      const optional = spec && typeof spec === \"object\" && spec.optional === true;");
+  out.push("      if (!optional) throw new Error(CAP_ID + \": missing required input: \" + inputKey);");
+  out.push("      continue;");
+  out.push("    }");
+  out.push("    parts.push(label + \":\\n\" + (typeof v === \"string\" ? v : JSON.stringify(v, null, 2)));");
+  out.push("  }");
+  out.push("");
+  out.push("  const shapeKeys = Object.keys(PRODUCES);");
+  out.push("  const shapeHint = shapeKeys.length");
+  out.push("    ? (\"Respond with ONLY a JSON object matching this shape:\\n\" + JSON.stringify(PRODUCES, null, 2))");
+  out.push("    : \"Respond with ONLY a JSON object.\";");
+  out.push("  const userMessage = parts.join(\"\\n\\n\") + \"\\n\\n\" + shapeHint;");
+  out.push("");
+  out.push("  const llmRes = await ctx.invoke(\"llm.openai_compat\", {");
+  out.push("    provider: LLM_PROVIDER,");
+  out.push("    model: LLM_MODEL,");
+  out.push("    messages: [");
+  out.push("      { role: \"system\", content: SKILL_BODY },");
+  out.push("      { role: \"user\", content: userMessage },");
+  out.push("    ],");
+  out.push("    temperature: LLM_TEMPERATURE,");
+  out.push("    max_tokens: LLM_MAX_TOKENS,");
+  out.push("  }, { tenant: \"local\", by: CAP_ID });");
+  out.push("");
+  out.push("  if (!llmRes.ok) {");
+  out.push("    throw new Error(CAP_ID + \": LLM call failed — \" + llmRes.error.code + \": \" + llmRes.error.message);");
+  out.push("  }");
+  out.push("");
+  out.push("  const content = String(llmRes.output.content || \"\");");
+  out.push("  if (!content.trim()) throw new Error(CAP_ID + \": LLM produced no content\");");
+  out.push("");
+  out.push("  let s = content.trim();");
+  out.push("  const fence = s.match(/```(?:json)?\\s*([\\s\\S]*?)```/);");
+  out.push("  if (fence) s = fence[1].trim();");
+  out.push("  const first = s.indexOf(\"{\");");
+  out.push("  const last = s.lastIndexOf(\"}\");");
+  out.push("  if (first === -1 || last <= first) {");
+  out.push("    throw new Error(CAP_ID + \": LLM response contained no JSON object\");");
+  out.push("  }");
+  out.push("  let parsed;");
+  out.push("  try { parsed = JSON.parse(s.slice(first, last + 1)); }");
+  out.push("  catch (e) { throw new Error(CAP_ID + \": LLM response was not valid JSON: \" + e.message); }");
+  out.push("");
+  out.push("  const output = {};");
+  out.push("  for (const key of Object.keys(PRODUCES)) output[key] = parsed[key];");
+  out.push("  if (output.bytes === undefined) output.bytes = JSON.stringify(parsed).length;");
+  out.push("  output.captured_at = Date.now();");
+  out.push("");
+  out.push("  return { output, cost: { time_ms: 0, http_calls: 1 } };");
+  out.push("}");
+  out.push("");
+  out.push("export async function accept(deps, opts = {}) {");
+  out.push("  const session = opts.session || (CAP_ID + \"-accept-test\");");
+  out.push("  const probe = await run(" + JSON.stringify(spec.accept_spec?.input || {}) + ", deps, { session });");
+  out.push("  const out = probe.output || probe;");
+  out.push("  const minBytes = " + (spec.accept_spec?.min_bytes ?? 0) + ";");
+  out.push("  if (minBytes > 0) {");
+  out.push("    const size = typeof out.bytes === \"number\" ? out.bytes : 0;");
+  out.push("    if (size < minBytes) throw new Error(\"accept: output too small (\" + size + \" < \" + minBytes + \")\");");
+  out.push("  }");
+  out.push("  return { ok: true, session, output: out };");
+  out.push("}");
+  out.push("");
+  out.push("export default run;");
+  out.push("");
+  return out.join("\n");
+}
+
 function renderSeed(spec, handlerPath) {
   const { capability } = spec;
   return {
@@ -770,7 +1055,20 @@ export default async function agentrySynthesize(input, ctx) {
   });
 
   let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null, repo_dir: null, source_kind: null };
-  if (candidate.kind === "npm_package") {
+  if (candidate.kind === "agent_skill") {
+    try {
+      facts = await readAgentSkill(candidate, ctx);
+      events.emit("synthesize.skill_read", {
+        proposal_id, candidate_id,
+        skill_name: facts.skill_name,
+        skill_source_url: facts.skill_source_url,
+        body_len: facts.skill_body ? facts.skill_body.length : 0,
+        error: facts.error,
+      });
+    } catch (e) {
+      events.emit("synthesize.skill_read_failed", { proposal_id, candidate_id, error: e.message });
+    }
+  } else if (candidate.kind === "npm_package") {
     try {
       facts = await readNpmPackage(candidate, ctx);
       events.emit("synthesize.npm_read", {
@@ -882,28 +1180,55 @@ export default async function agentrySynthesize(input, ctx) {
     }
   }
 
-  try {
-    validatePlan(spec.plan, shape, spec.capability.id);
-  } catch (e) {
-    events.emit("synthesize.plan_invalid", {
-      proposal_id, candidate_id,
-      capability_id: spec.capability.id,
-      wanted_kind: gap.wanted_kind || null,
-      error: e.message,
-    });
-    throw e;
-  }
+  const isSkillWrapper = spec.type === "skill_wrapper";
 
-  const consistency = validateSpecConsistency(spec, spec.capability.id);
-  if (!consistency.ok) {
-    events.emit("synthesize.spec_inconsistent", {
-      proposal_id, candidate_id,
-      capability_id: spec.capability.id,
-      check: consistency.check,
-      detail: consistency.detail,
-      model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
-    });
-    throw new Error("agentry.synthesize: spec failed consistency check [" + consistency.check + "]: " + consistency.detail);
+  if (!isSkillWrapper) {
+    try {
+      validatePlan(spec.plan, shape, spec.capability.id);
+    } catch (e) {
+      events.emit("synthesize.plan_invalid", {
+        proposal_id, candidate_id,
+        capability_id: spec.capability.id,
+        wanted_kind: gap.wanted_kind || null,
+        error: e.message,
+      });
+      throw e;
+    }
+
+    const consistency = validateSpecConsistency(spec, spec.capability.id);
+    if (!consistency.ok) {
+      events.emit("synthesize.spec_inconsistent", {
+        proposal_id, candidate_id,
+        capability_id: spec.capability.id,
+        check: consistency.check,
+        detail: consistency.detail,
+        model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
+      });
+      throw new Error("agentry.synthesize: spec failed consistency check [" + consistency.check + "]: " + consistency.detail);
+    }
+  } else {
+    // Skill wrapper validation: must have skill.body and input_map,
+    // and each input_map key must be an accepts key.
+    if (!spec.skill || !spec.skill.body || !String(spec.skill.body).trim()) {
+      throw new Error("agentry.synthesize: skill_wrapper spec missing skill.body");
+    }
+    if (!spec.input_map || typeof spec.input_map !== "object") {
+      throw new Error("agentry.synthesize: skill_wrapper spec missing input_map");
+    }
+    const acceptsKeys = new Set(Object.keys(spec.capability.accepts || {}));
+    for (const k of Object.keys(spec.input_map)) {
+      if (!acceptsKeys.has(k)) {
+        throw new Error("agentry.synthesize: skill_wrapper input_map key \"" + k + "\" is not in accepts");
+      }
+    }
+    const acceptKeys = new Set(Object.keys(spec.accept_spec?.input || {}));
+    for (const k of acceptsKeys) {
+      const spec2 = spec.capability.accepts[k];
+      const optional = spec2 && typeof spec2 === "object" && spec2.optional === true;
+      if (!optional && !acceptKeys.has(k)) {
+        throw new Error("agentry.synthesize: skill_wrapper accept_spec.input is missing required key \"" + k + "\"");
+      }
+    }
   }
 
   const composedDeclared = new Set(
@@ -933,13 +1258,15 @@ export default async function agentrySynthesize(input, ctx) {
   const handlerPath = join(HANDLERS_DIR, spec.capability.id + ".mjs");
   const seedPath = join(SEEDS_DIR, spec.capability.id + ".json");
 
-  writeFileSync(handlerPath, renderHandler(spec));
+  const renderedHandler = isSkillWrapper ? renderSkillHandler(spec) : renderHandler(spec);
+  writeFileSync(handlerPath, renderedHandler);
   writeFileSync(seedPath, JSON.stringify(renderSeed(spec, handlerPath), null, 2));
 
   events.emit("synthesize.completed", {
     proposal_id, candidate_id, gap_id: gap.id,
     capability_id: spec.capability.id,
     kind: spec.capability.kind,
+    spec_type: spec.type || "plan",
     wanted_kind: gap.wanted_kind || null,
     shape_steps: shape.steps.length,
     plan_steps: spec.plan.length,
