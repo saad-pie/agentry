@@ -71,7 +71,7 @@ const TOOLS = [
     function: {
       name: "discover_capability",
       description:
-        "Search agentry's capability graph, the npm registry, the MCP server registry, GitHub, and the web for existing tools that could solve a problem. Returns ranked candidates with fit scores. Use this BEFORE deciding a capability is missing \u2014 the right tool may already exist somewhere.",
+        "Search agentry's capability graph, the npm registry, GitHub, and the web for existing tools that could solve a problem. Returns RAW results grouped by source (local, npm, github, web). READ them carefully and pick the one that best matches the task. Use this BEFORE deciding a capability is missing \u2014 the right tool may already exist somewhere.",
       parameters: {
         type: "object",
         properties: {
@@ -121,10 +121,12 @@ function systemPrompt(graph) {
     "    or word order from one you see in the list.\n" +
     "  - If NO existing capability solves the problem, call the\n" +
     "    discover_capability tool with a short query describing what is\n" +
-    "    needed (e.g. \"generate PDF from markdown\"). It searches npm,\n" +
-    "    the MCP registry, GitHub, and the web. If its top candidate\n" +
-    "    scores fit >= 0.6, prefer that candidate: set missing.wanted_id\n" +
-    "    to the candidate's id.\n" +
+    "    needed (e.g. \"generate PDF from markdown\"). It returns raw\n" +
+    "    results grouped by source (local, npm, github, web). READ the\n" +
+    "    results carefully. Pick the one that best matches the task and\n" +
+    "    put its exact id in missing.wanted_id. Prefer local (installed\n" +
+    "    and tested) over npm over github over web when more than one\n" +
+    "    fits. Name an id you SAW in the results \u2014 do not invent one.\n" +
     "  - Set missing to null ONLY when no capability -- existing, discovered,\n" +
     "    or new -- would solve the problem. That means: a retryable error,\n" +
     "    an in-session bug, or a config problem (missing API key, missing\n" +
@@ -285,19 +287,30 @@ async function runDiscover(ctx, args) {
   if (!res.ok) {
     return { error: "discover_capability failed: " + res.error.code + ": " + res.error.message };
   }
-  const candidates = (res.output?.candidates || []).slice(0, 10).map(c => ({
-    id: c.id,
-    source: c.source,
-    kind: c.kind,
-    name: c.name,
-    description: String(c.description || "").slice(0, 200),
-    fit: c.fit,
-    exists_locally: c.exists_locally,
-  }));
+  const raw = res.output?.results || {};
+  const results = {};
+  for (const [src, items] of Object.entries(raw)) {
+    if (!Array.isArray(items)) continue;
+    results[src] = items.slice(0, 10).map(it => {
+      const entry = {
+        id: it.id,
+        source: src,
+        name: it.name || it.id,
+        description: String(it.description || "").slice(0, 200),
+        url: it.url || null,
+        exists_locally: it.exists_locally === true,
+      };
+      if (it.stars != null) entry.stars = it.stars;
+      if (it.version) entry.version = it.version;
+      if (it.produces) entry.produces = it.produces;
+      if (it.accepts) entry.accepts = it.accepts;
+      return entry;
+    });
+  }
   return {
     query,
-    candidates,
-    recommendation: res.output?.recommendation || null,
+    results,
+    errors: res.output?.errors || null,
   };
 }
 

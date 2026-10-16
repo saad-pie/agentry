@@ -363,7 +363,7 @@ export function registerAgentryTools(deps) {
     {
       name: "discover",
       description:
-        "Search for existing capabilities, npm packages, MCP servers, GitHub repos, and web resources that could solve a problem. Use this BEFORE synthesizing a new capability from scratch \u2014 the right tool may already exist. Returns ranked candidates with fit scores (0-1) and a recommendation string. If the top candidate scores >= 0.6, prefer it over building.",
+        "Search for existing capabilities, npm packages, GitHub repos, and web resources that could solve a problem. Returns RAW results grouped by source (local, npm, github, web). Read them carefully and pick the one that best matches the task. Use this BEFORE synthesizing a new capability from scratch \u2014 the right tool may already exist.",
       inputSchema: {
         type: "object",
         properties: {
