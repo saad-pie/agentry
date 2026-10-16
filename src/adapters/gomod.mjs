@@ -30,6 +30,8 @@ export async function search({ query, limit = 10 }) {
   while ((m = re.exec(html)) !== null) {
     const path = m[1];
     if (!path || path.startsWith("_") || path.startsWith("about") || path.startsWith("search")) continue;
+    if (path.includes("?") || path.includes("#")) continue;
+    if (path.startsWith("github.com/") && path.split("/").length < 3) continue;
     if (!path.includes("/") && !path.includes(".")) continue;
     if (seen.has(path)) continue;
     seen.add(path);

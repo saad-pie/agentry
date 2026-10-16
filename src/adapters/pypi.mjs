@@ -1,69 +1,52 @@
 // agentry/src/adapters/pypi.mjs
 //
-// v0.18.0 — search PyPI (Python Package Index).
+// v0.18.2 — search PyPI via SearXNG.
 //
-// PyPI has no public JSON search API — only per-package JSON at
-// /pypi/<name>/json. Bulk search is HTML only. We scrape the search
-// results page with a two-tier regex; if PyPI's markup drifts, this
-// adapter returns [] and the caller continues.
-
-import { httpText } from "./_registry.mjs";
+// PyPI's HTML search was JS-rendered as of late 2026. The old scrape
+// returned a 3 KB shell with no /project/ links. Rewritten to route
+// through the local SearXNG instance with a `site:pypi.org` filter,
+// then parse pypi.org/project/<name> URLs out of the web results.
+// Same shape, different mechanism.
 
 export const meta = {
   name: "pypi",
   kind: "python_package",
   languages: ["python"],
-  description: "Public Python Package Index",
+  description: "Public Python Package Index (via web search)",
 };
 
-export async function search({ query, limit = 10 }) {
-  const url = "https://pypi.org/search/?q=" + encodeURIComponent(query);
-  const html = await httpText(url);
+export async function search({ query, limit = 10, ctx }) {
+  if (!ctx || typeof ctx.invoke !== "function") return [];
+
+  const res = await ctx.invoke("discovery.web_search", {
+    query: "site:pypi.org " + query,
+    limit: Math.min(limit * 3, 30),
+  }, { tenant: "local", by: "adapter.pypi" });
+
+  if (!res.ok) return [];
+  const raw = (res.output && res.output.candidates) || [];
 
   const items = [];
   const seen = new Set();
 
-  // Tier 1: modern markup. <a class="package-snippet" href="/project/NAME/">
-  //   inside which <span class="package-snippet__name">NAME</span>
-  //   and <p class="package-snippet__description">DESC</p>
-  const re1 = /<a[^>]*class="package-snippet"[^>]*href="\/project\/([^\/"]+)\/?"[\s\S]*?<span[^>]*class="package-snippet__name"[^>]*>([^<]+)<\/span>[\s\S]*?<p[^>]*class="package-snippet__description"[^>]*>([^<]*)<\/p>/g;
-  let m;
-  while ((m = re1.exec(html)) !== null) {
-    const pkg = m[2].trim() || m[1].trim();
-    if (seen.has(pkg)) continue;
-    seen.add(pkg);
+  for (const r of raw) {
+    const url = String(r.url || "");
+    const m = url.match(/^https?:\/\/pypi\.org\/project\/([^\/?#]+)/i);
+    if (!m) continue;
+    const name = decodeURIComponent(m[1]);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
     items.push({
-      id: "pypi:" + pkg,
+      id: "pypi:" + name,
       source: "pypi",
       kind: "python_package",
-      name: pkg,
-      url: "https://pypi.org/project/" + m[1].trim() + "/",
-      description: m[3].trim() || null,
+      name,
+      url: "https://pypi.org/project/" + name + "/",
+      description: r.description || null,
       exists_locally: false,
-      meta: { language: "python" },
+      meta: { language: "python", via: "searxng" },
     });
     if (items.length >= limit) break;
-  }
-
-  // Tier 2 (fallback): just find /project/NAME/ links and take the slug.
-  if (items.length === 0) {
-    const re2 = /href="\/project\/([^\/"]+)\/?"/g;
-    while ((m = re2.exec(html)) !== null) {
-      const pkg = m[1].trim();
-      if (!pkg || seen.has(pkg)) continue;
-      seen.add(pkg);
-      items.push({
-        id: "pypi:" + pkg,
-        source: "pypi",
-        kind: "python_package",
-        name: pkg,
-        url: "https://pypi.org/project/" + pkg + "/",
-        description: null,
-        exists_locally: false,
-        meta: { language: "python" },
-      });
-      if (items.length >= limit) break;
-    }
   }
 
   return items;
