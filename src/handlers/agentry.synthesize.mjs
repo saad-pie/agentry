@@ -1317,12 +1317,15 @@ export default async function agentrySynthesize(input, ctx) {
     }
   }
 
+  // v0.19.4 — glue is optional. Plan specs have it; skill_wrapper
+  // specs do not. Using spec.glue.pre_invoke directly threw a
+  // "Cannot read properties of undefined" on every skill spec.
   const composedDeclared = new Set(
     Array.isArray(spec.capability.requires?.capability)
       ? spec.capability.requires.capability
       : []
   );
-  const preInvokeCaps = Object.values(spec.glue.pre_invoke || {})
+  const preInvokeCaps = Object.values(spec.glue?.pre_invoke || {})
     .map(e => e?.capability)
     .filter(Boolean);
   const missingDecl = preInvokeCaps.filter(c => !composedDeclared.has(c));
@@ -1360,6 +1363,7 @@ export default async function agentrySynthesize(input, ctx) {
     seed_path: seedPath,
     composed_capabilities: [...composedDeclared],
     pre_invoke_count: preInvokeCaps.length,
+    spec_type: spec.type || "plan",
     model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
     ms: Date.now() - started,
   });
