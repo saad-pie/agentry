@@ -238,6 +238,16 @@ export async function runSkill({
 }) {
   if (typeof ctx.invoke !== "function") throw new Error(capId + " requires ctx.invoke");
 
+  // v0.20.3 — create the kernel session before running the tool loop.
+  // fs.write, shell.spawn, node.run all fail NOT_FOUND without it.
+  // session.create is idempotent, so calling it every turn is safe.
+  const sessionCreate = await ctx.invoke("agentry.os", {
+    action: "session.create", id: session,
+  }, { tenant: "local", by: capId });
+  if (!sessionCreate.ok) {
+    throw new Error(capId + ": session.create failed — " + sessionCreate.error.code + ": " + sessionCreate.error.message);
+  }
+
   const messages = [
     { role: "system", content: systemPrompt },
     ...history,
