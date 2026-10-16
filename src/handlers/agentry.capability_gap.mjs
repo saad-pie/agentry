@@ -65,15 +65,22 @@ export function recordGap(deps, gap) {
   const existing = graph.getCapability(gap.key);
   const now = Date.now();
 
+  // v0.19.3 — preserve wanted_kind / wanted_id / reason from the
+  // existing gap node when the caller does not supply them. Before
+  // this, observeFailure (which derives wanted_kind from a dotted
+  // capability_id and yields null when there is no dot) was
+  // overwriting a good wanted_kind with null on every trial failure,
+  // which broke shape lookup on the retry.
+  const prevKind = existing && existing.wanted_kind ? existing.wanted_kind : null;
+  const prevId = existing && existing.wanted_id ? existing.wanted_id : null;
+  const prevReason = existing && existing.reason ? existing.reason : null;
+
   const node = {
     id: gap.key,
     kind: "capability_gap",
-    // The gap's *subject* is what it wants. This is separate from the gap
-    // node's own kind. `wanted_kind` is a signal to discovery: search for
-    // capabilities whose kind matches this.
-    wanted_kind: gap.wanted_kind || null,
-    wanted_id: gap.wanted_id || null,
-    reason: gap.reason || null,
+    wanted_kind: gap.wanted_kind != null ? gap.wanted_kind : prevKind,
+    wanted_id: gap.wanted_id != null ? gap.wanted_id : prevId,
+    reason: gap.reason != null ? gap.reason : prevReason,
     example_task_id: gap.example_task_id || null,
     hits: (existing?.hits || 0) + 1,
     first_seen_at: existing?.first_seen_at || now,

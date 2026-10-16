@@ -1199,23 +1199,49 @@ export default async function agentrySynthesize(input, ctx) {
     events.emit("synthesize.refused", { proposal_id, candidate_id, reason: spec.error });
     throw new Error("agentry.synthesize: LLM declined — " + spec.error);
   }
-  if (!spec.capability?.id || !spec.glue) {
-    throw new Error("agentry.synthesize: spec missing capability.id or glue");
+
+  // v0.19.3 — detect spec type early so validation branches correctly.
+  // A skill_wrapper spec has no glue (that is plan-only). Before this,
+  // every skill spec failed the "missing capability.id or glue" check.
+  const isSkillWrapper = spec.type === "skill_wrapper";
+
+  if (!spec.capability?.id) {
+    throw new Error("agentry.synthesize: spec missing capability.id");
+  }
+  if (!isSkillWrapper && !spec.glue) {
+    throw new Error("agentry.synthesize: plan spec missing glue");
+  }
+  if (isSkillWrapper && (!spec.skill || !spec.skill.body)) {
+    throw new Error("agentry.synthesize: skill_wrapper spec missing skill.body");
   }
 
-  if (typeof spec.capability.id === "string" && spec.capability.id.startsWith("gap:")) {
-    const stripped = spec.capability.id.slice(4);
-    if (stripped) {
-      events.emit("synthesize.id_stripped", {
+  // Normalize the capability id into a filesystem-safe form:
+  //   1. strip "gap:" prefix if the LLM echoed it
+  //   2. strip "clawhub:", "agentskills:", "hermes_atlas:" for skill
+  //      candidates (they come from discover and are not valid file chars)
+  //   3. drop trailing "/SKILL.md" and ".md"
+  //   4. replace any remaining non [a-zA-Z0-9_.-] with underscore
+  if (typeof spec.capability.id === "string") {
+    let id = spec.capability.id;
+    const original = id;
+    if (id.startsWith("gap:")) id = id.slice(4);
+    if (isSkillWrapper) {
+      if (id.startsWith("clawhub:")) id = id.slice("clawhub:".length);
+      else if (id.startsWith("agentskills:")) id = id.slice("agentskills:".length);
+      else if (id.startsWith("hermes_atlas:")) id = id.slice("hermes_atlas:".length);
+    }
+    id = id.replace(/\/SKILL\.md$/i, "").replace(/\.md$/i, "");
+    id = id.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    spec.capability.id = id;
+    if (id !== original) {
+      events.emit("synthesize.id_normalized", {
         proposal_id, candidate_id,
-        original: spec.capability.id,
-        normalized: stripped,
+        original,
+        normalized: id,
+        is_skill_wrapper: isSkillWrapper,
       });
-      spec.capability.id = stripped;
     }
   }
-
-  const isSkillWrapper = spec.type === "skill_wrapper";
 
   if (!isSkillWrapper) {
     try {
@@ -1267,6 +1293,10 @@ export default async function agentrySynthesize(input, ctx) {
 
     if (!spec.skill || !spec.skill.body || !String(spec.skill.body).trim()) {
       fail("missing_skill_body", "spec.skill.body is empty or absent");
+    }
+    if (!spec.skill.name || !String(spec.skill.name).trim()) {
+      // Name is used only for logging; fill with a default.
+      spec.skill.name = spec.capability.id;
     }
     if (!spec.input_map || typeof spec.input_map !== "object") {
       fail("missing_input_map", "spec.input_map is not an object");
