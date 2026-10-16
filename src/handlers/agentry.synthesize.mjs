@@ -384,6 +384,8 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("- Step \"emit\" MUST write a single JSON object to stdout with exactly the fields you promised in produces. Use console.log(JSON.stringify({...})).");
   lines.push("- requires.npm must be exact package names (playwright, requests, etc).");
   lines.push("- post_install is a shell one-liner or null (e.g. \"npx playwright install chromium\").");
+  lines.push("- The kernel script is an ES module. require() is NOT defined. Use");
+  lines.push("  import, or `const x = (await import(\"pkg\")).default` for CJS modules.");
   lines.push("- The kernel session starts EMPTY. Any file your code reads must have been");
   lines.push("  written by an EARLIER step in your plan. If your execute step reads a file,");
   lines.push("  your prepare step MUST write that file first with fs.writeFileSync. Do NOT");
@@ -396,12 +398,18 @@ function buildPrompt({ gap, candidate, facts, shape }) {
     lines.push("- Your synthesized handler MUST declare requires.npm: [\"" + facts.npm_package_name + "\"].");
     lines.push("- In your plan's code, IMPORT the package. Do NOT reimplement what it does.");
     lines.push("- Common import patterns for this package:");
-    lines.push("    const pkg = require('" + facts.npm_package_name + "');        // CJS default");
-    lines.push("    const { fn } = require('" + facts.npm_package_name + "');     // CJS named");
-    lines.push("    import pkg from '" + facts.npm_package_name + "';            // ESM default");
-    lines.push("    import { fn } from '" + facts.npm_package_name + "';         // ESM named");
+    lines.push("    import pkg from '" + facts.npm_package_name + "';           // ESM default");
+    lines.push("    import { fn } from '" + facts.npm_package_name + "';        // ESM named");
+    lines.push("    const pkg = (await import('" + facts.npm_package_name + "')).default;  // ESM dynamic default");
+    lines.push("    const mod = await import('" + facts.npm_package_name + "');  // ESM dynamic namespace");
     lines.push("- Read the README carefully. It shows the exact usage pattern.");
-    lines.push("- The kernel script runs with 'import' syntax available (node ESM).");
+    lines.push("- CRITICAL: The kernel script runs as an ES module (.mjs).");
+    lines.push("  require() DOES NOT EXIST. Every reference in the README that uses");
+    lines.push("  require() must be rewritten as import, or as await import() inside");
+    lines.push("  an async function (the plan already runs inside an async IIFE).");
+    lines.push("  CJS packages with module.exports are reachable as:");
+    lines.push("    const pkg = (await import('" + facts.npm_package_name + "')).default;");
+    lines.push("  If the CJS module exports a function, .default is that function.");
     lines.push("");
   }
   lines.push("COMPOSITION:");
