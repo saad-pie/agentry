@@ -2,22 +2,15 @@
 //
 // v0.17.3 — discover returns raw results, grouped by source. No
 // scoring, no ranking, no recommendation. The LLM reads the results
-// and decides what to name. Scoring was a heuristic that fought the
-// reasoner; the reasoner is the ranking system.
+// and decides what to name.
 //
-// Sources (each optional):
-//   local   — every live capability in the graph
-//   npm     — public npm registry search
-//   github  — delegates to discovery.github_search
-//   web     — delegates to discovery.web_search
-//   mcp     — ModelContextProtocol registry (disabled by default;
-//             the public endpoint URL is not currently known)
-//
-// Every source returns { items: [...], error?: string }. The main
-// handler merges into results keyed by source. No filtering, no
-// deduping, no fit.
+// v0.18.0 — local and npm sources migrated to the adapter registry
+// (src/adapters/). New sources drop into that directory as files
+// and are picked up automatically. github / web / mcp stay inline
+// for now and will migrate in later rounds.
 
-const NPM_REGISTRY = "https://registry.npmjs.org/-/v1/search";
+import { runAdapters } from "../adapters/_registry.mjs";
+
 const MCP_REGISTRY_CANDIDATES = [
   "https://registry.modelcontextprotocol.io/v0/servers",
   "https://registry.modelcontextprotocol.io/v1/servers",
@@ -26,62 +19,8 @@ const MCP_REGISTRY_CANDIDATES = [
 const DEFAULT_LIMIT = 10;
 const DEFAULT_SOURCES = ["local", "npm", "github", "web"];
 
-function searchLocal(graph, limit) {
-  const items = [];
-  for (const c of graph.capabilities().values()) {
-    if (c.retired_at) continue;
-    if (!c.invoked_via) continue;
-    if (c.kind === "edge") continue;
-    items.push({
-      id: c.id,
-      source: "local",
-      kind: c.kind,
-      name: c.id,
-      url: null,
-      description: c.notes || null,
-      accepts: c.accepts || null,
-      produces: c.produces || null,
-      exists_locally: true,
-    });
-    if (items.length >= limit) break;
-  }
-  return { items };
-}
-
-async function searchNpm(query, limit) {
-  const url = NPM_REGISTRY + "?text=" + encodeURIComponent(query) + "&size=" + Math.min(limit * 2, 30);
-  let res;
-  try {
-    res = await fetch(url, {
-      headers: { "user-agent": "agentry/0.1.0" },
-      signal: AbortSignal.timeout(10000),
-    });
-  } catch (e) {
-    return { items: [], error: "npm fetch failed: " + e.message };
-  }
-  if (!res.ok) return { items: [], error: "npm HTTP " + res.status };
-  const data = await res.json().catch(() => null);
-  const objects = Array.isArray(data?.objects) ? data.objects : [];
-  const items = [];
-  for (const o of objects) {
-    const p = o?.package || {};
-    if (!p.name) continue;
-    items.push({
-      id: "npm:" + p.name,
-      source: "npm",
-      kind: "npm_package",
-      name: p.name,
-      url: (p.links && p.links.npm) || ("https://www.npmjs.com/package/" + p.name),
-      description: p.description || null,
-      version: p.version || null,
-      published_at: p.date || null,
-      keywords: Array.isArray(p.keywords) ? p.keywords.slice(0, 8) : [],
-      exists_locally: false,
-    });
-    if (items.length >= limit) break;
-  }
-  return { items };
-}
+// ─── Inline adapters not yet migrated to the registry ───
+// These will move to src/adapters/ in subsequent rounds.
 
 async function searchMcp(query, limit) {
   const q = encodeURIComponent(query);
@@ -175,6 +114,8 @@ async function searchWeb(ctx, query, limit) {
   }
 }
 
+// ─── Main handler ───
+
 export default async function agentryDiscover(input, ctx) {
   const started = Date.now();
   const { graph, events } = ctx;
@@ -189,36 +130,41 @@ export default async function agentryDiscover(input, ctx) {
 
   events.emit("discover.started", { query, sources, limit });
 
-  const results = {};
-  const errors = {};
+  // ── Adapter-backed sources (registry) ──
+  const adapterSources = sources.filter(s => s === "local" || s === "npm");
+  const adapterRun = adapterSources.length
+    ? await runAdapters({ query, limit, sources: adapterSources, ctx })
+    : { results: {}, errors: {}, counts: {}, sources: [] };
 
-  if (sources.includes("local")) {
-    try {
-      const r = searchLocal(graph, limit);
-      results.local = r.items;
-      if (r.error) errors.local = r.error;
-    } catch (e) {
-      errors.local = e.message;
-      results.local = [];
-    }
+  const results = { ...adapterRun.results };
+  const errors = { ...adapterRun.errors };
+
+  // ── Inline sources (still in this file) ──
+  const inlineNames = [];
+  const inlinePromises = [];
+
+  if (sources.includes("mcp")) {
+    inlineNames.push("mcp");
+    inlinePromises.push(searchMcp(query, limit));
+  }
+  if (sources.includes("github")) {
+    inlineNames.push("github");
+    inlinePromises.push(searchGithub(ctx, query, limit));
+  }
+  if (sources.includes("web")) {
+    inlineNames.push("web");
+    inlinePromises.push(searchWeb(ctx, query, limit));
   }
 
-  const parallel = [];
-  const names = [];
-  if (sources.includes("npm"))    { parallel.push(searchNpm(query, limit));                 names.push("npm"); }
-  if (sources.includes("mcp"))    { parallel.push(searchMcp(query, limit));                 names.push("mcp"); }
-  if (sources.includes("github")) { parallel.push(searchGithub(ctx, query, limit));         names.push("github"); }
-  if (sources.includes("web"))    { parallel.push(searchWeb(ctx, query, limit));            names.push("web"); }
-
-  const settled = await Promise.allSettled(parallel);
+  const settled = await Promise.allSettled(inlinePromises);
   settled.forEach((r, i) => {
-    const src = names[i];
+    const name = inlineNames[i];
     if (r.status === "fulfilled") {
-      results[src] = r.value.items || [];
-      if (r.value.error) errors[src] = r.value.error;
+      results[name] = r.value.items || [];
+      if (r.value.error) errors[name] = r.value.error;
     } else {
-      results[src] = [];
-      errors[src] = (r.reason && r.reason.message) || "unknown";
+      results[name] = [];
+      errors[name] = (r.reason && r.reason.message) || "unknown";
     }
   });
 
@@ -241,6 +187,6 @@ export default async function agentryDiscover(input, ctx) {
       errors: Object.keys(errors).length ? errors : null,
       elapsed_ms: Date.now() - started,
     },
-    cost: { time_ms: Date.now() - started, http_calls: parallel.length },
+    cost: { time_ms: Date.now() - started, http_calls: 0 },
   };
 }
