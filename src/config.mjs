@@ -12,6 +12,19 @@ function env(name, fallback) {
   return (v === undefined || v === "") ? fallback : v;
 }
 
+// v0.18.3 — read a primary name, fall back to alternates.
+// The Space sets GH_TOKEN (the standard gh CLI variable) but not
+// GITHUB_TOKEN. Before this, config.github.token was always null in
+// the Space, so every GitHub call was unauthenticated (60 req/hr).
+// Now the config sees GH_TOKEN and authenticates (5000 req/hr).
+function envOr(name, altName, fallback) {
+  const v = process.env[name];
+  if (v !== undefined && v !== "") return v;
+  const a = process.env[altName];
+  if (a !== undefined && a !== "") return a;
+  return fallback;
+}
+
 function required(name) {
   const v = process.env[name];
   if (v === undefined || v === "") {
@@ -48,7 +61,10 @@ export function loadConfig(overrides = {}) {
 
     // GitHub (discovery source)
     github: {
-      token: env("GITHUB_TOKEN", null),         // optional: unauthenticated works but is rate-limited
+      // Reads GITHUB_TOKEN, falls back to GH_TOKEN (set by the Space).
+      // Null when neither is present — the adapter still works, just
+      // rate-limited at 60 req/hr.
+      token: envOr("GITHUB_TOKEN", "GH_TOKEN", null),
       userAgent: env("GITHUB_UA", "agentry/0.1.0"),
     },
 
