@@ -1243,17 +1243,38 @@ export default async function agentrySynthesize(input, ctx) {
     }
   } else {
     // Skill wrapper validation: must have skill.body and input_map,
-    // and each input_map key must be an accepts key.
+    // and each input_map key must be an accepts key. Every throw here
+    // emits an event so silent failures become visible.
+    const fail = (check, detail) => {
+      events.emit("synthesize.skill_invalid", {
+        proposal_id, candidate_id,
+        capability_id: spec.capability.id,
+        check,
+        detail,
+        spec_preview: JSON.stringify({
+          has_skill: Boolean(spec.skill),
+          skill_keys: spec.skill ? Object.keys(spec.skill) : [],
+          body_len: spec.skill && spec.skill.body ? String(spec.skill.body).length : 0,
+          has_input_map: Boolean(spec.input_map),
+          input_map_keys: spec.input_map ? Object.keys(spec.input_map) : [],
+          accepts_keys: Object.keys(spec.capability.accepts || {}),
+          accept_spec_keys: Object.keys(spec.accept_spec?.input || {}),
+        }).slice(0, 500),
+        model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
+      });
+      throw new Error("agentry.synthesize: skill_wrapper failed [" + check + "]: " + detail);
+    };
+
     if (!spec.skill || !spec.skill.body || !String(spec.skill.body).trim()) {
-      throw new Error("agentry.synthesize: skill_wrapper spec missing skill.body");
+      fail("missing_skill_body", "spec.skill.body is empty or absent");
     }
     if (!spec.input_map || typeof spec.input_map !== "object") {
-      throw new Error("agentry.synthesize: skill_wrapper spec missing input_map");
+      fail("missing_input_map", "spec.input_map is not an object");
     }
     const acceptsKeys = new Set(Object.keys(spec.capability.accepts || {}));
     for (const k of Object.keys(spec.input_map)) {
       if (!acceptsKeys.has(k)) {
-        throw new Error("agentry.synthesize: skill_wrapper input_map key \"" + k + "\" is not in accepts");
+        fail("input_map_key_not_in_accepts", "input_map key \"" + k + "\" is not declared in accepts");
       }
     }
     const acceptKeys = new Set(Object.keys(spec.accept_spec?.input || {}));
@@ -1261,7 +1282,7 @@ export default async function agentrySynthesize(input, ctx) {
       const spec2 = spec.capability.accepts[k];
       const optional = spec2 && typeof spec2 === "object" && spec2.optional === true;
       if (!optional && !acceptKeys.has(k)) {
-        throw new Error("agentry.synthesize: skill_wrapper accept_spec.input is missing required key \"" + k + "\"");
+        fail("accept_spec_missing_key", "accept_spec.input is missing required key \"" + k + "\"");
       }
     }
   }
