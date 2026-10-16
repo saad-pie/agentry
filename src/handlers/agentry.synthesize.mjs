@@ -25,6 +25,7 @@ const MAX_README_CHARS = 12000;
 const MAX_MANIFEST_CHARS = 4000;
 
 const INSTALLER_PATH = join(HERE, "..", "runtime", "installer.mjs").replace(/\\/g, "/");
+const SKILL_RUNNER_PATH = join(HERE, "..", "runtime", "skill_runner.mjs").replace(/\\/g, "/");
 
 const MODEL_CHAIN = [
   { provider: "groq", model: "openai/gpt-oss-120b" },
@@ -840,7 +841,7 @@ function renderSkillHandler(spec) {
   out.push("");
   out.push("import { appendFileSync, readFileSync, existsSync, mkdirSync } from \"node:fs\";");
   out.push("import { join } from \"node:path\";");
-  out.push("import { runSkill, buildSystemPrompt, defaultPreamble } from \"../runtime/skill_runner.mjs\";");
+  out.push("import { runSkill, buildSystemPrompt, defaultPreamble } from " + JSON.stringify(SKILL_RUNNER_PATH) + ";");
   out.push("");
   out.push("const CAP_ID = " + JSON.stringify(capability.id) + ";");
   out.push("const CAP_KIND = " + JSON.stringify(capability.kind || "agent_skill") + ";");
