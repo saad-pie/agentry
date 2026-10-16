@@ -17,7 +17,7 @@ const MCP_REGISTRY_CANDIDATES = [
 ];
 
 const DEFAULT_LIMIT = 10;
-const DEFAULT_SOURCES = ["local", "npm", "pypi", "crates", "maven", "nuget", "gomod", "huggingface", "github", "web"];
+const DEFAULT_SOURCES = ["local", "npm", "pypi", "crates", "maven", "nuget", "gomod", "huggingface", "clawhub", "hermes_atlas", "agentskills_code", "dsh_plugins", "github", "web"];
 
 // ─── Inline adapters not yet migrated to the registry ───
 // These will move to src/adapters/ in subsequent rounds.
@@ -131,7 +131,7 @@ export default async function agentryDiscover(input, ctx) {
   events.emit("discover.started", { query, sources, limit });
 
   // ── Adapter-backed sources (registry) ──
-  const REGISTRY_SOURCES = ["local", "npm", "pypi", "crates", "maven", "nuget", "gomod", "huggingface"];
+  const REGISTRY_SOURCES = ["local", "npm", "pypi", "crates", "maven", "nuget", "gomod", "huggingface", "clawhub", "hermes_atlas", "agentskills_code", "dsh_plugins"];
   const adapterSources = sources.filter(s => REGISTRY_SOURCES.includes(s));
   const adapterRun = adapterSources.length
     ? await runAdapters({ query, limit, sources: adapterSources, ctx })
