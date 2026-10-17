@@ -147,6 +147,7 @@ function systemPrompt(graph) {
     "  \"missing\": {\n" +
     "    \"kind\": \"<bua|cua|mua|memory|tool|notify|web|harness|unknown>\",\n" +
     "    \"wanted_id\": \"<dotted capability id, e.g. bua.browser>\",\n" +
+    "    \"wanted_description\": \"<short search-friendly phrase describing what the capability should do, e.g. 'convert PNG screenshot to PDF file'>\",\n" +
     "    \"confidence\": \"high\" | \"medium\" | \"low\"\n" +
     "  } | null,\n" +
     "  \"immediate_action\": \"<one concrete thing the caller can try right now, or none>\",\n" +
@@ -159,6 +160,10 @@ function systemPrompt(graph) {
     "  reads missing.wanted_id to know what to invoke.\n" +
     "- Set missing to null ONLY for retryable errors, in-session bugs, or\n" +
     "  config problems (missing API keys, credentials).\n" +
+    "- wanted_description MUST be a short search phrase (3-10 words)\n" +
+    "  describing the CAPABILITY in natural language, not its id.\n" +
+    "  Example: for wanted_id \"pdf.render_image\", use \"convert PNG\n" +
+    "  screenshot to PDF file\". This becomes the discovery search query.\n" +
     "- Prefer naming a specific project and version over generic advice.\n" +
     "- If you searched, name what you found in \"analysis\".";
 }
@@ -527,6 +532,7 @@ export default async function agentryReasonDeep(input, ctx) {
             key,
             wanted_kind: rawMissing.kind || "unknown",
             wanted_id: resolved_id,
+            wanted_description: rawMissing.wanted_description || null,
             reason: "deep reasoning: " + (parsed.analysis?.slice(0, 200) || "unspecified"),
             example_task_id: session_id || null,
           }

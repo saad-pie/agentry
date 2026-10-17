@@ -74,12 +74,14 @@ export function recordGap(deps, gap) {
   const prevKind = existing && existing.wanted_kind ? existing.wanted_kind : null;
   const prevId = existing && existing.wanted_id ? existing.wanted_id : null;
   const prevReason = existing && existing.reason ? existing.reason : null;
+  const prevDesc = existing && existing.wanted_description ? existing.wanted_description : null;
 
   const node = {
     id: gap.key,
     kind: "capability_gap",
     wanted_kind: gap.wanted_kind != null ? gap.wanted_kind : prevKind,
     wanted_id: gap.wanted_id != null ? gap.wanted_id : prevId,
+    wanted_description: gap.wanted_description != null ? gap.wanted_description : prevDesc,
     reason: gap.reason != null ? gap.reason : prevReason,
     example_task_id: gap.example_task_id || null,
     hits: (existing?.hits || 0) + 1,
@@ -98,6 +100,7 @@ export function recordGap(deps, gap) {
     key: gap.key,
     wanted_kind: node.wanted_kind,
     wanted_id: node.wanted_id,
+    wanted_description: node.wanted_description,
     reason: node.reason,
     hits: node.hits,
     example_task_id: node.example_task_id,
