@@ -842,6 +842,7 @@ function renderSkillHandler(spec) {
   out.push("import { appendFileSync, readFileSync, existsSync, mkdirSync } from \"node:fs\";");
   out.push("import { join } from \"node:path\";");
   out.push("import { runSkill, buildSystemPrompt, defaultPreamble } from " + JSON.stringify(SKILL_RUNNER_PATH) + ";");
+  out.push("import { prepareSession } from " + JSON.stringify(INSTALLER_PATH) + ";");
   out.push("");
   out.push("const CAP_ID = " + JSON.stringify(capability.id) + ";");
   out.push("const CAP_KIND = " + JSON.stringify(capability.kind || "agent_skill") + ";");
@@ -923,34 +924,60 @@ function renderSkillHandler(spec) {
   out.push("  }");
   out.push("  const userMessage = parts.join(\"\\n\\n\");");
   out.push("");
-  out.push("  const parsed = await runSkill({");
-  out.push("    ctx, session, capId: CAP_ID,");
-  out.push("    provider: LLM_PROVIDER, model: LLM_MODEL,");
-  out.push("    temperature: LLM_TEMPERATURE, maxTokens: LLM_MAX_TOKENS,");
-  out.push("    systemPrompt: SYSTEM_PROMPT, history, userMessage,");
-  out.push("  });");
+  out.push("  try { await prepareSession(ctx, { capId: CAP_ID, session }); } catch (e) {}");
+  out.push("  const t0 = Date.now();");
+  out.push("  let parsed = null, runErr = null;");
+  out.push("  try {");
+  out.push("    parsed = await runSkill({");
+  out.push("      ctx, session, capId: CAP_ID,");
+  out.push("      provider: LLM_PROVIDER, model: LLM_MODEL,");
+  out.push("      temperature: LLM_TEMPERATURE, maxTokens: LLM_MAX_TOKENS,");
+  out.push("      systemPrompt: SYSTEM_PROMPT, history, userMessage,");
+  out.push("    });");
+  out.push("  } catch (e) { runErr = e; }");
   out.push("");
-  out.push("  const output = {};");
-  out.push("  for (const key of Object.keys(PRODUCES)) output[key] = parsed[key];");
-  out.push("  output.content = parsed.content !== undefined ? parsed.content : null;");
-  out.push("  output.status = parsed.status || \"complete\";");
-  out.push("  output.turn = history.filter(m => m.role === \"user\").length + 1;");
-  out.push("  if (conversationId) output.conversation_id = conversationId;");
-  out.push("  if (output.bytes === undefined) output.bytes = JSON.stringify(parsed).length;");
-  out.push("  output.captured_at = Date.now();");
+  out.push('  if (!parsed && !runErr) throw new Error(CAP_ID + ": no output and no error");');
+  out.push('  let artifact = null;');
+  out.push('  const PATHKEY = Object.keys(PRODUCES).find(k => /path|_file|artifact|_pdf|_png|_json$/i.test(k)) || null;');
+  out.push('  if (PATHKEY) {');
+  out.push('    const fs = await import("node:fs");');
+  out.push('    const cands = [];');
+  out.push('    if (parsed && typeof parsed[PATHKEY] === "string") cands.push(parsed[PATHKEY]);');
+  out.push('    if (input && typeof input[PATHKEY] === "string") cands.push(input[PATHKEY]);');
+  out.push('    for (const ap of cands) {');
+  out.push('      try { const st = fs.statSync(ap); if (st.isFile() && st.size > 0) {');
+  out.push('        const fd = fs.openSync(ap, "r"); const buf = Buffer.alloc(Math.min(8, st.size));');
+  out.push('        fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);');
+  out.push('        artifact = { path: ap, bytes: st.size, magic: buf.toString("latin1").slice(0, 8) }; break;');
+  out.push('      }} catch (e) {}');
+  out.push('    }');
+  out.push('  }');
+  out.push('  if (!parsed && !artifact) throw runErr || new Error(CAP_ID + ": no output and no artifact");');
+  out.push('  const safeParsed = parsed || {};');
+  out.push('  const output = {};');
+  out.push('  for (const key of Object.keys(PRODUCES)) output[key] = safeParsed[key];');
+  out.push('  if (artifact && PATHKEY) output[PATHKEY] = artifact.path;');
+  out.push('  output.content = safeParsed.content !== undefined ? safeParsed.content : (artifact ? artifact.path : null);');
+  out.push('  output.status = artifact ? "complete" : (safeParsed.status || "complete");');
+  out.push('  output.turn = history.filter(m => m.role === "user").length + 1;');
+  out.push('  if (conversationId) output.conversation_id = conversationId;');
+  out.push('  if (artifact) { output.bytes = artifact.bytes; output.artifact_magic = artifact.magic; }');
+  out.push('  else if (output.bytes === undefined) output.bytes = JSON.stringify(safeParsed).length;');
+  out.push('  output.captured_at = Date.now();');
   out.push("");
   out.push("  if (conversationId) {");
   out.push("    appendTurn(conversationId, { role: \"user\", content: userMessage, at: Date.now() });");
-  out.push("    appendTurn(conversationId, { role: \"assistant\", content: JSON.stringify(parsed), at: Date.now() });");
+  out.push("    appendTurn(conversationId, { role: \"assistant\", content: JSON.stringify(safeParsed || {}), at: Date.now() });");
   out.push("  }");
   out.push("");
-  out.push("  return { output, cost: { time_ms: 0, http_calls: 1 } };");
+  out.push("  return { output, cost: { time_ms: Date.now() - t0, http_calls: 1 } };");
   out.push("}");
   out.push("");
   out.push("export async function accept(deps, opts = {}) {");
   out.push("  const session = opts.session || (CAP_ID + \"-accept-test\");");
   out.push("  const probe = await run(" + JSON.stringify(spec.accept_spec?.input || {}) + ", deps, { session });");
   out.push("  const out = probe.output || probe;");
+  out.push("  if (out.status === \"awaiting_input\") throw new Error(\"accept: awaiting_input is not a trial pass\");");
   out.push("  const minBytes = " + (spec.accept_spec?.min_bytes ?? 0) + ";");
   out.push("  if (minBytes > 0) {");
   out.push("    const size = typeof out.bytes === \"number\" ? out.bytes : 0;");
@@ -1162,6 +1189,20 @@ export default async function agentrySynthesize(input, ctx) {
     }
   }
 
+  {
+    const _isSkill = candidate.source === "clawhub"
+      || candidate.source === "agentskills_code"
+      || candidate.source === "hermes_atlas"
+      || candidate.kind === "agent_skill"
+      || candidate.kind === "hermes_repo"
+      || (facts && facts.source_kind === "skill");
+    const _body = facts && typeof facts.skill_body === "string" ? facts.skill_body.trim() : "";
+    if (_isSkill && _body.length === 0) {
+      const _why = (facts && facts.error) || "skill_body_missing";
+      events.emit("synthesize.skill_body_empty", { proposal_id, candidate_id, reason: _why });
+      throw new Error("agentry.synthesize: skill candidate " + candidate.id + " has empty SKILL.md body (" + _why + "). Refusing to fabricate.");
+    }
+  }
   const prompt = buildPrompt({ gap, candidate, facts, shape });
 
   const messages = [

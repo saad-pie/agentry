@@ -241,6 +241,9 @@ export async function tick(deps, opts = {}) {
     if (node.kind !== "proposal") continue;
     if (node.state !== "decided") continue;
     if (node.adopted_at) continue;
+    // v0.21.0 — prevent double-adopt when ticks overlap.
+    if (node.adoption_in_progress_at && (Date.now() - node.adoption_in_progress_at) < 300000) continue;
+    try { graph.putCapability({ id: node.id, adoption_in_progress_at: Date.now() }); } catch (e) {}
 
     try {
       const res = await deps.invoke("agentry.adopt", {

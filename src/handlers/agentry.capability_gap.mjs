@@ -114,6 +114,17 @@ export function recordGap(deps, gap) {
  */
 export function observeFailure(deps, { capability_id, error, task_id }) {
   if (!error) return null;
+  // v0.21.0 — runtime failures on adopted capabilities re-open a gap.
+  const _RUNTIME_CODES = new Set(["handler_threw", "invoker_failed", "runtime_error", "skill_runner_failed"]);
+  if (_RUNTIME_CODES.has(error.code)) {
+    return recordGap(deps, {
+      key: "gap:" + capability_id,
+      wanted_kind: deriveWantedKind(capability_id),
+      wanted_id: capability_id,
+      reason: ("invoke_failed: " + error.code + ": " + String(error.message || "")).slice(0, 300),
+      example_task_id: task_id || null,
+    });
+  }
   if (!GAP_KINDS.has(error.code)) return null;
   if (!isGapReason(error.code, error.message)) return null;
 
