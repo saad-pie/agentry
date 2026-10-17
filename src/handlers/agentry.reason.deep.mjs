@@ -135,7 +135,15 @@ function systemPrompt(graph) {
     "    pypi install deterministically. github clones cleanly. clawhub\n" +
     "    serves HTML pages that often 404 on raw fetch \u2014 pick it only\n" +
     "    when no other source has a match. web results are last resort.\n" +
-    "    Name an id you SAW in the results \u2014 do not invent one.\n" +
+    "    Prefer a specific id ONLY if it is installable (npm:*, pypi:*,\n" +
+    "    mcp:*) or a real skill (clawhub:*, agentskills:*, hermes_atlas:*)\n" +
+    "    that clearly fits.\n" +
+    "    If the only matches are loose (github repos, articles, tutorials,\n" +
+    "    unrelated tools), do NOT pick a specific one \u2014 INVENT a\n" +
+    "    descriptive dotted capability id (e.g. pdf.from_image,\n" +
+    "    chart.render, csv.parse) and put a short natural-language\n" +
+    "    phrase in wanted_description. Discovery will find the real\n" +
+    "    installable package for that description.\n" +
     "  - Set missing to null ONLY when no capability -- existing, discovered,\n" +
     "    or new -- would solve the problem. That means: a retryable error,\n" +
     "    an in-session bug, or a config problem (missing API key, missing\n" +
