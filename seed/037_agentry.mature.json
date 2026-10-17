@@ -1,0 +1,21 @@
+{
+  "id": "agentry.mature",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.mature",
+  "handler_file": "src/handlers/agentry.mature.mjs",
+  "accepts": {
+    "capability_id": "string",
+    "rubric": "string",
+    "probe_input": { "type": "object", "optional": true }
+  },
+  "produces": {
+    "matured": "boolean",
+    "reason": "string",
+    "delta": "number",
+    "v1_quality": "object",
+    "v2_quality": "object"
+  },
+  "requires": { "npm": [], "pip": [], "post_install": null, "capability": [] },
+  "source": "hand-written:maturation"
+}
