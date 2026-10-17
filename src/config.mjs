@@ -94,6 +94,16 @@ export function loadConfig(overrides = {}) {
         groq: {
           baseUrl: env("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
           apiKey: env("GROQ_API_KEY", null),
+          // v0.23.2 — multi-key rotation. On 429 the llm handler rotates
+          // to the next key before giving up. Only helps if the keys come
+          // from separate Groq orgs (rate limits are per-org, not per-key);
+          // same-org keys share the 8K TPM budget and won't help.
+          keys: [
+            env("GROQ_API_KEY", null),
+            env("GROQ_API_KEY_1", null),
+            env("GROQ_API_KEY_2", null),
+            env("GROQ_API_KEY_3", null),
+          ].filter(Boolean),
         },
         google: {
           baseUrl: env("ATRIA_BASE_URL", "https://antigravity-seven-delta.vercel.app/v1"),

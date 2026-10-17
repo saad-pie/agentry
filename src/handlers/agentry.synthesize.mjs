@@ -1157,6 +1157,25 @@ function validateSpecConsistency(spec, capability_id) {
     }
   }
 
+  // v0.23.2 — required accepts keys must appear in accept_spec.input.
+  // Plan specs (npm, github) didn't have this check; the analogous check
+  // for skill_wrapper exists in the skill branch, but plan specs slipped
+  // through and failed at trial time with "missing <key>".
+  {
+    const acceptsDeclared = spec.capability && spec.capability.accepts ? spec.capability.accepts : {};
+    for (const k of Object.keys(acceptsDeclared)) {
+      const spec2 = acceptsDeclared[k];
+      const optional = spec2 && typeof spec2 === "object" && spec2.optional === true;
+      if (!optional && !acceptKeys.has(k)) {
+        return {
+          ok: false,
+          check: "accept_spec_missing_key",
+          detail: "accept_spec.input is missing required key \"" + k + "\". accept_spec.input keys: " + ([...acceptKeys].join(", ") || "(none)"),
+        };
+      }
+    }
+  }
+
   const emitStep = plan.find(s => s && s.verb === "emit");
   const emitCode = emitStep ? String(emitStep.code || "") : "";
   for (const key of Object.keys(produces)) {
@@ -1282,7 +1301,7 @@ export default async function agentrySynthesize(input, ctx) {
         model,
         messages,
         temperature: 0.1,
-        max_tokens: 8000,
+        max_tokens: 3500,
       }, { tenant: "local", by: "agentry.synthesize" });
     } catch (e) {
       attempts.push({ provider, model, ok: false, error: e.message });

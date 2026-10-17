@@ -2,16 +2,40 @@
 // OpenAI-compatible chat completions with dynamic model verification.
 //
 // v0.15.16: accepts `tools` and `tool_choice` for native function
-// calling, and surfaces `tool_calls` from the response. Only sends
-// tool_choice if the caller explicitly passes one — some providers
-// reject any non-null value, and reasoning-family models can't accept
-// one at all.
+// calling, and surfaces `tool_calls` from the response.
+//
+// v0.23.2: multi-key rotation. Providers (currently groq) may expose
+// a `keys[]` array. On 429 from one key, rotate to the next key and
+// retry the SAME model before giving up. Key rotation is provider-
+// local — it does not change the model, it just changes the account
+// the request is billed to. Combined with the caller's model chain
+// this multiplies throughput 4x on groq free tier.
 
 import { ModelRegistry } from "../model_registry.mjs";
 
 let REGISTRY = null;
 let REGISTRY_LAST_REFRESH = 0;
 const REGISTRY_REFRESH_MS = 10 * 60 * 1000;
+
+// Per-provider key rotation cursor. Module-scope Map: process-lifetime.
+// Resets to 0 on MCP restart. Good enough — the goal is "on 429, try a
+// different key," not "track which key is best."
+const KEY_CURSOR = new Map();
+
+function pickApiKey(providerCfg, provider) {
+  const keys = providerCfg?.keys;
+  if (!Array.isArray(keys) || keys.length === 0) return providerCfg?.apiKey || null;
+  const idx = (KEY_CURSOR.get(provider) || 0) % keys.length;
+  return keys[idx];
+}
+
+function rotateKey(providerCfg, provider) {
+  const keys = providerCfg?.keys;
+  if (!Array.isArray(keys) || keys.length < 2) return false;
+  const cur = KEY_CURSOR.get(provider) || 0;
+  KEY_CURSOR.set(provider, (cur + 1) % keys.length);
+  return true;
+}
 
 async function getRegistry(ctx) {
   const cfg = ctx.config?.llm || {};
@@ -56,24 +80,26 @@ export default async function llmOpenAICompat(input, ctx) {
   const cfg = ctx.config?.llm || {};
   const providers = cfg.providers || {};
 
-  let baseUrl, apiKey;
+  let providerCfg = null;
+  let baseUrl;
+  let initialKey;
+
   if (provider) {
-    const p = providers[provider];
-    if (!p) {
+    providerCfg = providers[provider];
+    if (!providerCfg) {
       throw new Error(`llm.openai_compat: unknown provider "${provider}" — add it to config.llm.providers`);
     }
-    if (!p.apiKey) {
+    if (!providerCfg.apiKey && (!Array.isArray(providerCfg.keys) || providerCfg.keys.length === 0)) {
       throw new Error(`llm.openai_compat: provider "${provider}" has no apiKey configured`);
     }
-    baseUrl = p.baseUrl;
-    apiKey = p.apiKey;
+    baseUrl = providerCfg.baseUrl;
+    initialKey = pickApiKey(providerCfg, provider);
   } else {
     baseUrl = cfg.baseUrl || "https://antigravity-seven-delta.vercel.app/v1";
-    apiKey = cfg.apiKey || "antigravity-free";
+    initialKey = cfg.apiKey || "antigravity-free";
   }
 
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
-
   const body = { model, messages, temperature, max_tokens };
   if (response_format) body.response_format = response_format;
   if (Array.isArray(tools) && tools.length > 0) {
@@ -82,104 +108,127 @@ export default async function llmOpenAICompat(input, ctx) {
   }
 
   const started = Date.now();
-  let res;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeout_ms),
-    });
-  } catch (e) {
-    const cause = e.cause;
-    const detail = [
-      e.message,
-      cause?.code ? `code=${cause.code}` : null,
-      cause?.message ? `cause=${cause.message}` : null,
-    ].filter(Boolean).join(" | ");
-    const err = new Error(`llm: fetch failed: ${detail}`);
-    err.retryable = true;
-    throw err;
-  }
+  const maxAttempts = providerCfg && Array.isArray(providerCfg.keys)
+    ? Math.max(1, providerCfg.keys.length)
+    : 1;
+  let lastErr = null;
 
-  if (res.status === 401 || res.status === 403) {
-    const text = await res.text().catch(() => "");
-    const err = new Error(`llm: auth failed HTTP ${res.status} — ${text.slice(0, 200)}`);
-    err.retryable = false;
-    throw err;
-  }
-  if (res.status === 429) {
-    const retryAfter = res.headers.get("retry-after");
-    const err = new Error("llm: rate limited by provider");
-    err.retryable = true;
-    err.retry_after_ms = retryAfter ? Number(retryAfter) * 1000 : 30000;
-    throw err;
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    const err = new Error(`llm: HTTP ${res.status} — ${text.slice(0, 300)}`);
-    err.retryable = res.status >= 500;
-    throw err;
-  }
-
-  const data = await res.json().catch(() => null);
-  const choice = data?.choices?.[0];
-  if (!choice) {
-    const err = new Error("llm: no choices in response");
-    err.retryable = true;
-    throw err;
-  }
-
-  const content = choice.message?.content ?? "";
-  const finish_reason = choice.finish_reason ?? null;
-  const tool_calls = Array.isArray(choice.message?.tool_calls) ? choice.message.tool_calls : [];
-  const usage = data?.usage || {};
-  const returnedModelId = data?.model || model;
-
-  if (accept_from) {
-    const reg = await getRegistry(ctx);
-    const entry = reg.models.get(returnedModelId);
-    if (!entry) {
-      const err = new Error(
-        `llm: returned model "${returnedModelId}" is not in the current /v1/models snapshot. Rejected.`
-      );
-      err.retryable = false;
-      err.substituted = true;
-      err.reason = "not_in_snapshot";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let apiKey = attempt === 0 ? initialKey : pickApiKey(providerCfg, provider);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeout_ms),
+      });
+    } catch (e) {
+      const cause = e.cause;
+      const detail = [
+        e.message,
+        cause?.code ? `code=${cause.code}` : null,
+        cause?.message ? `cause=${cause.message}` : null,
+      ].filter(Boolean).join(" | ");
+      const err = new Error(`llm: fetch failed: ${detail}`);
+      err.retryable = true;
       throw err;
     }
-    if (!satisfies(entry, accept_from)) {
-      const err = new Error(
-        `llm: returned model "${returnedModelId}" does not satisfy accept_from ${JSON.stringify(accept_from)}. Rejected.`
-      );
+
+    if (res.status === 401 || res.status === 403) {
+      const text = await res.text().catch(() => "");
+      const err = new Error(`llm: auth failed HTTP ${res.status} — ${text.slice(0, 200)}`);
       err.retryable = false;
-      err.substituted = true;
-      err.reason = "accept_from_mismatch";
-      err.returned_model = returnedModelId;
       throw err;
     }
+
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("retry-after");
+      lastErr = new Error("llm: rate limited by provider");
+      lastErr.retryable = true;
+      lastErr.retry_after_ms = retryAfter ? Number(retryAfter) * 1000 : 30000;
+
+      if (providerCfg && rotateKey(providerCfg, provider) && attempt + 1 < maxAttempts) {
+        ctx.events?.emit?.("llm.key_rotated", {
+          provider,
+          model,
+          attempt: attempt + 1,
+          max_attempts: maxAttempts,
+          retry_after_ms: lastErr.retry_after_ms,
+        });
+        continue;
+      }
+      throw lastErr;
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const err = new Error(`llm: HTTP ${res.status} — ${text.slice(0, 300)}`);
+      err.retryable = res.status >= 500;
+      throw err;
+    }
+
+    const data = await res.json().catch(() => null);
+    const choice = data?.choices?.[0];
+    if (!choice) {
+      const err = new Error("llm: no choices in response");
+      err.retryable = true;
+      throw err;
+    }
+
+    const content = choice.message?.content ?? "";
+    const finish_reason = choice.finish_reason ?? null;
+    const tool_calls = Array.isArray(choice.message?.tool_calls) ? choice.message.tool_calls : [];
+    const usage = data?.usage || {};
+    const returnedModelId = data?.model || model;
+
+    if (accept_from) {
+      const reg = await getRegistry(ctx);
+      const entry = reg.models.get(returnedModelId);
+      if (!entry) {
+        const err = new Error(
+          `llm: returned model "${returnedModelId}" is not in the current /v1/models snapshot. Rejected.`
+        );
+        err.retryable = false;
+        err.substituted = true;
+        err.reason = "not_in_snapshot";
+        throw err;
+      }
+      if (!satisfies(entry, accept_from)) {
+        const err = new Error(
+          `llm: returned model "${returnedModelId}" does not satisfy accept_from ${JSON.stringify(accept_from)}. Rejected.`
+        );
+        err.retryable = false;
+        err.substituted = true;
+        err.reason = "accept_from_mismatch";
+        err.returned_model = returnedModelId;
+        throw err;
+      }
+    }
+
+    return {
+      output: {
+        content,
+        model: returnedModelId,
+        finish_reason,
+        tool_calls,
+        usage: {
+          prompt_tokens: usage.prompt_tokens ?? null,
+          completion_tokens: usage.completion_tokens ?? null,
+          total_tokens: usage.total_tokens ?? null,
+        },
+      },
+      cost: {
+        time_ms: Date.now() - started,
+        http_calls: attempt + 1,
+        tokens: usage.total_tokens ?? null,
+        money_usd: 0,
+      },
+    };
   }
 
-  return {
-    output: {
-      content,
-      model: returnedModelId,
-      finish_reason,
-      tool_calls,
-      usage: {
-        prompt_tokens: usage.prompt_tokens ?? null,
-        completion_tokens: usage.completion_tokens ?? null,
-        total_tokens: usage.total_tokens ?? null,
-      },
-    },
-    cost: {
-      time_ms: Date.now() - started,
-      http_calls: 1,
-      tokens: usage.total_tokens ?? null,
-      money_usd: 0,
-    },
-  };
+  throw lastErr || new Error("llm: exhausted key rotation without response");
 }
