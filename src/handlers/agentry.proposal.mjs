@@ -81,6 +81,36 @@ Rules:
 - Return every input candidate exactly once, in the same order.`;
 }
 
+// v0.23.8 — rank candidates by installable prefix.
+// Discovery returns 200+ candidates from all 14 adapters. Sending all to
+// the LLM blows context (proposal.created with candidates:207, model_used:null
+// because every LLM call failed). Cap to top 15 installable-first.
+const PREFIX_RANK = {
+  "npm:": 100, "pypi:": 95, "agentskills:": 90, "clawhub:": 85,
+  "hermes_atlas:": 80, "mcp:": 75, "crates:": 70, "gomod:": 65,
+  "maven:": 60, "nuget:": 55, "huggingface:": 50,
+};
+
+function rankCandidates(candidates) {
+  const scored = candidates.map((c, idx) => {
+    const id = String(c.id || "");
+    let rank = 10;
+    for (const [pre, r] of Object.entries(PREFIX_RANK)) {
+      if (id.startsWith(pre)) { rank = r; break; }
+    }
+    const stars = Number(c.stars) || 0;
+    return { c, rank, stars, idx };
+  });
+  scored.sort((a, b) => {
+    if (b.rank !== a.rank) return b.rank - a.rank;
+    if (b.stars !== a.stars) return b.stars - a.stars;
+    return a.idx - b.idx;
+  });
+  return scored.map(x => x.c);
+}
+
+const MAX_LLM_CANDIDATES = 15;
+
 function userPrompt(gap, candidates) {
   const trimmed = candidates.map(c => ({
     id: c.id,
@@ -123,24 +153,33 @@ function parseProposalJSON(text) {
 }
 
 function fallbackProposal(gap, candidates) {
+  const ranked = rankCandidates(candidates);
+  const installable = ranked.find(c => {
+    const id = String(c.id || "");
+    return Object.keys(PREFIX_RANK).some(pre => id.startsWith(pre));
+  });
   return {
-    candidates: candidates.map(c => ({
+    candidates: ranked.slice(0, MAX_LLM_CANDIDATES).map(c => ({
       id: c.id,
       fit: null,
-      confidence: "unknown",
+      confidence: installable && c.id === installable.id ? "medium" : "unknown",
       why: c.description || "(no description)",
       risks: [],
     })),
-    recommended_id: null,
-    summary: `Found ${candidates.length} candidate(s) for gap "${gap.wanted_kind || gap.id}". LLM analysis unavailable — sending raw candidates for your review.`,
+    recommended_id: installable?.id || null,
+    summary: `Found ${candidates.length} candidate(s) for gap "${gap.wanted_kind || gap.id}". LLM analysis unavailable — ` +
+             (installable
+               ? `auto-picking installable candidate "${installable.id}" for trial (trial will verify).`
+               : "sending raw candidates for review."),
     llm_failed: true,
   };
 }
 
 async function analyze(deps, gap, candidates) {
+  const ranked = rankCandidates(candidates).slice(0, MAX_LLM_CANDIDATES);
   const messages = [
     { role: "system", content: systemPrompt() },
-    { role: "user",   content: userPrompt(gap, candidates) },
+    { role: "user",   content: userPrompt(gap, ranked) },
   ];
 
   for (const { provider, model } of MODEL_CHAIN) {
@@ -202,6 +241,13 @@ function shouldAutoApprove(gap, analysis, config) {
   if (!gap.wanted_kind || !autoKinds.includes(gap.wanted_kind)) return null;
   const recommended = (analysis.candidates || []).find(c => c.id === analysis.recommended_id);
   if (!recommended) return null;
+  // v0.23.8 — LLM-failed fallback bypasses the confidence gate when the
+  // recommendation is an installable prefix. Trial is the safety net:
+  // a bad pick fails synthesis/trial, candidate marked failed, gap re-opens.
+  if (analysis.llm_failed === true) {
+    const id = String(recommended.id || "");
+    if (Object.keys(PREFIX_RANK).some(pre => id.startsWith(pre))) return recommended;
+  }
   if (recommended.confidence !== "high") return null;
   return recommended;
 }
