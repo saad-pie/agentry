@@ -61,7 +61,7 @@ function applyMutations(v1Plan, mutations) {
     if (!m || typeof m !== "object" || !m.type) { log.push({ skipped: "no_type", m }); continue; }
     if (m.type === "insert_after") {
       const afterIdx = plan.findIndex(s => Number(s.step) === Number(m.after_step));
-      if (afterIdx < 0) { log.push({ skipped: "after_step_not_found", step: m.after_step }); continue; }
+      if (afterIdx < 0) { log.push({ skipped: "after_step_not_found", step: m.after_step, mutation: m }); continue; }
       plan.splice(afterIdx + 1, 0, { ...(m.step || {}), step: 0 });
       log.push({ applied: "insert_after", after: m.after_step });
     } else if (m.type === "append") {
@@ -69,14 +69,14 @@ function applyMutations(v1Plan, mutations) {
       log.push({ applied: "append" });
     } else if (m.type === "replace_step") {
       const idx = plan.findIndex(s => Number(s.step) === Number(m.step_to_replace));
-      if (idx < 0) { log.push({ skipped: "replace_target_not_found", step: m.step_to_replace }); continue; }
+      if (idx < 0) { log.push({ skipped: "replace_target_not_found", step: m.step_to_replace, mutation: m }); continue; }
       const prev = plan[idx];
       plan[idx] = { ...(m.step || {}), verb: (m.step && m.step.verb) || prev.verb, step: prev.step };
       log.push({ applied: "replace_step", step: m.step_to_replace });
     } else if (m.type === "remove_step") {
       const idx = plan.findIndex(s => Number(s.step) === Number(m.step_to_remove));
       if (idx >= 0) { plan.splice(idx, 1); log.push({ applied: "remove_step", step: m.step_to_remove }); }
-      else { log.push({ skipped: "remove_target_not_found", step: m.step_to_remove }); }
+      else { log.push({ skipped: "remove_target_not_found", step: m.step_to_remove, mutation: m }); }
     } else {
       log.push({ skipped: "unknown_type", type: m.type });
     }
@@ -342,7 +342,16 @@ export default async function agentryMature(input, ctx) {
   const { plan: v2Plan, log: mutationLog } = applyMutations(v1Plan, mutationResponse.mutations);
   if (v2Plan.length === v1Plan.length && mutationLog.every(l => l.skipped)) {
     return {
-      output: { matured: false, reason: "no_mutations_applied", mutation_log: mutationLog, v1_quality: v1Quality },
+      output: {
+        matured: false,
+        reason: "no_mutations_applied",
+        mutation_log: mutationLog,
+        raw_mutations_from_llm: mutationResponse.mutations,
+        llm_reasoning: mutationResponse.reasoning || null,
+        v1_plan_steps: v1Plan.length,
+        v1_plan_step_numbers: v1Plan.map(s => s.step),
+        v1_quality: v1Quality,
+      },
       cost: { time_ms: 0 },
     };
   }
