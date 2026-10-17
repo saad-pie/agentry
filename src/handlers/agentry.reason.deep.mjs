@@ -27,6 +27,7 @@
 // 404 on raw fetch; npm/pypi install deterministically.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
+import { supportFor, synthesizableSources, unsynthesizableSources } from "../adapters/_synthesis_support.mjs";
 
 const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "groq";
 const MODEL = process.env.AGENTRY_DEEP_MODEL || "qwen/qwen3.8-27b";
@@ -131,6 +132,16 @@ function systemPrompt(graph) {
     "    When more than one candidate fits, prefer sources in this order\n" +
     "    (most to least reliable for our pipeline):\n" +
     "      agentskills_code > npm > pypi > github > clawhub > web\n" +
+    "\n" +
+    "    CRITICAL — synthesis support boundary:\n" +
+    "    Sources that CANNOT be synthesized (no runtime kernel, roadmap only):\n" +
+    "      " + unsynthesizableSources().join(", ") + "\n" +
+    "    If a candidate from one of those sources looks perfect, do NOT pick it.\n" +
+    "    The gap would be created but synthesis would fail and waste cycles.\n" +
+    "    Instead pick the best candidate from a synthesizable source:\n" +
+    "      " + synthesizableSources().join(", ") + "\n" +
+    "    Only pick an unsynthesizable source if NO synthesizable candidate exists\n" +
+    "    AND set confidence to \"low\" so the pipeline knows this is a fallback.\n" +
     "    agentskills_code serves raw SKILL.md (reliable fetch). npm and\n" +
     "    pypi install deterministically. github clones cleanly. clawhub\n" +
     "    serves HTML pages that often 404 on raw fetch \u2014 pick it only\n" +

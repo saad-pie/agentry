@@ -26,6 +26,7 @@
 
 import { randomBytes } from "node:crypto";
 import { link, RELATIONS } from "../graph/edges.mjs";
+import { isSynthesizable, supportFor } from "../adapters/_synthesis_support.mjs";
 
 const MODEL_CHAIN = [
   { provider: "groq", model: "openai/gpt-oss-120b" },
@@ -101,9 +102,14 @@ function rankCandidates(candidates) {
       if (id.startsWith(pre)) { rank = r; break; }
     }
     const stars = Number(c.stars) || 0;
-    return { c, rank, stars, idx };
+    const _synth = isSynthesizable(c);
+    // v0.29.1 — synthesizable candidates rank above unsynthesizable at every
+    // prefix level. A crates candidate with 1000 stars still loses to any
+    // synthesizable candidate. Prevents stall on unbuildable sources.
+    return { c, rank, stars, idx, synth: _synth ? 1 : 0 };
   });
   scored.sort((a, b) => {
+    if (b.synth !== a.synth) return b.synth - a.synth;
     if (b.rank !== a.rank) return b.rank - a.rank;
     if (b.stars !== a.stars) return b.stars - a.stars;
     return a.idx - b.idx;
@@ -338,6 +344,27 @@ export default async function agentryProposal(input, ctx) {
         existing_state: openProposal.state,
         notified: false,
         reason: "proposal_already_open_for_gap",
+      },
+      cost: { time_ms: 0 },
+    };
+  }
+
+  // v0.29.1 — if every candidate comes from a search-only source, reject
+  // the proposal early. Prevents wasting 5-10s on a synthesis attempt for a
+  // candidate that has no runtime kernel. Reasoner will retry with a
+  // different query on the next gap tick.
+  const _synthCount = candidates.filter(c => isSynthesizable(c)).length;
+  if (_synthCount === 0) {
+    const _sources = [...new Set(candidates.map(c => c.source || "(unknown)"))];
+    ctx.events.emit("proposal.rejected_no_synthesizable_candidates", {
+      gap_id: gap.id, candidate_count: candidates.length, sources: _sources,
+    });
+    return {
+      output: {
+        proposal_id: null, gap_id: gap.id, rejected: true,
+        reason: "no_synthesizable_candidates",
+        sources: _sources,
+        note: "Discovery found candidates but synthesis has no runtime for any source. Sources: " + _sources.join(", ") + ". Reasoner should retry with a query targeting a synthesizable source (npm, pypi, agentskills_code, clawhub, or github repos).",
       },
       cost: { time_ms: 0 },
     };
