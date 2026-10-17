@@ -21,6 +21,10 @@
 // missing:null now means "no capability -- retryable, in-session, or
 // config problem only." Also: when a prior false gap exists under the
 // proposed id, retire it.
+//
+// v0.23.0: source preference. Prefer agentskills_code > npm > pypi >
+// github > clawhub > web by fetch reliability. clawhub pages often
+// 404 on raw fetch; npm/pypi install deterministically.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 
@@ -122,11 +126,16 @@ function systemPrompt(graph) {
     "  - If NO existing capability solves the problem, call the\n" +
     "    discover_capability tool with a short query describing what is\n" +
     "    needed (e.g. \"generate PDF from markdown\"). It returns raw\n" +
-    "    results grouped by source (local, npm, github, web). READ the\n" +
-    "    results carefully. Pick the one that best matches the task and\n" +
-    "    put its exact id in missing.wanted_id. Prefer local (installed\n" +
-    "    and tested) over npm over github over web when more than one\n" +
-    "    fits. Name an id you SAW in the results \u2014 do not invent one.\n" +
+    "    results grouped by source. READ them carefully. Pick the one that\n" +
+    "    best matches the task and put its exact id in missing.wanted_id.\n" +
+    "    When more than one candidate fits, prefer sources in this order\n" +
+    "    (most to least reliable for our pipeline):\n" +
+    "      agentskills_code > npm > pypi > github > clawhub > web\n" +
+    "    agentskills_code serves raw SKILL.md (reliable fetch). npm and\n" +
+    "    pypi install deterministically. github clones cleanly. clawhub\n" +
+    "    serves HTML pages that often 404 on raw fetch \u2014 pick it only\n" +
+    "    when no other source has a match. web results are last resort.\n" +
+    "    Name an id you SAW in the results \u2014 do not invent one.\n" +
     "  - Set missing to null ONLY when no capability -- existing, discovered,\n" +
     "    or new -- would solve the problem. That means: a retryable error,\n" +
     "    an in-session bug, or a config problem (missing API key, missing\n" +
@@ -278,6 +287,7 @@ async function runFetchUrl(ctx, args) {
 async function runDiscover(ctx, args) {
   const query = String(args?.query || "").slice(0, 500);
   if (!query) return { error: "discover_capability: query is required" };
+
   const sources = Array.isArray(args?.sources) && args.sources.length ? args.sources : undefined;
   const res = await ctx.invoke("agentry.discover", {
     query,

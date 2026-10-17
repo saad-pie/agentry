@@ -192,6 +192,76 @@ export default async function agentryAdopt(input, ctx) {
     };
   }
 
+  // v0.23.0 — candidates expansion before the retry loop.
+  // Reasoner proposals usually contain 1 candidate (the id reasoner
+  // picked). Adopt already loops through candidates but has nothing
+  // to iterate on retry — same 1 candidate, same failure, 3x. So on
+  // every pass, if candidate count < 10, run discovery inline and
+  // append fresh npm/agentskills candidates. Deduped against already-
+  // attempted ids, so repeated calls converge rather than loop.
+  if (proposal.gap_wanted_id && (proposal.candidates || []).length < 10) {
+    try {
+      const _attempted = new Set([
+        ...(proposal.candidates || []).map(c => c.id),
+        ...((proposal.failed_syntheses || []).map(f => f.candidate_id)),
+      ]);
+      const _query = String(proposal.gap_wanted_id).replace(/^[a-z]+:/, "");
+      const _disc = await ctx.invoke("agentry.discover", {
+        query: _query,
+        sources: ["npm", "agentskills_code"],
+        limit: 10,
+      }, { tenant: "local", by: "agentry.adopt" });
+      if (_disc.ok && _disc.output && _disc.output.results) {
+        const _fresh = [];
+        for (const _src of ["npm", "agentskills_code"]) {
+          const _items = _disc.output.results[_src] || [];
+          for (const _it of _items) {
+            if (!_it || !_it.id || _attempted.has(_it.id)) continue;
+            const _kind = _src === "npm" ? "npm_package" : "agent_skill";
+            _fresh.push({
+              id: _it.id,
+              source: _src,
+              kind: _kind,
+              name: _it.name || _it.id,
+              url: _it.url || null,
+              description: _it.description || null,
+              meta: {},
+            });
+            _attempted.add(_it.id);
+            if (_fresh.length >= 5) break;
+          }
+          if (_fresh.length >= 5) break;
+        }
+        if (_fresh.length > 0) {
+          const _newCandidates = [...(proposal.candidates || []), ..._fresh];
+          const _newDecisions = { ...(proposal.decisions || {}) };
+          for (const _f of _fresh) {
+            _newDecisions[_f.id] = { decision: "approved", at: Date.now(), auto: true, source: "expansion" };
+          }
+          try {
+            graph.putCapability({
+              id: proposal.id,
+              kind: "proposal",
+              candidates: _newCandidates,
+              decisions: _newDecisions,
+            });
+            events.emit("adoption.candidates_expanded", {
+              proposal_id,
+              added: _fresh.map(f => f.id),
+              total: _newCandidates.length,
+            });
+            proposal.candidates = _newCandidates;
+            proposal.decisions = _newDecisions;
+          } catch (e) {
+            events.emit("adoption.expansion_write_failed", { proposal_id, error: e.message });
+          }
+        }
+      }
+    } catch (e) {
+      events.emit("adoption.expansion_threw", { proposal_id, error: e.message });
+    }
+  }
+
   const decisions = proposal.decisions || {};
   const approved = Object.entries(decisions)
     .filter(([, d]) => d?.decision === "approved")
