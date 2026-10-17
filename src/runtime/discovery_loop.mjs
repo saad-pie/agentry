@@ -58,13 +58,11 @@ const SOURCES_BY_KIND = {
       }) },
   ],
   tool: [
-    { source: "discovery.github_search", query: (gap) => ({
-        q: `${gapSearchSubject(gap)} stars:>5`,
-        sort: "stars", order: "desc",
-      }) },
-    { source: "discovery.web_search", query: (gap) =>
-        `${gapSearchSubject(gap)} open source tool 2026` },
-  ],
+      {
+        source: "agentry.discover",
+        query: (gap) => gapSearchSubject(gap),
+      },
+    ],
 };
 
 // Fallback policy: two generic sources based on the gap's wanted id.
@@ -83,26 +81,26 @@ const SOURCES_BY_KIND = {
 function gapSearchSubject(gap) {
   const desc = gap.wanted_description;
   if (desc && String(desc).trim().length >= 4) {
-    return String(desc).trim().replace(/\s+/g, " ").slice(0, 100);
+    return String(desc).trim().replace(/\s+/g, " ").slice(0, 120);
   }
-  const reason = String(gap.reason || "").replace(/^deep reasoning:\s*/i, "").trim();
-  const firstSentence = reason.split(/\.\s/)[0].slice(0, 80);
-  if (firstSentence.length >= 12 && firstSentence.length <= 80) {
-    return firstSentence;
+  let reason = String(gap.reason || "");
+  reason = reason.replace(/^(?:(?:deep|harness|fast)\s+)?reasoning:\s*/i, "").trim();
+  const becauseIdx = reason.toLowerCase().indexOf(" because ");
+  if (becauseIdx > 20) reason = reason.slice(0, becauseIdx);
+  if (reason.length >= 12) {
+    return reason.slice(0, 150).replace(/\s+/g, " ").trim();
   }
   const id = String(gap.wanted_id || gap.wanted_kind || "agent capability");
   return id.replace(/^[a-z]+:/i, "").replace(/[._:]/g, " ").trim() || "agent capability";
 }
 
+
 function defaultSources(gap) {
-  const subject = gapSearchSubject(gap);
   return [
-    { source: "discovery.github_search", query: () => ({
-        q: `${subject} stars:>5`,
-        sort: "stars", order: "desc",
-      }) },
-    { source: "discovery.web_search", query: () =>
-        `best open source ${subject} 2026` },
+    {
+      source: "agentry.discover",
+      query: (gap) => gapSearchSubject(gap),
+    },
   ];
 }
 

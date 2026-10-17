@@ -72,6 +72,18 @@ export async function pollWatch(deps, watch) {
     });
     if (result.ok && Array.isArray(result.output?.candidates)) {
       candidates = result.output.candidates;
+    } else if (result.ok && result.output?.results && typeof result.output.results === "object") {
+      // v0.23.6 — agentry.discover shape: { results: { source: [items] } }
+      // Flatten into a single candidate list so the rest of the watcher
+      // (dedupe, watch_result, notify) sees uniform items.
+      const flat = [];
+      for (const [src, items] of Object.entries(result.output.results)) {
+        if (!Array.isArray(items)) continue;
+        for (const it of items) {
+          if (it && typeof it === "object") flat.push({ ...it, source: it.source || src });
+        }
+      }
+      candidates = flat;
     } else if (!result.ok) {
       errorMsg = `${result.error.code}: ${result.error.message}`;
     }
