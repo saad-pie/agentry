@@ -557,7 +557,14 @@ lines.push("- The kernel session starts EMPTY. Any file your code reads must hav
   lines.push("  your prepare step MUST write that file first with fs.writeFileSync. Do NOT");
   lines.push("  assume files exist. Do NOT reference paths you did not create.");
   lines.push("");
-  lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:");
+  lines.push("KERNEL RUNTIME RULES:");
+lines.push("- kernel_language \"node\" runs PLAIN JAVASCRIPT. NOT JSX, NOT TSX.");
+lines.push("- NEVER write JSX syntax (<Component />) or TypeScript type annotations.");
+lines.push("  The kernel is plain V8; '<' or ': Type' is a SyntaxError and the trial will fail.");
+lines.push("- If a library's README shows JSX (react, react-pdf, ink, @react-pdf/svg), REWRITE");
+lines.push("  the calls as plain functions or pick a non-JSX library instead.");
+lines.push("");
+lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:");
   lines.push("- The whole plan runs inside ONE async function body (an async IIFE).");
   lines.push("- Inside a function body, these do NOT work:");
   lines.push("    * static import (import x from 'x') — SYNTAX ERROR, cannot appear inside a function");
@@ -1039,6 +1046,25 @@ function renderSeed(spec, handlerPath) {
   };
 }
 
+// v0.23.1 — repair raw control characters inside JSON string literals.
+// LLMs sometimes emit SKILL.md bodies with literal newlines inside a
+// JSON string value; strict JSON.parse rejects that. Walk the text,
+// track string boundaries, escape only inside strings.
+function repairJsonControlChars(s) {
+  let out = "", inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (esc) { out += c; esc = false; continue; }
+    if (inStr && c === "\\") { out += c; esc = true; continue; }
+    if (c === '"') { out += c; inStr = !inStr; continue; }
+    if (inStr && c === "\n") { out += "\\n"; continue; }
+    if (inStr && c === "\r") { out += "\\r"; continue; }
+    if (inStr && c === "\t") { out += "\\t"; continue; }
+    out += c;
+  }
+  return out;
+}
+
 function extractJson(text) {
   if (!text) return null;
   let s = String(text).trim();
@@ -1047,7 +1073,10 @@ function extractJson(text) {
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first === -1 || last <= first) return null;
-  try { return JSON.parse(s.slice(first, last + 1)); } catch { return null; }
+  const slice = s.slice(first, last + 1);
+  try { return JSON.parse(slice); } catch {}
+  try { return JSON.parse(repairJsonControlChars(slice)); } catch {}
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1307,6 +1336,25 @@ export default async function agentrySynthesize(input, ctx) {
 
   if (!spec.capability?.id) {
     throw new Error("agentry.synthesize: spec missing capability.id");
+  }
+
+  // v0.23.1 — namespace capability.id by candidate.
+  // Reasoner's gap.wanted_id is the same across all candidates in a
+  // proposal. When adopt expands candidates (npm:*, agentskills:*),
+  // the LLM returns the same capability.id for each, causing handler
+  // path collisions and silent overwrites. Derive from candidate.id
+  // so every candidate writes a distinct handler file.
+  {
+    const _candId = String(candidate.id || "");
+    const _norm = _candId.replace(/^[a-z]+:/i, "").replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
+    if (_norm && spec.capability.id !== _norm) {
+      events.emit("synthesize.capability_id_namespaced", {
+        original: spec.capability.id,
+        normalized: _norm,
+        candidate_id: candidate.id,
+      });
+      spec.capability.id = _norm;
+    }
   }
   if (!isSkillWrapper && !spec.glue) {
     throw new Error("agentry.synthesize: plan spec missing glue");
