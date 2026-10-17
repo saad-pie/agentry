@@ -270,10 +270,18 @@ export async function runSkill({
       const code = r.error.code || "";
       const msg = String(r.error.message || "");
       const isRateLimit = code === "rate_limited" || /rate limit|429/i.test(msg);
+      // v0.20.4 — Groq/qwen silently breaks on tool calls whose
+      // arguments contain multi-line strings (run_python with code
+      // containing newlines is the classic case). The provider returns
+      // tool_use_failed with a failed_generation snippet. Same fix as
+      // rate limits: fall over to gemini, which parses multi-line
+      // tool-arg JSON cleanly.
+      const isToolUseFailed = /tool_use_failed|Failed to parse tool call/i.test(msg);
       // v0.20.2 — fail over to the next provider on rate limit or
       // transient failures. Non-transient (invalid spec, missing key)
       // still throw.
       const canFailOver = isRateLimit
+        || isToolUseFailed
         || /invoker_failed/i.test(code)
         || code === "internal";
       if (canFailOver && chainIdx + 1 < chain.length) {
