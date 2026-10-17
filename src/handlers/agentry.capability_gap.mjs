@@ -115,8 +115,14 @@ export function recordGap(deps, gap) {
 export function observeFailure(deps, { capability_id, error, task_id }) {
   if (!error) return null;
   // v0.21.0 — runtime failures on adopted capabilities re-open a gap.
+  // v0.23.3 — EXCEPT for seeded infrastructure. llm.*, notify.*,
+  // invoker.*, discovery.*, agentry.* failures are health (rate limits,
+  // upstream outages), not missing capabilities. Otherwise every groq
+  // 429 creates a fake gap and the reasoner proposes nonsense fixes.
+  const _SEEDED_PREFIXES = ["llm.", "notify.", "invoker.", "discovery.", "agentry."];
+  const _isSeeded = _SEEDED_PREFIXES.some(p => String(capability_id).startsWith(p));
   const _RUNTIME_CODES = new Set(["handler_threw", "invoker_failed", "runtime_error", "skill_runner_failed"]);
-  if (_RUNTIME_CODES.has(error.code)) {
+  if (!_isSeeded && _RUNTIME_CODES.has(error.code)) {
     return recordGap(deps, {
       key: "gap:" + capability_id,
       wanted_kind: deriveWantedKind(capability_id),

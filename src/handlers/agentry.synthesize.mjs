@@ -849,6 +849,7 @@ function renderHandler(spec) {
   out.push("  }");
   out.push("  if (artifact && PATHKEY) output[PATHKEY] = artifact.path;");
   out.push("  if (artifact) { output.bytes = artifact.bytes; output.artifact_magic = artifact.magic; }");
+  out.push("  if (output.status === undefined) output.status = \"complete\";");
   out.push("  else if (output.bytes === undefined) {");
   out.push("    output.bytes = typeof raw === \"string\" ? Buffer.byteLength(raw) : JSON.stringify(raw).length;");
   out.push("  }");
