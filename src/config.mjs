@@ -121,7 +121,14 @@ export function loadConfig(overrides = {}) {
       pollTickMs: Number(env("AGENTRY_TICK_MS", "30000")),      // main loop tick
       watchMaxConcurrent: Number(env("AGENTRY_WATCH_MAX", "5")),
       discoveryEnabled: env("AGENTRY_DISCOVERY", "true") === "true",
-      adoptionAutoKinds: (env("AGENTRY_AUTOADOPT_KINDS", "notify,watcher,invoker,discovery") || "")
+      // v0.23.4 — added "tool" to the default auto-adopt kinds.
+    // A tool gap that auto-proposes still runs the full synthesize→trial
+    // pipeline; trial failure rejects the candidate. So auto-approving
+    // tool is safe: bad candidates still fail at trial. Without "tool"
+    // here, every tool gap lands in "pending" and stalls discovery
+    // (hasProposal blocks re-proposal). Override via AGENTRY_AUTOADOPT_KINDS
+    // if a deployment prefers manual review of tool adoptions.
+    adoptionAutoKinds: (env("AGENTRY_AUTOADOPT_KINDS", "notify,watcher,invoker,discovery,tool") || "")
         .split(",").map(s => s.trim()).filter(Boolean),
     },
 

@@ -59,17 +59,43 @@ const SOURCES_BY_KIND = {
   ],
   tool: [
     { source: "discovery.github_search", query: (gap) => ({
-        q: `${gap.wanted_id || gap.wanted_kind} stars:>5`,
+        q: `${gapSearchSubject(gap)} stars:>5`,
         sort: "stars", order: "desc",
       }) },
     { source: "discovery.web_search", query: (gap) =>
-        `open source ${gap.wanted_id || gap.wanted_kind} tool 2026` },
+        `${gapSearchSubject(gap)} open source tool 2026` },
   ],
 };
 
 // Fallback policy: two generic sources based on the gap's wanted id.
+// v0.23.4 — a search-friendly subject for a gap.
+// Prefers the reasoner-provided wanted_description (short natural-language
+// phrase designed for search). Falls back to the reason field (strip the
+// "deep reasoning:" prefix, take first sentence, truncate). Last resort:
+// wanted_id with separators replaced by spaces.
+//
+// Prior versions used gap.wanted_id directly as the query, which searched
+// GitHub for strings like "pdf.render_image stars:>5" — a variable name
+// that matches nothing, so results were irrelevant (list pages,
+// wrong-direction tools). This was the DSH agent's run on 2026-10-17: it
+// recorded a clear failure description, but discovery searched for the id
+// and got 10 useless candidates.
+function gapSearchSubject(gap) {
+  const desc = gap.wanted_description;
+  if (desc && String(desc).trim().length >= 4) {
+    return String(desc).trim().replace(/\s+/g, " ").slice(0, 100);
+  }
+  const reason = String(gap.reason || "").replace(/^deep reasoning:\s*/i, "").trim();
+  const firstSentence = reason.split(/\.\s/)[0].slice(0, 80);
+  if (firstSentence.length >= 12 && firstSentence.length <= 80) {
+    return firstSentence;
+  }
+  const id = String(gap.wanted_id || gap.wanted_kind || "agent capability");
+  return id.replace(/^[a-z]+:/i, "").replace(/[._:]/g, " ").trim() || "agent capability";
+}
+
 function defaultSources(gap) {
-  const subject = gap.wanted_id || gap.wanted_kind || "agent capability";
+  const subject = gapSearchSubject(gap);
   return [
     { source: "discovery.github_search", query: () => ({
         q: `${subject} stars:>5`,
@@ -305,6 +331,46 @@ export async function tick(deps, opts = {}) {
   let createdThisTick = 0;
 
   for (const gap of gaps) {
+    // v0.23.4 — auto-reject stale pending proposals with no recommendation.
+    // A proposal stuck in "pending" with recommended_id === null blocks
+    // every future proposal for this gap (hasProposal check + the watcher's
+    // "gap_already_has_open_proposal" skip). After 10 minutes, mark it
+    // rejected so the next tick can retry with fresh candidates.
+    //
+    // This was the DSH agent's run: proposal_mvc9b21g_hjhkh8 sat pending
+    // for hours because the reasoner rated all 10 candidates at fit 0.1
+    // (all wrong-direction). Nothing was adoptable, but nothing was
+    // rejected either — the gap was stuck.
+    const STALE_PENDING_MS = 600000; // 10 min
+    const _now = Date.now();
+    for (const _c of graph.capabilities().values()) {
+      if (_c.kind !== "proposal") continue;
+      if (_c.gap_id !== gap.id) continue;
+      if (_c.adopted_at || _c.retired_at) continue;
+      if (_c.state !== "pending") continue;
+      if (_c.recommended_id) continue;
+      const _age = _now - (_c.created_at || 0);
+      if (_age < STALE_PENDING_MS) continue;
+      try {
+        graph.putCapability({
+          id: _c.id,
+          kind: "proposal",
+          state: "rejected",
+          rejected_reason: "stale: no recommended candidate after " + Math.round(_age / 60000) + "m",
+          adopted_at: _now,
+        });
+        events.emit("discovery.stale_proposal_rejected", {
+          proposal_id: _c.id,
+          gap_id: gap.id,
+          age_min: Math.round(_age / 60000),
+        });
+      } catch (e) {
+        events.emit("discovery.stale_proposal_reject_failed", {
+          proposal_id: _c.id, gap_id: gap.id, error: e.message,
+        });
+      }
+    }
+
     // v0.17.4 — reasoner-discovered candidates. If the gap's wanted_id
     // is prefixed with "npm:" or "mcp:", the reasoner picked it from
     // agentry.discover results. Do NOT create watches (there is nothing
