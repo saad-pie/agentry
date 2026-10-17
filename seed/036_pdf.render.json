@@ -1,0 +1,15 @@
+{
+  "id": "pdf.render",
+  "kind": "tool",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "pdf.render",
+  "handler_file": "src/handlers/pdf.render.mjs",
+  "accepts": {
+    "markdown": "string",
+    "title": { "type": "string", "optional": true },
+    "output_path": { "type": "string", "optional": true }
+  },
+  "produces": { "pdf_path": "string", "bytes": "number" },
+  "requires": { "pip": ["reportlab"], "npm": [], "post_install": null, "capability": [] },
+  "source": "hand-written:reportlab"
+}
