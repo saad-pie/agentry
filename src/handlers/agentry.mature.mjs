@@ -84,7 +84,28 @@ function buildMaturationPrompt({ cap, v1HandlerSource, v1Seed, v1Quality, rubric
   lines.push("- kernel_language=\"node\" runs plain JS (no JSX, no types).");
   lines.push("  kernel_language=\"python\" runs plain Python 3.11.");
   lines.push("");
-  lines.push("Return this shape:");
+  lines.push("Return this shape — note the env_map MUST have one entry");
+  lines.push("per accepts key that any plan step reads via process.env:");
+  lines.push(JSON.stringify({
+    type: "plan",
+    capability: { id: cap.id, kind: cap.kind, accepts: cap.accepts, produces: cap.produces, requires: cap.requires },
+    plan: [{ step: 1, verb: "prepare", what: "...", fails_if: "...", code: "..." }],
+    accept_spec: { input: Object.fromEntries(Object.keys(cap.accepts || {}).map(k => [k, "<sample value>"])) },
+    kernel_language: "node",
+    glue: {
+      env_map: Object.fromEntries(Object.keys(cap.accepts || {}).map(k => [k.toUpperCase().replace(/[^A-Z0-9]/g, "_"), k])),
+      result_parse: "stdout_json",
+      output_map: Object.fromEntries(Object.keys(cap.produces || {}).map(k => [k, k])),
+    },
+  }, null, 2));
+  lines.push("");
+  lines.push("ENV_MAP RULE (critical — prior versions failed here):");
+  lines.push("- Every plan step that reads process.env.X MUST have an entry");
+  lines.push("  glue.env_map[X] = <input_key> where <input_key> is the accepts key.");
+  lines.push("- For accepts { image_path: 'string' }, env_map should be");
+  lines.push("  { \"IMAGE_PATH\": \"image_path\" }.");
+  lines.push("- If you leave env_map empty, the kernel code will throw");
+  lines.push("  'IMAGE_PATH env var not set' at trial.");
   lines.push("{ \"type\": \"plan\", \"capability\": {...}, \"plan\": [{\"step\":1,\"verb\":\"...\",\"what\":\"...\",\"fails_if\":\"...\",\"code\":\"...\"}], \"accept_spec\": {\"input\": {}}, \"kernel_language\": \"node\", \"glue\": {\"env_map\": {}, \"result_parse\": \"stdout_json\", \"output_map\": {}} }");
   return lines.join("\n");
 }
@@ -113,6 +134,45 @@ function compilePY(plan) {
     parts.push("");
   }
   return parts.join("\n");
+}
+
+// v0.25.2 — auto-derive env_map from plan code + accepts keys.
+// LLMs routinely return empty glue.env_map even when instructed.
+// Scan plan code for process.env.X; for each X, find the accepts key
+// whose uppercase-underscored form matches X; add to env_map.
+function autoDeriveEnvMap(spec, v1Cap) {
+  const accepts = v1Cap.accepts || {};
+  const existing = (spec.glue && spec.glue.env_map) || {};
+  const derived = { ...existing };
+
+  // Build lookup: normalized accept key → original accept key
+  const lookup = {};
+  for (const k of Object.keys(accepts)) {
+    lookup[k.toUpperCase().replace(/[^A-Z0-9]/g, "_")] = k;
+    lookup[k] = k; // also direct match
+  }
+
+  // Scan all plan code for process.env.X and process.env["X"]
+  const envVars = new Set();
+  for (const step of spec.plan || []) {
+    const code = String(step.code || "");
+    for (const m of code.matchAll(/process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g)) envVars.add(m[1]);
+    for (const m of code.matchAll(/process\.env\[["']([A-Za-z_][A-Za-z0-9_]*)["']\]/g)) envVars.add(m[1]);
+  }
+
+  const added = [];
+  for (const v of envVars) {
+    if (derived[v]) continue; // already mapped
+    const match = lookup[v] || lookup[v.toLowerCase()] || lookup[v.replace(/_/g, ".")] || lookup[v.replace(/_/g, "_")];
+    if (match) { derived[v] = match; added.push([v, match]); continue; }
+    // Fallback: assume lowercase/underscore-to-dot guess
+    const guess = v.toLowerCase().replace(/_/g, "_");
+    if (accepts[guess]) { derived[v] = guess; added.push([v, guess]); }
+  }
+
+  spec.glue = spec.glue || {};
+  spec.glue.env_map = derived;
+  return { env_map: derived, added };
 }
 
 function renderV2Handler({ v2Id, v1Cap, spec }) {
@@ -255,6 +315,11 @@ export default async function agentryMature(input, ctx) {
 
   // Render v2 handler + seed
   const v2Id = capability_id + "__v" + (cap.version + 1);
+  const _deriveResult = autoDeriveEnvMap(spec, cap);
+  if (_deriveResult.added.length > 0) {
+    events.emit("mature.env_map_derived", { capability_id, added: _deriveResult.added });
+  }
+
   const v2HandlerPath = join(HANDLERS_DIR, v2Id + ".mjs");
   const v2SeedPath = join(SEEDS_DIR, v2Id + ".json");
   mkdirSync(HANDLERS_DIR, { recursive: true });
