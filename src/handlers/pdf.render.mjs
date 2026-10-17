@@ -1,6 +1,6 @@
 // agentry — hand-written PDF renderer using Python reportlab.
 // Pure Python, no phantomjs, no npm deps. Anchors the demo.
-// v0.22.1
+// v0.22.2
 
 const CAP_ID = "pdf.render";
 
@@ -56,12 +56,10 @@ async function run(input, ctx, opts = {}) {
   const md = String(input.markdown || "");
   if (!md.trim()) throw new Error(CAP_ID + ": markdown required");
   const title = String(input.title || "");
-  const outPath = String(input.output_path || `/tmp/home/.dsh/agentry-kernel/work/${CAP_ID}-${Date.now()}.pdf`);
-  const session = opts.session || input.session || (CAP_ID + "-" + Date.now().toString(36));
+  const outPath = String(input.output_path || `/tmp/home/.dsh/agentry-kernel/work/${CAP_ID}-default/report.pdf`);
+  const session = opts.session || input.session || (CAP_ID + "-default");
 
   const { prepareSession } = await import("../runtime/installer.mjs");
-  // Do NOT swallow prepareSession errors. A failed pip install must
-  // stop the run here, not surface as ModuleNotFoundError later.
   await prepareSession(ctx, { capId: CAP_ID, session });
 
   const { mkdirSync, statSync, openSync, readSync, closeSync } = await import("node:fs");
@@ -79,7 +77,7 @@ async function run(input, ctx, opts = {}) {
   if (!r.ok) throw new Error(CAP_ID + ": python.run failed — " + r.error.code + ": " + r.error.message);
   const res = r.output.result || r.output;
   const exit = res.exit_code ?? 0;
-  if (exit !== 0) throw new Error(CAP_ID + ": python exit " + exit + " — " + String(res.stderr || "").slice(0, 300));
+  if (exit !== 0) throw new Error(CAP_ID + ": python exit " + exit + " — " + String(res.stderr || "").slice(0, 400));
 
   let st;
   try { st = statSync(outPath); } catch (e) { throw new Error(CAP_ID + ": pdf not found at " + outPath); }
@@ -95,7 +93,7 @@ async function run(input, ctx, opts = {}) {
 }
 
 export async function accept(deps, opts = {}) {
-  const session = opts.session || (CAP_ID + "-accept-" + Date.now().toString(36));
+  const session = opts.session || (CAP_ID + "-accept");
   const probe = await run({ markdown: "# Test\n\n## Section\n\nA test paragraph.", title: "Accept" }, deps, { session });
   const out = probe.output || probe;
   if (!out.pdf_path) throw new Error("accept: no pdf_path");

@@ -1,22 +1,25 @@
 // agentry/src/kernel/languages/python.mjs
 //
-// Python runtime primitives. Runs code or files with the session's
-// Python interpreter, installs packages with pip.
+// Python runtime primitives. Session-isolated via per-session venv.
 //
-// Uses the system python3. Pip is bootstrapped on demand: ensurepip
-// first, get-pip.py as last resort. Never silently succeeds — if a
-// package cannot be installed, pythonInstall throws and the caller
-// sees ok:false. Prior versions returned exit_code:1 with no error,
-// which made installer report false successes.
+// Every session gets its own .venv/ inside its work dir. Packages
+// installed by one capability never leak into another. This is what
+// the header of this file always claimed; v0.22.2 finally does it.
+//
+// Why venv and not --break-system-packages: PEP 668 marks system
+// python as externally-managed. Bypassing it is a hack. venv is the
+// sanctioned fix and gives real isolation as a bonus.
+//
+// pip lives inside the venv (ships with CPython's venv module). No
+// ensurepip, no get-pip.py, no network at bootstrap time.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const MAX_OUTPUT_BYTES = 1 * 1024 * 1024;
-const PIP_BOOTSTRAP_TIMEOUT_MS = 180000;
+const VENV_TIMEOUT_MS = 120000;
 
 function runSync(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, {
@@ -34,11 +37,61 @@ function runSync(cmd, args, opts = {}) {
   };
 }
 
+function sessionRoot(sessions, session) {
+  return sessions.resolvePath(session, ".");
+}
+
+function venvPath(sessions, session) {
+  return join(sessionRoot(sessions, session), ".venv");
+}
+
+function venvPython(sessions, session) {
+  return join(venvPath(sessions, session), "bin", "python");
+}
+
+function venvPip(sessions, session) {
+  return join(venvPath(sessions, session), "bin", "pip");
+}
+
 /**
- * Run a Python snippet or file. If `code` is provided, we write it to
- * a temp file in the session and run that — deterministic, avoids
- * `-c` escaping issues, and the file is inspectable afterwards.
+ * Create the session's venv if missing. Returns the venv root.
+ * Throws if python3 -m venv fails — loud, not silent.
  */
+function ensureVenv(sessions, session) {
+  const vp = venvPath(sessions, session);
+  const py = venvPython(sessions, session);
+  if (existsSync(py)) return vp;
+
+  const s = sessions.get(session);
+  const cwd = sessionRoot(sessions, session);
+  const env = { ...process.env, ...s.env };
+
+  mkdirSync(vp, { recursive: true });
+  const r = runSync("python3", ["-m", "venv", vp], {
+    cwd, env, timeout: VENV_TIMEOUT_MS,
+  });
+  if (r.exit_code !== 0) {
+    const e = new Error("venv create failed: " + (r.stderr || r.error || "unknown").toString().slice(0, 400));
+    e.code = "VENV_FAILED";
+    throw e;
+  }
+  if (!existsSync(py)) {
+    const e = new Error("venv created but bin/python missing at " + py);
+    e.code = "VENV_FAILED";
+    throw e;
+  }
+  return vp;
+}
+
+/**
+ * Pick the interpreter for a session: venv python if it exists,
+ * else system python3. Read-only — never creates a venv.
+ */
+function choosePython(sessions, session) {
+  const py = venvPython(sessions, session);
+  return existsSync(py) ? py : "python3";
+}
+
 export function pythonRun(sessions, shell, { session, code, file, args = [], cwd, env = {}, timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
   const s = sessions.get(session);
   if (!s) { const e = new Error(`unknown session: ${session}`); e.code = "NOT_FOUND"; throw e; }
@@ -65,10 +118,11 @@ export function pythonRun(sessions, shell, { session, code, file, args = [], cwd
     }
   }
 
-  const absCwd = cwd ? sessions.resolvePath(session, cwd) : sessions.resolvePath(session, ".");
+  const absCwd = cwd ? sessions.resolvePath(session, cwd) : sessionRoot(sessions, session);
   const mergedEnv = { ...process.env, ...s.env, ...env };
+  const python = choosePython(sessions, session);
 
-  const r = spawnSync("python3", [scriptPath, ...args], {
+  const r = spawnSync(python, [scriptPath, ...args], {
     cwd: absCwd,
     env: mergedEnv,
     timeout: timeout_ms,
@@ -82,95 +136,14 @@ export function pythonRun(sessions, shell, { session, code, file, args = [], cwd
     exit_code: typeof r.status === "number" ? r.status : -1,
     signal: r.signal,
     script_path: code ? scriptPath.replace(s.root + "/", "") : file,
+    python_used: python,
     error: r.error ? r.error.message : null,
   };
 }
 
-function pipAvailable(sessions, session) {
-  const r = runSync("python3", ["-m", "pip", "--version"], {
-    cwd: sessions.resolvePath(session, "."),
-    env: { ...process.env, ...sessions.get(session).env },
-    timeout: 20000,
-  });
-  return r.exit_code === 0;
-}
-
-function bootstrapPip(sessions, session) {
-  const s = sessions.get(session);
-  const cwd = sessions.resolvePath(session, ".");
-  const env = { ...process.env, ...s.env };
-
-  // Try ensurepip first — ships with CPython, no network.
-  const ep = runSync("python3", ["-m", "ensurepip", "--upgrade", "--default-pip"], {
-    cwd, env, timeout: PIP_BOOTSTRAP_TIMEOUT_MS,
-  });
-  if (ep.exit_code === 0 && pipAvailable(sessions, session)) return;
-
-  // Last resort: download get-pip.py.
-  const gpPath = join(tmpdir(), `get-pip-${Date.now()}.py`);
-  const dl = runSync("python3", ["-c", [
-    "import urllib.request,sys",
-    "url='https://bootstrap.pypa.io/get-pip.py'",
-    "urllib.request.urlretrieve(url, sys.argv[1])",
-  ].join(";"), gpPath], { cwd, env, timeout: PIP_BOOTSTRAP_TIMEOUT_MS });
-  if (dl.exit_code !== 0) {
-    const e = new Error("python3 pip unavailable and get-pip.py download failed: " + (dl.stderr || dl.error || "unknown").slice(0, 300));
-    e.code = "PIP_BOOTSTRAP_FAILED";
-    throw e;
-  }
-
-  const gp = runSync("python3", [gpPath, "--user", "--disable-pip-version-check", "--no-input", "--quiet"], {
-    cwd, env, timeout: PIP_BOOTSTRAP_TIMEOUT_MS,
-  });
-  if (gp.exit_code !== 0 || !pipAvailable(sessions, session)) {
-    const e = new Error("python3 pip bootstrap failed: " + (gp.stderr || gp.error || "ensurepip+get-pip both failed").slice(0, 300));
-    e.code = "PIP_BOOTSTRAP_FAILED";
-    throw e;
-  }
-}
-
-function runPipInstall(sessions, session, packages, upgrade, timeout_ms) {
-  const s = sessions.get(session);
-  const cwd = sessions.resolvePath(session, ".");
-  const env = { ...process.env, ...s.env };
-
-  // Try normal --user install first. If PEP 668 blocks it, retry with
-  // --break-system-packages. Both go through --user so the container
-  // system packages are never touched.
-  const baseArgs = ["install", "--user", "--disable-pip-version-check", "--no-input", "--quiet"];
-  if (upgrade) baseArgs.push("--upgrade");
-  const fullArgs = [...baseArgs, ...packages];
-
-  let r = runSync("python3", ["-m", "pip", ...fullArgs], {
-    cwd, env, timeout: timeout_ms,
-  });
-
-  const isPep668 = /externally-managed-environment|PEP 668/i.test((r.stderr || "") + (r.stdout || ""));
-  if (r.exit_code !== 0 && isPep668) {
-    r = runSync("python3", ["-m", "pip", ...baseArgs, "--break-system-packages", ...packages], {
-      cwd, env, timeout: timeout_ms,
-    });
-  }
-
-  if (r.exit_code !== 0) {
-    const detail = (r.stderr || r.stdout || r.error || "").toString().slice(0, 500);
-    const e = new Error(`pip install failed (exit ${r.exit_code}): ${detail}`);
-    e.code = "PIP_INSTALL_FAILED";
-    e.exit_code = r.exit_code;
-    e.packages = packages;
-    throw e;
-  }
-
-  return { stdout: r.stdout || "", stderr: r.stderr || "", exit_code: 0 };
-}
-
 /**
- * pip install into the session's environment. Uses `--user` so it
- * doesn't touch the system packages, and so the session is isolated.
- *
- * Throws on failure — this is critical. Prior versions returned
- * exit_code:1 with no throw, which made installer report ok:true on
- * a failed install. Silent success is worse than loud failure.
+ * Install packages into the session's venv. Creates the venv on first
+ * use. Throws on any failure — callers see ok:false, not a silent pass.
  */
 export function pythonInstall(sessions, { session, packages = [], upgrade = false, timeout_ms = 120000 } = {}) {
   const s = sessions.get(session);
@@ -188,17 +161,38 @@ export function pythonInstall(sessions, { session, packages = [], upgrade = fals
     }
   }
 
-  if (!pipAvailable(sessions, session)) {
-    bootstrapPip(sessions, session);
+  ensureVenv(sessions, session);
+
+  const pip = venvPip(sessions, session);
+  if (!existsSync(pip)) {
+    const e = new Error("venv pip missing at " + pip);
+    e.code = "VENV_FAILED";
+    throw e;
   }
 
-  const r = runPipInstall(sessions, session, packages, upgrade, timeout_ms);
+  const args = ["install", "--disable-pip-version-check", "--no-input", "--quiet"];
+  if (upgrade) args.push("--upgrade");
+  args.push(...packages);
+
+  const cwd = sessionRoot(sessions, session);
+  const env = { ...process.env, ...s.env };
+
+  const r = runSync(pip, args, { cwd, env, timeout: timeout_ms });
+  if (r.exit_code !== 0) {
+    const detail = (r.stderr || r.stdout || r.error || "").toString().slice(0, 500);
+    const e = new Error(`pip install failed (exit ${r.exit_code}): ${detail}`);
+    e.code = "PIP_INSTALL_FAILED";
+    e.exit_code = r.exit_code;
+    e.packages = packages;
+    throw e;
+  }
 
   return {
-    stdout: r.stdout,
-    stderr: r.stderr,
-    exit_code: r.exit_code,
+    stdout: r.stdout || "",
+    stderr: r.stderr || "",
+    exit_code: 0,
     installed: packages,
+    venv: venvPath(sessions, session),
     error: null,
   };
 }
@@ -206,6 +200,11 @@ export function pythonInstall(sessions, { session, packages = [], upgrade = fals
 export function pythonVersion(sessions, { session }) {
   const s = sessions.get(session);
   if (!s) { const e = new Error(`unknown session: ${session}`); e.code = "NOT_FOUND"; throw e; }
-  const r = runSync("python3", ["--version"]);
-  return { version: (r.stdout || r.stderr || "").trim(), exit_code: r.exit_code };
+  const python = choosePython(sessions, session);
+  const r = runSync(python, ["--version"]);
+  return {
+    version: (r.stdout || r.stderr || "").trim(),
+    exit_code: r.exit_code,
+    python_used: python,
+  };
 }
