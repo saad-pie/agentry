@@ -3,15 +3,20 @@
 // Python runtime primitives. Runs code or files with the session's
 // Python interpreter, installs packages with pip.
 //
-// Uses the system python3 + pip. No special config; if the container
-// has python3, this works.
+// Uses the system python3. Pip is bootstrapped on demand: ensurepip
+// first, get-pip.py as last resort. Never silently succeeds — if a
+// package cannot be installed, pythonInstall throws and the caller
+// sees ok:false. Prior versions returned exit_code:1 with no error,
+// which made installer report false successes.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const MAX_OUTPUT_BYTES = 1 * 1024 * 1024;
+const PIP_BOOTSTRAP_TIMEOUT_MS = 180000;
 
 function runSync(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, {
@@ -23,7 +28,7 @@ function runSync(cmd, args, opts = {}) {
   return {
     stdout: r.stdout || "",
     stderr: r.stderr || "",
-    exit_code: r.status,
+    exit_code: typeof r.status === "number" ? r.status : -1,
     signal: r.signal,
     error: r.error ? r.error.message : null,
   };
@@ -74,16 +79,98 @@ export function pythonRun(sessions, shell, { session, code, file, args = [], cwd
   return {
     stdout: r.stdout || "",
     stderr: r.stderr || "",
-    exit_code: r.status,
+    exit_code: typeof r.status === "number" ? r.status : -1,
     signal: r.signal,
     script_path: code ? scriptPath.replace(s.root + "/", "") : file,
     error: r.error ? r.error.message : null,
   };
 }
 
+function pipAvailable(sessions, session) {
+  const r = runSync("python3", ["-m", "pip", "--version"], {
+    cwd: sessions.resolvePath(session, "."),
+    env: { ...process.env, ...sessions.get(session).env },
+    timeout: 20000,
+  });
+  return r.exit_code === 0;
+}
+
+function bootstrapPip(sessions, session) {
+  const s = sessions.get(session);
+  const cwd = sessions.resolvePath(session, ".");
+  const env = { ...process.env, ...s.env };
+
+  // Try ensurepip first — ships with CPython, no network.
+  const ep = runSync("python3", ["-m", "ensurepip", "--upgrade", "--default-pip"], {
+    cwd, env, timeout: PIP_BOOTSTRAP_TIMEOUT_MS,
+  });
+  if (ep.exit_code === 0 && pipAvailable(sessions, session)) return;
+
+  // Last resort: download get-pip.py.
+  const gpPath = join(tmpdir(), `get-pip-${Date.now()}.py`);
+  const dl = runSync("python3", ["-c", [
+    "import urllib.request,sys",
+    "url='https://bootstrap.pypa.io/get-pip.py'",
+    "urllib.request.urlretrieve(url, sys.argv[1])",
+  ].join(";"), gpPath], { cwd, env, timeout: PIP_BOOTSTRAP_TIMEOUT_MS });
+  if (dl.exit_code !== 0) {
+    const e = new Error("python3 pip unavailable and get-pip.py download failed: " + (dl.stderr || dl.error || "unknown").slice(0, 300));
+    e.code = "PIP_BOOTSTRAP_FAILED";
+    throw e;
+  }
+
+  const gp = runSync("python3", [gpPath, "--user", "--disable-pip-version-check", "--no-input", "--quiet"], {
+    cwd, env, timeout: PIP_BOOTSTRAP_TIMEOUT_MS,
+  });
+  if (gp.exit_code !== 0 || !pipAvailable(sessions, session)) {
+    const e = new Error("python3 pip bootstrap failed: " + (gp.stderr || gp.error || "ensurepip+get-pip both failed").slice(0, 300));
+    e.code = "PIP_BOOTSTRAP_FAILED";
+    throw e;
+  }
+}
+
+function runPipInstall(sessions, session, packages, upgrade, timeout_ms) {
+  const s = sessions.get(session);
+  const cwd = sessions.resolvePath(session, ".");
+  const env = { ...process.env, ...s.env };
+
+  // Try normal --user install first. If PEP 668 blocks it, retry with
+  // --break-system-packages. Both go through --user so the container
+  // system packages are never touched.
+  const baseArgs = ["install", "--user", "--disable-pip-version-check", "--no-input", "--quiet"];
+  if (upgrade) baseArgs.push("--upgrade");
+  const fullArgs = [...baseArgs, ...packages];
+
+  let r = runSync("python3", ["-m", "pip", ...fullArgs], {
+    cwd, env, timeout: timeout_ms,
+  });
+
+  const isPep668 = /externally-managed-environment|PEP 668/i.test((r.stderr || "") + (r.stdout || ""));
+  if (r.exit_code !== 0 && isPep668) {
+    r = runSync("python3", ["-m", "pip", ...baseArgs, "--break-system-packages", ...packages], {
+      cwd, env, timeout: timeout_ms,
+    });
+  }
+
+  if (r.exit_code !== 0) {
+    const detail = (r.stderr || r.stdout || r.error || "").toString().slice(0, 500);
+    const e = new Error(`pip install failed (exit ${r.exit_code}): ${detail}`);
+    e.code = "PIP_INSTALL_FAILED";
+    e.exit_code = r.exit_code;
+    e.packages = packages;
+    throw e;
+  }
+
+  return { stdout: r.stdout || "", stderr: r.stderr || "", exit_code: 0 };
+}
+
 /**
  * pip install into the session's environment. Uses `--user` so it
  * doesn't touch the system packages, and so the session is isolated.
+ *
+ * Throws on failure — this is critical. Prior versions returned
+ * exit_code:1 with no throw, which made installer report ok:true on
+ * a failed install. Silent success is worse than loud failure.
  */
 export function pythonInstall(sessions, { session, packages = [], upgrade = false, timeout_ms = 120000 } = {}) {
   const s = sessions.get(session);
@@ -101,24 +188,18 @@ export function pythonInstall(sessions, { session, packages = [], upgrade = fals
     }
   }
 
-  const args = ["install", "--user", "--disable-pip-version-check", "--no-input", "--quiet"];
-  if (upgrade) args.push("--upgrade");
-  args.push(...packages);
+  if (!pipAvailable(sessions, session)) {
+    bootstrapPip(sessions, session);
+  }
 
-  const r = spawnSync("python3", ["-m", "pip", ...args], {
-    cwd: sessions.resolvePath(session, "."),
-    env: { ...process.env, ...s.env },
-    timeout: timeout_ms,
-    encoding: "utf8",
-    maxBuffer: MAX_OUTPUT_BYTES * 4,
-  });
+  const r = runPipInstall(sessions, session, packages, upgrade, timeout_ms);
 
   return {
-    stdout: r.stdout || "",
-    stderr: r.stderr || "",
-    exit_code: r.status,
+    stdout: r.stdout,
+    stderr: r.stderr,
+    exit_code: r.exit_code,
     installed: packages,
-    error: r.error ? r.error.message : null,
+    error: null,
   };
 }
 

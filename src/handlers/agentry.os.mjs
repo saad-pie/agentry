@@ -82,5 +82,14 @@ export default async function agentryOs(input, ctx) {
     throw new Error(`agentry.os ${action}: ${errCode}: ${errMsg}`);
   }
 
+  // v0.22.1 — some kernel routes return HTTP 200 with { error } in the body.
+  // Treat those as failures. Silent HTTP-200-with-error is exactly how
+  // python.install false-succeeded before this fix.
+  if (data && data.error && (data.error.code || data.error.message)) {
+    const errCode = data.error.code || "INTERNAL";
+    const errMsg = data.error.message || "kernel reported error";
+    throw new Error(`agentry.os ${action}: ${errCode}: ${errMsg}`);
+  }
+
   return { output: { action, result: data }, cost: { time_ms: 0, http_calls: 1, money_usd: 0 } };
 }

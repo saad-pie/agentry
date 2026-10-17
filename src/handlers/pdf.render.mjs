@@ -1,6 +1,6 @@
 // agentry — hand-written PDF renderer using Python reportlab.
 // Pure Python, no phantomjs, no npm deps. Anchors the demo.
-// v0.22.0
+// v0.22.1
 
 const CAP_ID = "pdf.render";
 
@@ -60,6 +60,8 @@ async function run(input, ctx, opts = {}) {
   const session = opts.session || input.session || (CAP_ID + "-" + Date.now().toString(36));
 
   const { prepareSession } = await import("../runtime/installer.mjs");
+  // Do NOT swallow prepareSession errors. A failed pip install must
+  // stop the run here, not surface as ModuleNotFoundError later.
   await prepareSession(ctx, { capId: CAP_ID, session });
 
   const { mkdirSync, statSync, openSync, readSync, closeSync } = await import("node:fs");
