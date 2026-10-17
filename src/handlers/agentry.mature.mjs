@@ -1,10 +1,15 @@
 // agentry/src/handlers/agentry.mature.mjs
-// v0.25.0 — maturation: systematically improve a working capability.
+// v0.28.0 — surgical mutation.
 //
-// Given a capability that already passes trial, attempt to produce a v2
-// that passes the same trial AND scores higher on the quality probe.
-// If v2 wins, it supersedes v1 (graph version bumps, v1 handler stays
-// on disk for rollback). If v2 loses or fails trial, v1 remains current.
+// Prior versions asked the LLM to return a full plan spec, then rendered
+// it from scratch. For narrow rubrics (add a title, force a page break),
+// the LLM re-derived v1's working steps each time and re-introduced bugs
+// (Buffer.from(undefined), WinAnsi newline, pdfBytes never set). Three
+// attempts v69/v72/v77 all failed the same way.
+//
+// v0.28.0 flips the contract: LLM returns MUTATIONS against v1's plan.
+// agentry applies them; un-mutated steps are byte-for-byte v1. The LLM
+// cannot break working code because it never touches it.
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -47,71 +52,110 @@ function extractJson(text) {
   try { return JSON.parse(out); } catch { return null; }
 }
 
-function buildMaturationPrompt({ cap, v1HandlerSource, v1Seed, v1Quality, rubric }) {
+// Apply mutation list to a plan. Deep-clones v1 plan; mutations only
+// add/replace/remove steps; untouched steps stay verbatim.
+function applyMutations(v1Plan, mutations) {
+  const plan = v1Plan.map(s => ({ ...s }));
+  const log = [];
+  for (const m of mutations) {
+    if (!m || typeof m !== "object" || !m.type) { log.push({ skipped: "no_type", m }); continue; }
+    if (m.type === "insert_after") {
+      const afterIdx = plan.findIndex(s => Number(s.step) === Number(m.after_step));
+      if (afterIdx < 0) { log.push({ skipped: "after_step_not_found", step: m.after_step }); continue; }
+      plan.splice(afterIdx + 1, 0, { ...(m.step || {}), step: 0 });
+      log.push({ applied: "insert_after", after: m.after_step });
+    } else if (m.type === "append") {
+      plan.push({ ...(m.step || {}), step: 0 });
+      log.push({ applied: "append" });
+    } else if (m.type === "replace_step") {
+      const idx = plan.findIndex(s => Number(s.step) === Number(m.step_to_replace));
+      if (idx < 0) { log.push({ skipped: "replace_target_not_found", step: m.step_to_replace }); continue; }
+      const prev = plan[idx];
+      plan[idx] = { ...(m.step || {}), verb: (m.step && m.step.verb) || prev.verb, step: prev.step };
+      log.push({ applied: "replace_step", step: m.step_to_replace });
+    } else if (m.type === "remove_step") {
+      const idx = plan.findIndex(s => Number(s.step) === Number(m.step_to_remove));
+      if (idx >= 0) { plan.splice(idx, 1); log.push({ applied: "remove_step", step: m.step_to_remove }); }
+      else { log.push({ skipped: "remove_target_not_found", step: m.step_to_remove }); }
+    } else {
+      log.push({ skipped: "unknown_type", type: m.type });
+    }
+  }
+  for (let i = 0; i < plan.length; i++) plan[i].step = i + 1;
+  return { plan, log };
+}
+
+function buildMutationPrompt({ cap, v1Plan, v1Seed, v1Quality, rubric }) {
   const lines = [];
-  lines.push("You are agentry's maturation synthesizer.");
+  lines.push("You are agentry's maturation synthesizer (MUTATION MODE).");
   lines.push("");
-  lines.push("A capability ALREADY EXISTS and passes its trial. Your job is NOT");
-  lines.push("to write it from scratch — it's to produce v2 that keeps the same");
-  lines.push("contract (accepts, produces, requires) but delivers HIGHER");
-  lines.push("quality output along the rubric below.");
+  lines.push("The capability already exists and works. v1's PLAN is shown below.");
+  lines.push("You MUST return MUTATIONS against that plan, not a full new plan.");
+  lines.push("Untouched steps stay byte-for-byte v1 — you cannot break them.");
   lines.push("");
-  lines.push("Return ONLY a JSON spec of type \"plan\". No prose. No fences.");
+  lines.push("=== CAPABILITY ===");
+  lines.push(JSON.stringify({ id: cap.id, kind: cap.kind, accepts: cap.accepts, produces: cap.produces, requires: cap.requires }, null, 2));
   lines.push("");
-  lines.push("=== V1 CAPABILITY ===");
-  lines.push(JSON.stringify({
-    id: cap.id, kind: cap.kind,
-    accepts: cap.accepts, produces: cap.produces, requires: cap.requires,
-  }, null, 2));
+  lines.push("=== V1 PLAN (working steps — do NOT re-derive these) ===");
+  lines.push(JSON.stringify(v1Plan.map(s => ({ step: s.step, verb: s.verb, what: s.what || "", fails_if: s.fails_if || "", code: s.code || "" })), null, 2));
   lines.push("");
-  lines.push("=== V1 QUALITY SCORE (baseline) ===");
+  lines.push("=== V1 QUALITY (baseline to beat) ===");
   lines.push(JSON.stringify(v1Quality, null, 2));
-  lines.push("");
-  lines.push("=== V1 HANDLER SOURCE (this is the WORKING version. For a narrow rubric, PRESERVE all existing logic verbatim. Only add or modify the specific lines the rubric requires. Do NOT re-derive image loading or state that already works in V1.");
-  lines.push(v1HandlerSource.slice(0, 8000));
   lines.push("");
   lines.push("=== RUBRIC — what v2 must improve ===");
   lines.push(String(rubric));
   lines.push("");
-  lines.push("=== RULES ===");
-  lines.push("- Return type: \"plan\". Same kernel_language as v1.");
-  lines.push("- Same accepts, produces, requires as v1 (verbatim).");
-  lines.push("- Same accept_spec.input as v1.");
-  lines.push("- Plan MUST have the same number of steps as v1.");
-  lines.push("- Each step.verb MUST match v1's corresponding step verb.");
-  lines.push("- Emit step produces the same output keys as v1.");
-  lines.push("- For a NARROW rubric (one visual/structure change), preserve v1 plan");
-  lines.push("  steps verbatim and modify only what is needed. Copy the image-loading");
-  lines.push("  and state-management lines exactly as v1 has them - those are tested.");
-  lines.push("- For a BROAD rubric (layout redesign), you may restructure but must");
-  lines.push("  preserve every v1 behavior and add the rubric requirement on top.");
-  lines.push("- kernel_language=\"node\" runs plain JS (no JSX, no types).");
-  lines.push("  kernel_language=\"python\" runs plain Python 3.11.");
+  lines.push("=== MUTATION TYPES (choose the ones that implement the rubric) ===");
+  lines.push("- insert_after: add a new step after step N (use for new behaviour)");
+  lines.push("- replace_step: rewrite step N in place (use only if step N itself is wrong)");
+  lines.push("- append: add a step at the very end (use for final emit changes, rare)");
+  lines.push("- remove_step: delete step N (rare)");
   lines.push("");
-  lines.push("Return this shape — note the env_map MUST have one entry");
-  lines.push("per accepts key that any plan step reads via process.env:");
+  lines.push("=== CRITICAL RULES ===");
+  lines.push("- Do NOT re-implement v1's existing steps. Only add/replace/remove as needed.");
+  lines.push("- Each `step.code` is raw JavaScript (or Python if v1 kernel_language is python).");
+  lines.push("  - Node: plain JS, no JSX, no TS. Use `await import(...)` for npm packages.");
+  lines.push("  - State between steps: `globalThis.X = ...` in one step, `globalThis.X` in later steps.");
+  lines.push("  - Env vars: `process.env.IMAGE_PATH` style (already mapped for v1's accepts).");
+  lines.push("- pdf-lib StandardFonts (Helvetica, Helvetica-Bold) CANNOT encode newlines.");
+  lines.push("  If drawing text, split by newlines and call drawText per line.");
+  lines.push("- Each new step MUST have verb, what, fails_if, code.");
+  lines.push("");
+  lines.push("=== OUTPUT SHAPE ===");
   lines.push(JSON.stringify({
-    type: "plan",
-    capability: { id: cap.id, kind: cap.kind, accepts: cap.accepts, produces: cap.produces, requires: cap.requires },
-    plan: [{ step: 1, verb: "prepare", what: "...", fails_if: "...", code: "..." }],
-    accept_spec: { input: Object.fromEntries(Object.keys(cap.accepts || {}).map(k => [k, "<sample value>"])) },
-    kernel_language: "node",
-    glue: {
-      env_map: Object.fromEntries(Object.keys(cap.accepts || {}).map(k => [k.toUpperCase().replace(/[^A-Z0-9]/g, "_"), k])),
-      result_parse: "stdout_json",
-      output_map: Object.fromEntries(Object.keys(cap.produces || {}).map(k => [k, k])),
-    },
+    mutations: [
+      { type: "insert_after", after_step: 2, step: { verb: "draw_title", what: "...", fails_if: "...", code: "..." } },
+    ],
+    reasoning: "one sentence",
   }, null, 2));
-  lines.push("");
-  lines.push("ENV_MAP RULE (critical — prior versions failed here):");
-  lines.push("- Every plan step that reads process.env.X MUST have an entry");
-  lines.push("  glue.env_map[X] = <input_key> where <input_key> is the accepts key.");
-  lines.push("- For accepts { image_path: 'string' }, env_map should be");
-  lines.push("  { \"IMAGE_PATH\": \"image_path\" }.");
-  lines.push("- If you leave env_map empty, the kernel code will throw");
-  lines.push("  'IMAGE_PATH env var not set' at trial.");
-  lines.push("{ \"type\": \"plan\", \"capability\": {...}, \"plan\": [{\"step\":1,\"verb\":\"...\",\"what\":\"...\",\"fails_if\":\"...\",\"code\":\"...\"}], \"accept_spec\": {\"input\": {}}, \"kernel_language\": \"node\", \"glue\": {\"env_map\": {}, \"result_parse\": \"stdout_json\", \"output_map\": {}} }");
   return lines.join("\n");
+}
+
+// Auto-derive env_map from plan code + accepts keys.
+function autoDeriveEnvMap(spec, v1Cap) {
+  const accepts = v1Cap.accepts || {};
+  const existing = (spec.glue && spec.glue.env_map) || {};
+  const derived = { ...existing };
+  const lookup = {};
+  for (const k of Object.keys(accepts)) {
+    lookup[k.toUpperCase().replace(/[^A-Z0-9]/g, "_")] = k;
+    lookup[k] = k;
+  }
+  const envVars = new Set();
+  for (const step of spec.plan || []) {
+    const code = String(step.code || "");
+    for (const m of code.matchAll(/process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g)) envVars.add(m[1]);
+    for (const m of code.matchAll(/process\.env\[["']([A-Za-z_][A-Za-z0-9_]*)["']\]/g)) envVars.add(m[1]);
+  }
+  const added = [];
+  for (const v of envVars) {
+    if (derived[v]) continue;
+    const match = lookup[v] || lookup[v.toLowerCase()];
+    if (match) { derived[v] = match; added.push([v, match]); }
+  }
+  spec.glue = spec.glue || {};
+  spec.glue.env_map = derived;
+  return { env_map: derived, added };
 }
 
 function compileJS(plan) {
@@ -138,45 +182,6 @@ function compilePY(plan) {
     parts.push("");
   }
   return parts.join("\n");
-}
-
-// v0.25.2 — auto-derive env_map from plan code + accepts keys.
-// LLMs routinely return empty glue.env_map even when instructed.
-// Scan plan code for process.env.X; for each X, find the accepts key
-// whose uppercase-underscored form matches X; add to env_map.
-function autoDeriveEnvMap(spec, v1Cap) {
-  const accepts = v1Cap.accepts || {};
-  const existing = (spec.glue && spec.glue.env_map) || {};
-  const derived = { ...existing };
-
-  // Build lookup: normalized accept key → original accept key
-  const lookup = {};
-  for (const k of Object.keys(accepts)) {
-    lookup[k.toUpperCase().replace(/[^A-Z0-9]/g, "_")] = k;
-    lookup[k] = k; // also direct match
-  }
-
-  // Scan all plan code for process.env.X and process.env["X"]
-  const envVars = new Set();
-  for (const step of spec.plan || []) {
-    const code = String(step.code || "");
-    for (const m of code.matchAll(/process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g)) envVars.add(m[1]);
-    for (const m of code.matchAll(/process\.env\[["']([A-Za-z_][A-Za-z0-9_]*)["']\]/g)) envVars.add(m[1]);
-  }
-
-  const added = [];
-  for (const v of envVars) {
-    if (derived[v]) continue; // already mapped
-    const match = lookup[v] || lookup[v.toLowerCase()] || lookup[v.replace(/_/g, ".")] || lookup[v.replace(/_/g, "_")];
-    if (match) { derived[v] = match; added.push([v, match]); continue; }
-    // Fallback: assume lowercase/underscore-to-dot guess
-    const guess = v.toLowerCase().replace(/_/g, "_");
-    if (accepts[guess]) { derived[v] = guess; added.push([v, guess]); }
-  }
-
-  spec.glue = spec.glue || {};
-  spec.glue.env_map = derived;
-  return { env_map: derived, added };
 }
 
 function renderV2Handler({ v2Id, v1Cap, spec }) {
@@ -252,7 +257,7 @@ export default async function agentryMature(input, ctx) {
   const { capability_id, rubric, probe_input } = input || {};
   if (!capability_id) throw new Error("agentry.mature requires capability_id");
   if (!rubric || String(rubric).trim().length < 20) {
-    throw new Error("agentry.mature requires a rubric of at least 20 chars describing what v2 should improve");
+    throw new Error("agentry.mature requires a rubric of at least 20 chars");
   }
 
   const { graph, events, invoke } = ctx;
@@ -262,10 +267,24 @@ export default async function agentryMature(input, ctx) {
     throw new Error("agentry.mature: capability has no handler_file on disk: " + capability_id);
   }
 
-  const v1HandlerSource = readFileSync(cap.handler_file, "utf8");
   const v1SeedPath = cap.handler_file.replace("/handlers/", "/seeds/").replace(/\.mjs$/, ".json");
   let v1Seed = null;
   if (existsSync(v1SeedPath)) { try { v1Seed = JSON.parse(readFileSync(v1SeedPath, "utf8")); } catch {} }
+
+  // v0.28.0 — MUST have a plan spec for surgical mutation
+  const v1Plan = v1Seed && Array.isArray(v1Seed.plan) ? v1Seed.plan : null;
+  if (!v1Plan || v1Plan.length === 0) {
+    return {
+      output: {
+        matured: false,
+        reason: "v1_capability_has_no_plan_spec",
+        note: "Surgical mutation requires v1 seed to contain a plan array. Hand-written handlers (like pdf.render) cannot be matured via this path. Synthesized capabilities can.",
+        v1_seed_path: v1SeedPath,
+        v1_seed_has_plan: Boolean(v1Seed && v1Seed.plan),
+      },
+      cost: { time_ms: 0 },
+    };
+  }
 
   const probeIn = probe_input && typeof probe_input === "object"
     ? probe_input
@@ -275,7 +294,7 @@ export default async function agentryMature(input, ctx) {
     return { output: { matured: false, reason: "no_probe_input", capability_id }, cost: { time_ms: 0 } };
   }
 
-  events.emit("mature.started", { capability_id, rubric: String(rubric).slice(0, 200) });
+  events.emit("mature.started", { capability_id, rubric: String(rubric).slice(0, 200), mode: "surgical_mutation", v1_plan_steps: v1Plan.length });
 
   // Score v1 with a fresh invoke
   let v1Quality = null;
@@ -290,9 +309,9 @@ export default async function agentryMature(input, ctx) {
   }
   events.emit("mature.v1_scored", { capability_id, v1_quality: v1Quality });
 
-  // Maturation LLM call
-  const prompt = buildMaturationPrompt({ cap, v1HandlerSource, v1Seed, v1Quality, rubric: String(rubric) });
-  let spec = null, llmUsed = null;
+  // Mutation prompt
+  const prompt = buildMutationPrompt({ cap, v1Plan, v1Seed, v1Quality, rubric: String(rubric) });
+  let mutationResponse = null, llmUsed = null;
   const attempts = [];
   for (const { provider, model } of MODEL_CHAIN) {
     try {
@@ -307,65 +326,91 @@ export default async function agentryMature(input, ctx) {
       attempts.push({ provider, model, ok: r.ok, code: r.ok ? null : r.error?.code });
       if (!r.ok) continue;
       const parsed = extractJson(r.output.content);
-      if (parsed && parsed.type === "plan" && Array.isArray(parsed.plan)) {
-        spec = parsed; llmUsed = { provider, model }; break;
+      if (parsed && Array.isArray(parsed.mutations) && parsed.mutations.length > 0) {
+        mutationResponse = parsed;
+        llmUsed = { provider, model };
+        break;
       }
-      attempts[attempts.length - 1].reason = "unparseable_or_wrong_shape";
+      attempts[attempts.length - 1].reason = "unparseable_or_no_mutations";
     } catch (e) { attempts.push({ provider, model, ok: false, error: e.message }); }
   }
-  if (!spec) {
+  if (!mutationResponse) {
     return { output: { matured: false, reason: "llm_failed", attempts, v1_quality: v1Quality }, cost: { time_ms: 0 } };
   }
 
-  // Render v2 handler + seed
-  const v2Id = capability_id + "__v" + (cap.version + 1);
-  const _deriveResult = autoDeriveEnvMap(spec, cap);
+  // Apply mutations to v1 plan
+  const { plan: v2Plan, log: mutationLog } = applyMutations(v1Plan, mutationResponse.mutations);
+  if (v2Plan.length === v1Plan.length && mutationLog.every(l => l.skipped)) {
+    return {
+      output: { matured: false, reason: "no_mutations_applied", mutation_log: mutationLog, v1_quality: v1Quality },
+      cost: { time_ms: 0 },
+    };
+  }
+  events.emit("mature.mutations_applied", { capability_id, mutation_log: mutationLog, v1_plan_steps: v1Plan.length, v2_plan_steps: v2Plan.length });
+
+  // Build v2 spec: mutated plan + preserved v1 fields
+  const v2Spec = {
+    type: "plan",
+    capability: { id: cap.id, kind: cap.kind, accepts: cap.accepts, produces: cap.produces, requires: cap.requires },
+    plan: v2Plan,
+    accept_spec: { input: probeIn },
+    kernel_language: (v1Seed && v1Seed.kernel_language) || "node",
+    glue: {
+      env_map: (v1Seed && v1Seed.glue && v1Seed.glue.env_map) || {},
+      result_parse: (v1Seed && v1Seed.glue && v1Seed.glue.result_parse) || "stdout_json",
+      output_map: (v1Seed && v1Seed.glue && v1Seed.glue.output_map) ||
+        Object.fromEntries(Object.keys(cap.produces || {}).map(k => [k, k])),
+    },
+  };
+
+  const _deriveResult = autoDeriveEnvMap(v2Spec, cap);
   if (_deriveResult.added.length > 0) {
     events.emit("mature.env_map_derived", { capability_id, added: _deriveResult.added });
   }
 
+  const v2Id = capability_id + "__v" + (cap.version + 1);
   const v2HandlerPath = join(HANDLERS_DIR, v2Id + ".mjs");
   const v2SeedPath = join(SEEDS_DIR, v2Id + ".json");
   mkdirSync(HANDLERS_DIR, { recursive: true });
   mkdirSync(SEEDS_DIR, { recursive: true });
-  writeFileSync(v2HandlerPath, renderV2Handler({ v2Id, v1Cap: cap, spec }));
+  writeFileSync(v2HandlerPath, renderV2Handler({ v2Id, v1Cap: cap, spec: v2Spec }));
   const v2Seed = {
     id: v2Id, kind: cap.kind, invoked_via: "invoker.in_process_js",
     handler: v2Id, handler_file: v2HandlerPath,
     accepts: cap.accepts, produces: cap.produces, requires: cap.requires,
-    plan: spec.plan, accept_spec: { input: probeIn },
+    plan: v2Plan, accept_spec: { input: probeIn },
+    kernel_language: v2Spec.kernel_language,
+    glue: v2Spec.glue,
     source: "matured:" + capability_id,
-    notes: "Maturation rubric: " + String(rubric).slice(0, 300),
+    maturation_mutations: mutationResponse.mutations,
+    maturation_reasoning: mutationResponse.reasoning || null,
   };
   writeFileSync(v2SeedPath, JSON.stringify(v2Seed, null, 2));
 
-  // node --check
   const { spawnSync } = await import("node:child_process");
   const chk = spawnSync("node", ["--check", v2HandlerPath], { encoding: "utf8", timeout: 15000 });
   if (chk.status !== 0) {
     events.emit("mature.v2_syntax_failed", { capability_id, v2_id: v2Id, stderr: String(chk.stderr || "").slice(0, 500) });
-    return { output: { matured: false, reason: "v2_syntax_invalid", v2_handler: v2HandlerPath, stderr: String(chk.stderr || "").slice(0, 400), v1_quality: v1Quality }, cost: { time_ms: 0 } };
+    return { output: { matured: false, reason: "v2_syntax_invalid", v2_handler: v2HandlerPath, stderr: String(chk.stderr || "").slice(0, 400), v1_quality: v1Quality, mutation_log: mutationLog }, cost: { time_ms: 0 } };
   }
 
-  // Trial v2
   const trial = await invoke("agentry.trial", {
     capability_id: v2Id, handler_path: v2HandlerPath, seed_path: v2SeedPath,
   }, { tenant: "local", by: "agentry.mature" });
   if (!trial.ok || !trial.output?.ok) {
     events.emit("mature.v2_trial_failed", { capability_id, v2_id: v2Id, phase: trial.output?.phase, error: trial.output?.error });
-    return { output: { matured: false, reason: "v2_trial_failed", v2_id: v2Id, v2_handler: v2HandlerPath, phase: trial.output?.phase, error: trial.output?.error, v1_quality: v1Quality }, cost: { time_ms: 0 } };
+    return { output: { matured: false, reason: "v2_trial_failed", v2_id: v2Id, v2_handler: v2HandlerPath, phase: trial.output?.phase, error: trial.output?.error, v1_quality: v1Quality, mutation_log: mutationLog }, cost: { time_ms: 0 } };
   }
 
-  // Score v2
   let v2Quality = null;
   try {
     const r = await invoke(v2Id, probeIn, { tenant: "local", by: "agentry.mature" });
     if (!r.ok) {
-      return { output: { matured: false, reason: "v2_invoke_failed", v2_error: r.error, v1_quality: v1Quality }, cost: { time_ms: 0 } };
+      return { output: { matured: false, reason: "v2_invoke_failed", v2_error: r.error, v1_quality: v1Quality, mutation_log: mutationLog }, cost: { time_ms: 0 } };
     }
     v2Quality = await scoreOutput(cap, r.output);
   } catch (e) {
-    return { output: { matured: false, reason: "v2_probe_threw", v2_error: e.message, v1_quality: v1Quality }, cost: { time_ms: 0 } };
+    return { output: { matured: false, reason: "v2_probe_threw", v2_error: e.message, v1_quality: v1Quality, mutation_log: mutationLog }, cost: { time_ms: 0 } };
   }
 
   const delta = v2Quality.score - v1Quality.score;
@@ -373,10 +418,9 @@ export default async function agentryMature(input, ctx) {
 
   if (delta <= 0) {
     try { graph.retireCapability(v2Id, "maturation did not improve (delta=" + delta + ")"); } catch {}
-    return { output: { matured: false, reason: "v2_quality_not_higher", v1_quality: v1Quality, v2_quality: v2Quality, delta }, cost: { time_ms: 0 } };
+    return { output: { matured: false, reason: "v2_quality_not_higher", v1_quality: v1Quality, v2_quality: v2Quality, delta, mutation_log: mutationLog }, cost: { time_ms: 0 } };
   }
 
-  // Adopt v2 as the new current version of capability_id
   const v1HandlerFile = cap.handler_file;
   graph.putCapability({
     id: capability_id, kind: cap.kind, invoked_via: "invoker.in_process_js",
@@ -386,6 +430,7 @@ export default async function agentryMature(input, ctx) {
     v1_quality: v1Quality, v2_quality: v2Quality,
     matured_at: Date.now(),
     maturation_rubric: String(rubric).slice(0, 500),
+    maturation_mutations: mutationResponse.mutations,
     model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
   });
 
@@ -397,11 +442,10 @@ export default async function agentryMature(input, ctx) {
 
   return {
     output: {
-      matured: true, capability_id,
-      v2_id: v2Id,
-      v1_handler_file: v1HandlerFile,
-      v2_handler_file: v2HandlerPath,
+      matured: true, capability_id, v2_id: v2Id,
+      v1_handler_file: v1HandlerFile, v2_handler_file: v2HandlerPath,
       v1_quality: v1Quality, v2_quality: v2Quality, delta,
+      mutation_log: mutationLog,
       model_used: llmUsed ? (llmUsed.provider + "/" + llmUsed.model) : null,
     },
     cost: { time_ms: 0 },
