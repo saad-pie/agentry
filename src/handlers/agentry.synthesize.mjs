@@ -261,6 +261,113 @@ async function readNpmPackage(candidate, deps) {
 // Fetches the raw file (for agentskills_code) or the ClawHub API
 // detail (for clawhub), extracts frontmatter + body, and returns
 // a facts object with source_kind = "skill".
+// v0.24.1 — read a PyPI package: pip install, read module __init__.py,
+// fetch pypi metadata, list package files. Mirrors readNpmPackage.
+async function readPyPiPackage(candidate, deps) {
+  const pkgName = String(candidate.name || candidate.id || "").replace(/^pypi:/, "").trim();
+  const moduleGuess = pkgName.replace(/-/g, "_");
+  const session = "synth_pypi_" + pkgName.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 40) + "_" + Date.now().toString(36);
+  const { invoke } = deps;
+
+  const facts = {
+    session, source_kind: "pypi",
+    pypi_package_name: pkgName,
+    pypi_module_name: moduleGuess,
+    installed: false, error: null,
+    init_content: null, readme: null,
+    top_level: [], version: null, summary: null,
+  };
+
+  await invoke("agentry.os", { action: "session.create", id: session },
+    { tenant: "local", by: "agentry.synthesize" });
+
+  try {
+    const inst = await invoke("agentry.os", {
+      action: "python.install", session, packages: [pkgName], timeout_ms: 120000,
+    }, { tenant: "local", by: "agentry.synthesize" });
+    if (!inst.ok) {
+      facts.error = "pip install failed: " + inst.error.message;
+      return facts;
+    }
+    facts.installed = true;
+  } catch (e) {
+    facts.error = "pip install threw: " + e.message;
+    return facts;
+  }
+
+  try {
+    const metaScript = [
+      "import json, urllib.request",
+      "try:",
+      "    req = urllib.request.Request('https://pypi.org/pypi/" + pkgName + "/json', headers={'User-Agent':'agentry/0.24'})",
+      "    with urllib.request.urlopen(req, timeout=15) as r:",
+      "        d = json.load(r)",
+      "    info = d.get('info', {})",
+      "    print(json.dumps({'summary': info.get('summary',''), 'description': (info.get('description') or '')[:8000], 'version': info.get('version','')}))",
+      "except Exception as e:",
+      "    print(json.dumps({'error': str(e)}))",
+    ].join("\n");
+    const meta = await invoke("agentry.os", { action: "python.run", session, code: metaScript, timeout_ms: 25000 },
+      { tenant: "local", by: "agentry.synthesize" });
+    if (meta.ok && meta.output && meta.output.result) {
+      try {
+        const parsed = JSON.parse(String(meta.output.result.stdout || "{}").trim());
+        if (parsed.description) facts.readme = String(parsed.description).slice(0, MAX_README_CHARS);
+        if (parsed.summary) facts.summary = String(parsed.summary).slice(0, 500);
+        if (parsed.version) facts.version = String(parsed.version);
+      } catch {}
+    }
+  } catch {}
+
+  try {
+    const inspectScript = [
+      "import importlib, json, os",
+      "names = ['" + moduleGuess + "', '" + pkgName + "']",
+      "out = {'tried': names}",
+      "for name in names:",
+      "    try:",
+      "        m = importlib.import_module(name)",
+      "        f = getattr(m, '__file__', None)",
+      "        out['module'] = name",
+      "        out['path'] = f",
+      "        out['dir'] = os.path.dirname(f) if f else None",
+      "        out['doc'] = (getattr(m, '__doc__', '') or '')[:2000]",
+      "        break",
+      "    except Exception as e:",
+      "        out.setdefault('errors', []).append(name + ': ' + str(e))",
+      "print(json.dumps(out))",
+    ].join("\n");
+    const r = await invoke("agentry.os", { action: "python.run", session, code: inspectScript, timeout_ms: 20000 },
+      { tenant: "local", by: "agentry.synthesize" });
+    if (r.ok && r.output && r.output.result) {
+      try {
+        const parsed = JSON.parse(String(r.output.result.stdout || "{}").trim());
+        if (parsed.module) facts.pypi_module_name = String(parsed.module);
+        if (parsed.path) {
+          const read = await invoke("agentry.os", { action: "fs.read", session, path: parsed.path },
+            { tenant: "local", by: "agentry.synthesize" });
+          if (read.ok) {
+            const c = read.output?.result?.content ?? read.output?.content ?? "";
+            facts.init_content = String(c).slice(0, 6000);
+          }
+        }
+        if (parsed.dir) {
+          const ls = await invoke("agentry.os", { action: "fs.list", session, path: parsed.dir },
+            { tenant: "local", by: "agentry.synthesize" });
+          if (ls.ok) {
+            const entries = ls.output?.result?.entries || ls.output?.entries || [];
+            facts.top_level = Array.isArray(entries)
+              ? entries.slice(0, 40).map(x => typeof x === "string" ? x : x.name)
+              : [];
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
+  return facts;
+}
+
 async function readAgentSkill(candidate, deps) {
   const facts = {
     source_kind: "skill",
@@ -437,6 +544,56 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   }, null, 2);
 
   let repoFacts;
+  if (facts.source_kind === "pypi" && facts.pypi_package_name) {
+    lines.push("PYPI CANDIDATE — this is a Python package, not a Node repo.");
+    lines.push("");
+    lines.push("- The package is installed in the synth session via pip. It will ALSO");
+    lines.push("  be installed in the trial session via requires.pip.");
+    lines.push("- Your synthesized capability MUST declare:");
+    lines.push("    \"kernel_language\": \"python\"");
+    lines.push("    \"requires\": { \"npm\": [], \"pip\": [\"" + facts.pypi_package_name + "\"], \"post_install\": null, \"capability\": [] }");
+    lines.push("");
+    lines.push("PYTHON RULES (READ TWICE):");
+    lines.push("- The kernel runs PYTHON 3.11. NOT JavaScript. No const/let/await import/console.log/process.env.");
+    lines.push("- Load the package at the top of the step that needs it:");
+    lines.push("    import " + facts.pypi_module_name);
+    lines.push("  or for a specific function:");
+    lines.push("    from " + facts.pypi_module_name + " import <func>");
+    lines.push("- Read env vars with: os.environ.get('NAME', '')  (import os first)");
+    lines.push("- Emit the final JSON by printing exactly one object to stdout:");
+    lines.push("    import json");
+    lines.push("    print(json.dumps({ \"<output_key>\": <value> }))");
+    lines.push("  Nothing else should print to stdout in the emit step.");
+    lines.push("- Write a file: with open(path, 'wb') as f: f.write(bytes_)");
+    lines.push("- Read a file:  with open(path, 'rb') as f: data = f.read()");
+    lines.push("- State between steps: Python variables DO persist across steps within");
+    lines.push("  the same script (no blocks). Assign x = ... in step 1, use x in step 2.");
+    lines.push("- Do NOT use globalThis, that is JavaScript.");
+    lines.push("");
+    if (facts.summary) lines.push("PyPI summary: " + facts.summary);
+    if (facts.version) lines.push("Version: " + facts.version);
+    if (facts.readme) {
+      lines.push("");
+      lines.push("PyPI description (first " + Math.min(facts.readme.length, 8000) + " chars):");
+      lines.push("<<<");
+      lines.push(facts.readme.slice(0, 8000));
+      lines.push(">>>");
+    }
+    if (facts.init_content) {
+      lines.push("");
+      lines.push("Module __init__.py (first 6000 chars — shows available functions):");
+      lines.push("<<<");
+      lines.push(facts.init_content);
+      lines.push(">>>");
+    }
+    if (facts.top_level && facts.top_level.length) {
+      lines.push("");
+      lines.push("Package files:");
+      lines.push(facts.top_level.join("\n"));
+    }
+    lines.push("");
+  }
+
   if (facts.source_kind === "skill") {
     repoFacts = "AGENT SKILL: " + (facts.skill_name || "(unknown)") + "\n"
       + "Source URL: " + (facts.skill_source_url || "(unknown)") + "\n"
@@ -686,14 +843,36 @@ function compilePlanToScript(plan) {
     parts.push("  // -- step " + step.step + ": " + step.verb + " --");
     if (step.what) parts.push("  // what: " + String(step.what).replace(/\n/g, "\n  // "));
     if (step.fails_if) parts.push("  // fails_if: " + String(step.fails_if).replace(/\n/g, "\n  // "));
-    parts.push("  // BEGIN " + step.verb);
     const rawCode = String(step.code || "").trim();
     const code = decodeIfDoubleEscaped(rawCode);
-    if (code) parts.push(indentBlock(code, "  "));
-    parts.push("  // END " + step.verb);
+    parts.push("  { // scope for step " + step.step);
+    parts.push("    // BEGIN " + step.verb);
+    if (code) parts.push(indentBlock(code, "    "));
+    parts.push("    // END " + step.verb);
+    parts.push("  }");
   }
   parts.push("");
   parts.push("})().catch(e => { console.error(String((e && e.stack) || e)); process.exit(1); });");
+  return parts.join("\n");
+}
+
+// v0.24.1 — Python plan compiler. Prior versions always used
+// compilePlanToScript, which wraps in (async () => { ... }) — valid JS,
+// invalid Python. Trial failed with '(async () => {' SyntaxError.
+function compilePlanToPython(plan) {
+  const parts = [];
+  parts.push("# generated by agentry.synthesize — do not edit");
+  parts.push("import sys");
+  parts.push("");
+  for (const step of plan) {
+    parts.push("# -- step " + step.step + ": " + step.verb + " --");
+    if (step.what) parts.push("# what: " + String(step.what).replace(/\n/g, "\n# "));
+    if (step.fails_if) parts.push("# fails_if: " + String(step.fails_if).replace(/\n/g, "\n# "));
+    const rawCode = String(step.code || "").trim();
+    const code = decodeIfDoubleEscaped(rawCode);
+    if (code) parts.push(code);
+    parts.push("");
+  }
   return parts.join("\n");
 }
 
@@ -718,7 +897,9 @@ function renderHandler(spec) {
   out.push("const OUTPUT_MAP = " + JSON.stringify(glue.output_map || {}, null, 2) + ";");
   out.push("const RESULT_PARSE = " + JSON.stringify(glue.result_parse || "stdout_text") + ";");
   out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
-  const compiled = compilePlanToScript(spec.plan || []);
+  const compiled = lang === "python"
+    ? compilePlanToPython(spec.plan || [])
+    : compilePlanToScript(spec.plan || []);
   const cleanScript = decodeIfDoubleEscaped(compiled);
   out.push("const KERNEL_SCRIPT = " + JSON.stringify(cleanScript) + ";");
   out.push("");
@@ -741,7 +922,7 @@ function renderHandler(spec) {
   out.push("  if (Object.keys(FIXTURES).length > 0) {");
   out.push("    const fs = await import(\"node:fs\"); const path = await import(\"node:path\");");
   out.push("    for (const [fp, content] of Object.entries(FIXTURES)) {");
-  out.push("      try { fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, String(content)); } catch (e) {}");
+  out.push("      try { fs.mkdirSync(path.dirname(fp), { recursive: true }); const _s = String(content); if (/^iVBORw0KGgo|^JVBERi0/.test(_s)) { fs.writeFileSync(fp, Buffer.from(_s, \"base64\")); } else { fs.writeFileSync(fp, _s); } } catch (e) {}");
   out.push("    }");
   out.push("  }");
   out.push("  const probe = await run(" + JSON.stringify(spec.accept_spec?.input || {}) + ", deps, { session });");
@@ -1030,6 +1211,38 @@ function renderSkillHandler(spec) {
   return out.join("\n");
 }
 
+// v0.24.0 — auto-generate _fixtures for accept_spec inputs that are
+// file paths. Prior versions left them empty, so trial ran with a
+// missing/wrong file and failed with cryptic kernel errors.
+// Content is base64 so renderHandler can always writeFileSync via
+// Buffer.from(b64, "base64").
+const TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+const TINY_PDF_B64 = "JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0NvdW50IDAvS2lkc1tdPj4KZW5kb2JqCnhyZWYKMCAzCjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDUyIDAwMDAwIG4gCnRyYWlsZXIKPDwvU2l6ZSAzL1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMTAzCiUlRU9GCg==";
+
+function autoFixtures(spec) {
+  if (spec.type === "skill_wrapper") return;
+  const accepts = (spec.capability && spec.capability.accepts) || {};
+  const acceptInput = (spec.accept_spec && spec.accept_spec.input) || {};
+  const existing = (spec.accept_spec && spec.accept_spec._fixtures) || {};
+  const aug = { ...existing };
+  let added = 0;
+  for (const key of Object.keys(accepts)) {
+    const val = acceptInput[key];
+    if (typeof val !== "string" || !val) continue;
+    if (!/path|_file|_pdf|_png|_jpg|_md|_txt$/i.test(key) && !/\.(png|pdf|jpg|md|txt)$/i.test(val)) continue;
+    if (aug[val]) continue;
+    const ext = String(val).split(".").pop().toLowerCase();
+    if (ext === "png") aug[val] = TINY_PNG_B64;
+    else if (ext === "pdf") aug[val] = TINY_PDF_B64;
+    else if (ext === "jpg" || ext === "jpeg") aug[val] = TINY_PNG_B64;  // close enough for a probe
+    else aug[val] = Buffer.from("# fixture for " + val + "\n\nhello\n").toString("base64");
+    added++;
+  }
+  if (added > 0) {
+    spec.accept_spec = { ...(spec.accept_spec || {}), _fixtures: aug };
+  }
+}
+
 function renderSeed(spec, handlerPath) {
   const { capability } = spec;
   return {
@@ -1251,6 +1464,23 @@ export default async function agentrySynthesize(input, ctx) {
       });
     } catch (e) {
       events.emit("synthesize.npm_read_failed", { proposal_id, candidate_id, error: e.message });
+    }
+  } else if (candidate.kind === "python_package" || candidate.source === "pypi" || String(candidate.id || "").startsWith("pypi:")) {
+    try {
+      facts = await readPyPiPackage(candidate, ctx);
+      events.emit("synthesize.pypi_read", {
+        proposal_id, candidate_id,
+        installed: facts.installed,
+        package_name: facts.pypi_package_name,
+        module_name: facts.pypi_module_name,
+        version: facts.version,
+        readme_len: facts.readme ? facts.readme.length : 0,
+        init_len: facts.init_content ? facts.init_content.length : 0,
+        top_level_count: facts.top_level.length,
+        error: facts.error,
+      });
+    } catch (e) {
+      events.emit("synthesize.pypi_read_failed", { proposal_id, candidate_id, error: e.message });
     }
   } else if (candidate.kind === "repo" && candidate.url) {
     try {
@@ -1515,8 +1745,40 @@ export default async function agentrySynthesize(input, ctx) {
   const handlerPath = join(HANDLERS_DIR, spec.capability.id + ".mjs");
   const seedPath = join(SEEDS_DIR, spec.capability.id + ".json");
 
+  autoFixtures(spec);
   const renderedHandler = isSkillWrapper ? renderSkillHandler(spec) : renderHandler(spec);
   writeFileSync(handlerPath, renderedHandler);
+
+  // v0.24.0 — pre-flight validation. Catch syntax errors before
+  // declaring synthesize_completed. Prior versions let broken handlers
+  // reach trial, where the error surfaced 60s later as "kernel exited 1".
+  {
+    const lang = spec.kernel_language === "python" ? "python" : "node";
+    const _src = String(renderedHandler);
+    // Language sanity: if node, reject obvious python; if python, reject obvious node
+    const _isSkill = spec.type === "skill_wrapper";
+    if (!_isSkill) {
+      if (lang === "node" && /^\s*def\s+\w+\s*\(|^\s*from\s+\w+\s+import\s+|^\s*import\s+\w+\s*$/m.test(_src)) {
+        events.emit("synthesize.language_mismatch", { proposal_id, candidate_id, capability_id: spec.capability.id, declared: "node", looks_like: "python" });
+        throw new Error("agentry.synthesize: kernel_language=node but code contains Python syntax. Rejecting.");
+      }
+      if (lang === "python" && /await\s+import|(?:const|let|var)\s+\w+\s*=|\(async\s*\(\)\s*=>/.test(_src)) {
+        events.emit("synthesize.language_mismatch", { proposal_id, candidate_id, capability_id: spec.capability.id, declared: "python", looks_like: "node" });
+        throw new Error("agentry.synthesize: kernel_language=python but code contains JS syntax. Rejecting.");
+      }
+    }
+    // Syntax check the rendered handler
+    const { spawnSync } = await import("node:child_process");
+    const _check = spawnSync("node", ["--check", handlerPath], { encoding: "utf8", timeout: 15000 });
+    if (_check.status !== 0) {
+      events.emit("synthesize.syntax_error", {
+        proposal_id, candidate_id, capability_id: spec.capability.id,
+        stderr: String(_check.stderr || "").slice(0, 500),
+      });
+      throw new Error("agentry.synthesize: rendered handler failed node --check: " + String(_check.stderr || "").slice(0, 300));
+    }
+  }
+
   writeFileSync(seedPath, JSON.stringify(renderSeed(spec, handlerPath), null, 2));
 
   events.emit("synthesize.completed", {
