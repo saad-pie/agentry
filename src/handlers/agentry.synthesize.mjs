@@ -544,56 +544,6 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   }, null, 2);
 
   let repoFacts;
-  if (facts.source_kind === "pypi" && facts.pypi_package_name) {
-    lines.push("PYPI CANDIDATE — this is a Python package, not a Node repo.");
-    lines.push("");
-    lines.push("- The package is installed in the synth session via pip. It will ALSO");
-    lines.push("  be installed in the trial session via requires.pip.");
-    lines.push("- Your synthesized capability MUST declare:");
-    lines.push("    \"kernel_language\": \"python\"");
-    lines.push("    \"requires\": { \"npm\": [], \"pip\": [\"" + facts.pypi_package_name + "\"], \"post_install\": null, \"capability\": [] }");
-    lines.push("");
-    lines.push("PYTHON RULES (READ TWICE):");
-    lines.push("- The kernel runs PYTHON 3.11. NOT JavaScript. No const/let/await import/console.log/process.env.");
-    lines.push("- Load the package at the top of the step that needs it:");
-    lines.push("    import " + facts.pypi_module_name);
-    lines.push("  or for a specific function:");
-    lines.push("    from " + facts.pypi_module_name + " import <func>");
-    lines.push("- Read env vars with: os.environ.get('NAME', '')  (import os first)");
-    lines.push("- Emit the final JSON by printing exactly one object to stdout:");
-    lines.push("    import json");
-    lines.push("    print(json.dumps({ \"<output_key>\": <value> }))");
-    lines.push("  Nothing else should print to stdout in the emit step.");
-    lines.push("- Write a file: with open(path, 'wb') as f: f.write(bytes_)");
-    lines.push("- Read a file:  with open(path, 'rb') as f: data = f.read()");
-    lines.push("- State between steps: Python variables DO persist across steps within");
-    lines.push("  the same script (no blocks). Assign x = ... in step 1, use x in step 2.");
-    lines.push("- Do NOT use globalThis, that is JavaScript.");
-    lines.push("");
-    if (facts.summary) lines.push("PyPI summary: " + facts.summary);
-    if (facts.version) lines.push("Version: " + facts.version);
-    if (facts.readme) {
-      lines.push("");
-      lines.push("PyPI description (first " + Math.min(facts.readme.length, 8000) + " chars):");
-      lines.push("<<<");
-      lines.push(facts.readme.slice(0, 8000));
-      lines.push(">>>");
-    }
-    if (facts.init_content) {
-      lines.push("");
-      lines.push("Module __init__.py (first 6000 chars — shows available functions):");
-      lines.push("<<<");
-      lines.push(facts.init_content);
-      lines.push(">>>");
-    }
-    if (facts.top_level && facts.top_level.length) {
-      lines.push("");
-      lines.push("Package files:");
-      lines.push(facts.top_level.join("\n"));
-    }
-    lines.push("");
-  }
-
   if (facts.source_kind === "skill") {
     repoFacts = "AGENT SKILL: " + (facts.skill_name || "(unknown)") + "\n"
       + "Source URL: " + (facts.skill_source_url || "(unknown)") + "\n"
@@ -768,6 +718,56 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("  static import, REWRITE it to use dynamic import as shown above.");
     lines.push("");
   }
+  if (facts.source_kind === "pypi" && facts.pypi_package_name) {
+    lines.push("PYPI CANDIDATE — this is a Python package, not a Node repo.");
+    lines.push("");
+    lines.push("- The package is installed in the synth session via pip. It will ALSO");
+    lines.push("  be installed in the trial session via requires.pip.");
+    lines.push("- Your synthesized capability MUST declare:");
+    lines.push("    \"kernel_language\": \"python\"");
+    lines.push("    \"requires\": { \"npm\": [], \"pip\": [\"" + facts.pypi_package_name + "\"], \"post_install\": null, \"capability\": [] }");
+    lines.push("");
+    lines.push("PYTHON RULES (READ TWICE):");
+    lines.push("- The kernel runs PYTHON 3.11. NOT JavaScript. No const/let/await import/console.log/process.env.");
+    lines.push("- Load the package at the top of the step that needs it:");
+    lines.push("    import " + facts.pypi_module_name);
+    lines.push("  or for a specific function:");
+    lines.push("    from " + facts.pypi_module_name + " import <func>");
+    lines.push("- Read env vars with: os.environ.get('NAME', '')  (import os first)");
+    lines.push("- Emit the final JSON by printing exactly one object to stdout:");
+    lines.push("    import json");
+    lines.push("    print(json.dumps({ \"<output_key>\": <value> }))");
+    lines.push("  Nothing else should print to stdout in the emit step.");
+    lines.push("- Write a file: with open(path, 'wb') as f: f.write(bytes_)");
+    lines.push("- Read a file:  with open(path, 'rb') as f: data = f.read()");
+    lines.push("- State between steps: Python variables DO persist across steps within");
+    lines.push("  the same script (no blocks). Assign x = ... in step 1, use x in step 2.");
+    lines.push("- Do NOT use globalThis, that is JavaScript.");
+    lines.push("");
+    if (facts.summary) lines.push("PyPI summary: " + facts.summary);
+    if (facts.version) lines.push("Version: " + facts.version);
+    if (facts.readme) {
+      lines.push("");
+      lines.push("PyPI description (first " + Math.min(facts.readme.length, 8000) + " chars):");
+      lines.push("<<<");
+      lines.push(facts.readme.slice(0, 8000));
+      lines.push(">>>");
+    }
+    if (facts.init_content) {
+      lines.push("");
+      lines.push("Module __init__.py (first 6000 chars — shows available functions):");
+      lines.push("<<<");
+      lines.push(facts.init_content);
+      lines.push(">>>");
+    }
+    if (facts.top_level && facts.top_level.length) {
+      lines.push("");
+      lines.push("Package files:");
+      lines.push(facts.top_level.join("\n"));
+    }
+    lines.push("");
+  }
+
   if (facts.source_kind === "skill") {
     lines.push("SKILL CANDIDATE — this is an agent SKILL.md, not code. It is a set of");
     lines.push("instructions that go into an LLM system prompt.");
