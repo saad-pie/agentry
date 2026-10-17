@@ -59,24 +59,37 @@ function applyMutations(v1Plan, mutations) {
   const log = [];
   for (const m of mutations) {
     if (!m || typeof m !== "object" || !m.type) { log.push({ skipped: "no_type", m }); continue; }
+    // v0.28.2 — accept key aliases. LLMs use step_number/step_id/target
+    // instead of step_to_replace; after/position instead of after_step.
+    const _targetNum = (obj) => {
+      const v = obj.step_to_replace ?? obj.step_number ?? obj.step_id ?? obj.target ?? obj.step_num ?? null;
+      return v == null ? null : Number(v);
+    };
+    const _afterNum = (obj) => {
+      const v = obj.after_step ?? obj.after ?? obj.position ?? obj.insert_after ?? null;
+      return v == null ? null : Number(v);
+    };
     if (m.type === "insert_after") {
-      const afterIdx = plan.findIndex(s => Number(s.step) === Number(m.after_step));
-      if (afterIdx < 0) { log.push({ skipped: "after_step_not_found", step: m.after_step, mutation: m }); continue; }
+      const afterN = _afterNum(m);
+      const afterIdx = afterN == null ? -1 : plan.findIndex(s => Number(s.step) === afterN);
+      if (afterIdx < 0) { log.push({ skipped: "after_step_not_found", step: afterN, mutation: m }); continue; }
       plan.splice(afterIdx + 1, 0, { ...(m.step || {}), step: 0 });
-      log.push({ applied: "insert_after", after: m.after_step });
+      log.push({ applied: "insert_after", after: afterN });
     } else if (m.type === "append") {
       plan.push({ ...(m.step || {}), step: 0 });
       log.push({ applied: "append" });
     } else if (m.type === "replace_step") {
-      const idx = plan.findIndex(s => Number(s.step) === Number(m.step_to_replace));
-      if (idx < 0) { log.push({ skipped: "replace_target_not_found", step: m.step_to_replace, mutation: m }); continue; }
+      const target = _targetNum(m);
+      const idx = target == null ? -1 : plan.findIndex(s => Number(s.step) === target);
+      if (idx < 0) { log.push({ skipped: "replace_target_not_found", step: target, mutation: m }); continue; }
       const prev = plan[idx];
       plan[idx] = { ...(m.step || {}), verb: (m.step && m.step.verb) || prev.verb, step: prev.step };
-      log.push({ applied: "replace_step", step: m.step_to_replace });
+      log.push({ applied: "replace_step", step: target });
     } else if (m.type === "remove_step") {
-      const idx = plan.findIndex(s => Number(s.step) === Number(m.step_to_remove));
-      if (idx >= 0) { plan.splice(idx, 1); log.push({ applied: "remove_step", step: m.step_to_remove }); }
-      else { log.push({ skipped: "remove_target_not_found", step: m.step_to_remove, mutation: m }); }
+      const target = _targetNum(m);
+      const idx = target == null ? -1 : plan.findIndex(s => Number(s.step) === target);
+      if (idx >= 0) { plan.splice(idx, 1); log.push({ applied: "remove_step", step: target }); }
+      else { log.push({ skipped: "remove_target_not_found", step: target, mutation: m }); }
     } else {
       log.push({ skipped: "unknown_type", type: m.type });
     }
@@ -159,14 +172,18 @@ function autoDeriveEnvMap(spec, v1Cap) {
 }
 
 function compileJS(plan) {
+  // v0.28.2 — block-scope each step. Prevents `const X` collision when two
+  // steps happen to declare the same name. State passes via globalThis, so
+  // block scope is safe: verified in v0.24.0's synthesize compiler.
   const parts = [];
   parts.push("(async () => {");
   for (const step of plan) {
     parts.push("");
-    parts.push("  // -- step " + step.step + ": " + step.verb + " --");
+    parts.push("  { // step " + step.step + ": " + step.verb);
     if (step.what) parts.push("  // " + String(step.what).replace(/\n/g, "\n  // "));
     const code = String(step.code || "").trim();
-    if (code) for (const line of code.split("\n")) parts.push("  " + line);
+    if (code) for (const line of code.split("\n")) parts.push("    " + line);
+    parts.push("  }");
   }
   parts.push("");
   parts.push("})().catch(e => { console.error(String((e && e.stack) || e)); process.exit(1); });");
