@@ -92,7 +92,9 @@ const PREFIX_RANK = {
 };
 
 function rankCandidates(candidates) {
-  const scored = candidates.map((c, idx) => {
+  // v0.24.3 — skip type-only packages before scoring.
+  const filtered = candidates.filter(c => !isTypeOnlyPackage(c && c.id));
+  const scored = filtered.map((c, idx) => {
     const id = String(c.id || "");
     let rank = 10;
     for (const [pre, r] of Object.entries(PREFIX_RANK)) {
@@ -110,6 +112,19 @@ function rankCandidates(candidates) {
 }
 
 const MAX_LLM_CANDIDATES = 15;
+
+// v0.24.3 — filter type-only packages (@types/*, types-*) before ranking.
+// They have no runtime code, only .d.ts files, so synthesis produces a
+// handler that "passes" trial against an empty implementation. This bit
+// us when types_react-native-pdf-lib got adopted as a capability.
+function isTypeOnlyPackage(id) {
+  if (!id) return false;
+  const s = String(id);
+  if (s.includes("@types/")) return true;
+  if (s.startsWith("types-") || s.startsWith("types:") || s.startsWith("types_")) return true;
+  if (/\/types\//i.test(s)) return true;
+  return false;
+}
 
 function userPrompt(gap, candidates) {
   const trimmed = candidates.map(c => ({
