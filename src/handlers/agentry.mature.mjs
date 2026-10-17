@@ -67,7 +67,7 @@ function buildMaturationPrompt({ cap, v1HandlerSource, v1Seed, v1Quality, rubric
   lines.push("=== V1 QUALITY SCORE (baseline) ===");
   lines.push(JSON.stringify(v1Quality, null, 2));
   lines.push("");
-  lines.push("=== V1 HANDLER SOURCE (for reference, do not copy) ===");
+  lines.push("=== V1 HANDLER SOURCE (this is the WORKING version. For a narrow rubric, PRESERVE all existing logic verbatim. Only add or modify the specific lines the rubric requires. Do NOT re-derive image loading or state that already works in V1.");
   lines.push(v1HandlerSource.slice(0, 8000));
   lines.push("");
   lines.push("=== RUBRIC — what v2 must improve ===");
@@ -80,7 +80,11 @@ function buildMaturationPrompt({ cap, v1HandlerSource, v1Seed, v1Quality, rubric
   lines.push("- Plan MUST have the same number of steps as v1.");
   lines.push("- Each step.verb MUST match v1's corresponding step verb.");
   lines.push("- Emit step produces the same output keys as v1.");
-  lines.push("- DO NOT just copy v1's code — improve it per rubric.");
+  lines.push("- For a NARROW rubric (one visual/structure change), preserve v1 plan");
+  lines.push("  steps verbatim and modify only what is needed. Copy the image-loading");
+  lines.push("  and state-management lines exactly as v1 has them - those are tested.");
+  lines.push("- For a BROAD rubric (layout redesign), you may restructure but must");
+  lines.push("  preserve every v1 behavior and add the rubric requirement on top.");
   lines.push("- kernel_language=\"node\" runs plain JS (no JSX, no types).");
   lines.push("  kernel_language=\"python\" runs plain Python 3.11.");
   lines.push("");
