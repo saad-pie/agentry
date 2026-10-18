@@ -1951,13 +1951,30 @@ export default async function agentrySynthesize(input, ctx) {
   // path collisions and silent overwrites. Derive from candidate.id
   // so every candidate writes a distinct handler file.
   {
+    // v0.31.4 — source-aware namespacing. Prior version stripped the
+    // source prefix, so `crates:topdf` and `npm:topdf` both became
+    // `topdf` — same graph node, and a trial failure for one retired
+    // the other. Now the source prefix is preserved:
+    //   crates:topdf   -> crates_topdf
+    //   npm:topdf      -> npm_topdf
+    //   pypi:img2pdf   -> pypi_img2pdf
+    //   pdf-lib-table  -> pdf-lib-table  (no source, unchanged)
     const _candId = String(candidate.id || "");
-    const _norm = _candId.replace(/^[a-z]+:/i, "").replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
+    const _srcMatch = _candId.match(/^([a-z][a-z0-9_]*):(.*)$/i);
+    let _norm;
+    if (_srcMatch) {
+      const _src = _srcMatch[1].toLowerCase().replace(/[^a-z0-9]/g, "_");
+      const _rest = _srcMatch[2].replace(/^[^a-zA-Z0-9]+/, "").replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+      _norm = (_rest ? (_src + "_" + _rest) : _src).slice(0, 80);
+    } else {
+      _norm = _candId.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
+    }
     if (_norm && spec.capability.id !== _norm) {
       events.emit("synthesize.capability_id_namespaced", {
         original: spec.capability.id,
         normalized: _norm,
         candidate_id: candidate.id,
+        source_preserved: Boolean(_srcMatch),
       });
       spec.capability.id = _norm;
     }
