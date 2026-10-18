@@ -864,6 +864,28 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("- Crates often have hyphens in names (`my-crate`) but underscores in");
     lines.push("  code (`my_crate::...`). Convert accordingly.");
     lines.push("");
+    lines.push("CRITICAL — RUST IS NOT JAVASCRIPT:");
+    lines.push("- DO NOT write `globalThis.X` or `globalThis.X = ...` anywhere.");
+    lines.push("  Rust has NO globalThis — it is JavaScript. Generated Rust with");
+    lines.push("  globalThis fails compilation: 'cannot find value globalThis'.");
+    lines.push("- DO NOT use `console.log`, `process.env`, `const`, `await`, `require`.");
+    lines.push("- State flows via LOCAL VARIABLES inside ONE fn main(). The compiler");
+    lines.push("  concatenates your 3 steps (prepare/execute/emit) into one fn main().");
+    lines.push("  A `let x = ...;` declared in prepare is visible in execute and emit.");
+    lines.push("  NO cross-step bus is needed. NO globalThis.");
+    lines.push("- Correct example:");
+    lines.push("    fn main() {");
+    lines.push("        let input_path = std::env::args().nth(1).unwrap_or_else(|| \"/tmp/in\".to_string());");
+    lines.push("        // input_path is now visible below (same fn scope)");
+    lines.push("        let result = do_thing(input_path);");
+    lines.push("        // result is now visible below");
+    lines.push("        println!(\"{{\\\"pdf_path\\\":\\\"{}\\\"}}\", result);");
+    lines.push("    }");
+    lines.push("- Incorrect (WILL FAIL COMPILATION):");
+    lines.push("    fn main() {");
+    lines.push("        globalThis.input_path = ...;   // NO SUCH THING IN RUST");
+    lines.push("    }");
+    lines.push("");
     if (facts.version) lines.push("Latest version: " + facts.version);
     if (facts.description) lines.push("Description: " + facts.description);
     if (facts.readme) {
@@ -1571,7 +1593,34 @@ function validatePlan(plan, shape, capability_id) {
 function validateSpecConsistency(spec, capability_id) {
   // v0.31.0 — Rust/Go use single-step full-program plans. The standard
   // env_map/emit-step checks don't apply because the program IS the emit.
+  // v0.31.2 — reject globalThis explicitly. LLM copies it from the shared
+  // prompt's JS guidance; Rust/Go have no globalThis. Fail at synthesis
+  // (~2s) instead of trial (~30s waiting on rust-script compile).
   if (spec.kernel_language === "rust" || spec.kernel_language === "go") {
+    const allCode = (Array.isArray(spec.plan) ? spec.plan : [])
+      .map(s => String(s.code || ""))
+      .join("\n");
+    if (/globalThis\./.test(allCode)) {
+      return {
+        ok: false,
+        check: "rust_go_uses_globalThis",
+        detail: "Generated " + spec.kernel_language + " code contains 'globalThis.X' — that is JavaScript. Use local variables inside ONE fn main (or func main). All state flows through shared function scope.",
+      };
+    }
+    if (spec.kernel_language === "rust" && /console\.log|process\.env|await\s+import/.test(allCode)) {
+      return {
+        ok: false,
+        check: "rust_uses_js_apis",
+        detail: "Generated Rust code contains JS-only calls (console.log / process.env / await import). Use println! / std::env::var / use statements.",
+      };
+    }
+    if (spec.kernel_language === "go" && /console\.log|process\.env|await\s+import/.test(allCode)) {
+      return {
+        ok: false,
+        check: "go_uses_js_apis",
+        detail: "Generated Go code contains JS-only calls. Use fmt.Println / os.Getenv / import.",
+      };
+    }
     return { ok: true };
   }
   const plan = Array.isArray(spec.plan) ? spec.plan : [];
