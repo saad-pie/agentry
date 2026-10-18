@@ -874,15 +874,33 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("  A `let x = ...;` declared in prepare is visible in execute and emit.");
     lines.push("  NO cross-step bus is needed. NO globalThis.");
     lines.push("");
-    lines.push("CRITICAL — CRATES ARE LIBRARIES, NOT CLI BINARIES:");
-    lines.push("- requires.rust_crates lists LIBRARY crates from crates.io.");
-    lines.push("- DO NOT use Command::new(\"<crate>\"). There is no system binary.");
-    lines.push("  Command::new(\"topdf\") panics: Os { code: 2, NotFound }.");
-    lines.push("- CORRECT: import the crate and call its functions:");
-    lines.push("    use " + (facts.crate_name || "").replace(/-/g, "_") + ";");
-    lines.push("    fn main() {");
-    lines.push("        " + (facts.crate_name || "").replace(/-/g, "_") + "::<function>(...);");
-    lines.push("    }");
+    const _v = facts.version || "*";
+    lines.push("CRITICAL — HOW TO USE THIS CRATE:");
+    lines.push("- READ THE README ABOVE. It tells you what kind of crate this is.");
+    lines.push("- LIBRARY crate (README shows `use foo;` examples or Cargo.toml deps):");
+    lines.push("    requires: { \"rust_crates\": [\"" + facts.crate_name + "@" + _v + "\"] }");
+    lines.push("    code:     use " + (facts.crate_name || "").replace(/-/g, "_") + "; fn main() { " + (facts.crate_name || "").replace(/-/g, "_") + "::<fn>(...) }");
+    lines.push("- CLI BINARY crate (README says `cargo install foo` or shows shell usage):");
+    lines.push("    requires: { \"rust_crates\": [], \"post_install\": \"cargo install --locked " + facts.crate_name + "\" }");
+    lines.push("    code:     Command::new(\"" + facts.crate_name + "\")  // binary WILL exist at trial");
+    lines.push("- Mixed (both lib + bin): prefer CLI. cargo install also installs the lib.");
+    lines.push("- If README unclear: CLI. `src/main.rs` = bin, `src/lib.rs` = lib.");
+    lines.push("");
+    lines.push("POST_INSTALL IS THE UNIVERSAL INSTALLER (any tool, any ecosystem):");
+    lines.push("- Any shell command that installs a tool goes in requires.post_install.");
+    lines.push("- The pipeline runs it once per session before your code. Binary WILL exist.");
+    lines.push("- Examples:");
+    lines.push("    apt-get:  \"apt-get update && apt-get install -y ffmpeg\"");
+    lines.push("    cargo:    \"cargo install --locked topdf\"");
+    lines.push("    go:       \"GOBIN=/usr/local/bin go install github.com/x/y@latest\"");
+    lines.push("    npm -g:   \"npm install -g some-cli\"");
+    lines.push("    pipx:     \"pipx install yt-dlp\"");
+    lines.push("    shell:    \"curl -LsSf https://example.com/install.sh | sh\"");
+    lines.push("    build:    \"git clone https://github.com/x/y /tmp/y && cd /tmp/y && make && cp y /usr/local/bin/\"");
+    lines.push("    download: \"curl -L https://github.com/x/y/releases/latest/download/y-linux -o /usr/local/bin/y && chmod +x /usr/local/bin/y\"");
+    lines.push("- These all work. The pipeline runs them under sh. They must exit 0.");
+    lines.push("- NEVER write Command::new(\"<tool>\") WITHOUT that tool being installed");
+    lines.push("  by requires.post_install, requires.npm, requires.pip, or already on PATH.");
     lines.push("");
     lines.push("CRITICAL — READ ALL INPUTS FROM ENV:");
     lines.push("- accepts keys map to env vars: image_path -> IMAGE_PATH.");
@@ -1229,7 +1247,8 @@ function renderHandler(spec) {
   const cleanScript = decodeIfDoubleEscaped(compiled);
   out.push("const KERNEL_SCRIPT = " + JSON.stringify(cleanScript) + ";");
   out.push("");
-  out.push("const DEFAULT_TIMEOUT_MS = 90000;");
+  const _invokeMs = Math.max(10000, Math.min(1800000, Number(spec.invoke_timeout_ms) || 90000));
+  out.push("const DEFAULT_TIMEOUT_MS = " + _invokeMs + ";");
   out.push("");
   out.push("export const capability = {");
   out.push("  id: CAP_ID,");
@@ -1581,6 +1600,7 @@ function renderSeed(spec, handlerPath) {
     produces: capability.produces || {},
     requires: capability.requires || {},
     plan: spec.plan || null,
+    invoke_timeout_ms: Number(spec.invoke_timeout_ms) || 90000,
     source: "synthesized:agentry.synthesize",
     notes: "Auto-generated. Regenerate rather than edit. Plan is auditable.",
   };
@@ -1681,20 +1701,42 @@ function validateSpecConsistency(spec, capability_id) {
         detail: "Generated Rust code contains JS-only calls (console.log / process.env / await import). Use println! / std::env::var / use statements.",
       };
     }
-    if (spec.kernel_language === "rust") {
-      const crates = (spec.capability && spec.capability.requires
-        && Array.isArray(spec.capability.requires.rust_crates))
-        ? spec.capability.requires.rust_crates : [];
-      for (const c of crates) {
-        const nm = String(c).split("@")[0].trim();
-        if (!nm) continue;
-        const esc = nm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const pat = new RegExp("Command::new\\s*\\(\\s*[\"\']" + esc + "[\"\']");
-        if (pat.test(allCode)) {
+    // v0.31.7 — Command::new(<tool>) is legal if post_install or
+    // requires.npm/pip installs it, or if it's a known system tool.
+    // Simple token scan; no regex-inside-regex.
+    if (spec.kernel_language === "rust" || spec.kernel_language === "go" || spec.kernel_language === "java" || spec.kernel_language === "dotnet") {
+      const req = (spec.capability && spec.capability.requires) || {};
+      const postInstall = String(req.post_install || "");
+      const npmPkgs = Array.isArray(req.npm) ? req.npm.join(" ") : "";
+      const pipPkgs = Array.isArray(req.pip) ? req.pip.join(" ") : "";
+      const installedBlob = (postInstall + " " + npmPkgs + " " + pipPkgs).toLowerCase();
+      const SYSTEM = new Set(["sh", "bash", "ls", "cat", "echo", "which", "python3", "python", "node", "git", "curl", "cp", "mv", "rm", "mkdir", "true", "false", "env"]);
+
+      // scan Command::new("X") or exec("X") by splitting, no regex groups
+      const marker = "Command::new(";
+      let idx = 0;
+      while ((idx = allCode.indexOf(marker, idx)) !== -1) {
+        idx += marker.length;
+        // skip whitespace
+        while (idx < allCode.length && /\s/.test(allCode[idx])) idx++;
+        const q = allCode[idx];
+        if (q !== '"' && q !== "'") continue;
+        idx++;
+        let tool = "";
+        while (idx < allCode.length && allCode[idx] !== q) {
+          tool += allCode[idx];
+          idx++;
+        }
+        idx++;
+        if (!tool || SYSTEM.has(tool)) continue;
+        const toolLower = tool.toLowerCase();
+        const known = installedBlob.includes(toolLower)
+          || (Array.isArray(req.rust_crates) && req.rust_crates.some(c => String(c).split("@")[0].toLowerCase() === toolLower && false));
+        if (!known) {
           return {
             ok: false,
-            check: "rust_calls_crate_as_binary",
-            detail: "Command::new(\"" + nm + "\") — " + nm + " is a LIBRARY crate (requires.rust_crates). Use `use " + nm.replace(/-/g, "_") + "; " + nm.replace(/-/g, "_") + "::<function>(...)`.",
+            check: "command_without_install",
+            detail: "Command::new(\"" + tool + "\") but requires.post_install (or requires.npm / requires.pip) does not install it. Add \"apt-get install -y " + tool + "\" or \"cargo install --locked " + tool + "\" or another installer to post_install, or switch to library usage (use " + tool.replace(/-/g, "_") + ";).",
           };
         }
       }

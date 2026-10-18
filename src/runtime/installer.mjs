@@ -131,6 +131,7 @@ export async function prepareSession(deps, { capId, session, stack = [] }) {
 
   // ── post_install — a shell command run once after packages are installed. ──
   if (typeof requires.post_install === "string" && requires.post_install.length) {
+        const _postInstallTimeout = Math.max(30000, Math.min(1800000, Number(requires.post_install_timeout_ms) || 300000));
     events.emit("installer.post_install_starting", {
       capId,
       session,
@@ -143,7 +144,7 @@ export async function prepareSession(deps, { capId, session, stack = [] }) {
         session,
         cmd: "sh",
         args: ["-c", requires.post_install],
-        timeout_ms: 180000,
+        timeout_ms: _postInstallTimeout,
       },
       { tenant: "local", by: "installer" }
     );
@@ -155,7 +156,7 @@ export async function prepareSession(deps, { capId, session, stack = [] }) {
     const pid = res.output.result.pid;
     const read = await invoke(
       "agentry.os",
-      { action: "shell.read", session, pid, wait_ms: 180000 },
+      { action: "shell.read", session, pid, wait_ms: _postInstallTimeout },
       { tenant: "local", by: "installer" }
     );
     const out = read.output.result;
