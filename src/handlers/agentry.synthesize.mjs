@@ -873,6 +873,21 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("  concatenates your 3 steps (prepare/execute/emit) into one fn main().");
     lines.push("  A `let x = ...;` declared in prepare is visible in execute and emit.");
     lines.push("  NO cross-step bus is needed. NO globalThis.");
+    lines.push("");
+    lines.push("CRITICAL — CRATES ARE LIBRARIES, NOT CLI BINARIES:");
+    lines.push("- requires.rust_crates lists LIBRARY crates from crates.io.");
+    lines.push("- DO NOT use Command::new(\"<crate>\"). There is no system binary.");
+    lines.push("  Command::new(\"topdf\") panics: Os { code: 2, NotFound }.");
+    lines.push("- CORRECT: import the crate and call its functions:");
+    lines.push("    use " + (facts.crate_name || "").replace(/-/g, "_") + ";");
+    lines.push("    fn main() {");
+    lines.push("        " + (facts.crate_name || "").replace(/-/g, "_") + "::<function>(...);");
+    lines.push("    }");
+    lines.push("");
+    lines.push("CRITICAL — READ ALL INPUTS FROM ENV:");
+    lines.push("- accepts keys map to env vars: image_path -> IMAGE_PATH.");
+    lines.push("- READ EVERY accepts key: std::env::var(\"IMAGE_PATH\").expect(...)");
+    lines.push("- DO NOT hardcode /tmp/output.pdf. Use std::env::var(\"OUTPUT_PATH\").");
     lines.push("- Correct example:");
     lines.push("    fn main() {");
     lines.push("        let input_path = std::env::args().nth(1).unwrap_or_else(|| \"/tmp/in\".to_string());");
@@ -1665,6 +1680,24 @@ function validateSpecConsistency(spec, capability_id) {
         check: "rust_uses_js_apis",
         detail: "Generated Rust code contains JS-only calls (console.log / process.env / await import). Use println! / std::env::var / use statements.",
       };
+    }
+    if (spec.kernel_language === "rust") {
+      const crates = (spec.capability && spec.capability.requires
+        && Array.isArray(spec.capability.requires.rust_crates))
+        ? spec.capability.requires.rust_crates : [];
+      for (const c of crates) {
+        const nm = String(c).split("@")[0].trim();
+        if (!nm) continue;
+        const esc = nm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const pat = new RegExp("Command::new\\s*\\(\\s*[\"\']" + esc + "[\"\']");
+        if (pat.test(allCode)) {
+          return {
+            ok: false,
+            check: "rust_calls_crate_as_binary",
+            detail: "Command::new(\"" + nm + "\") — " + nm + " is a LIBRARY crate (requires.rust_crates). Use `use " + nm.replace(/-/g, "_") + "; " + nm.replace(/-/g, "_") + "::<function>(...)`.",
+          };
+        }
+      }
     }
     if (spec.kernel_language === "go" && /console\.log|process\.env|await\s+import/.test(allCode)) {
       return {
