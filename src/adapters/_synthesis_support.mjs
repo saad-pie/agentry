@@ -25,10 +25,10 @@ export const SYNTHESIS_SUPPORT = {
   "hermes_atlas":     { synthesizable: "partial",     runtime: "hermes_repo_never_wired" },
 
   // Discovery-only — no synthesis path exists
-  "crates":           { synthesizable: false, runtime: "rust_missing" },
+  "crates":           { synthesizable: true,  runtime: "rust" },
   "maven":            { synthesizable: false, runtime: "jvm_missing" },
   "nuget":            { synthesizable: false, runtime: "dotnet_missing" },
-  "gomod":            { synthesizable: false, runtime: "go_missing" },
+  "gomod":            { synthesizable: true,  runtime: "go" },
   "huggingface":      { synthesizable: false, runtime: "model_not_runtime_lib" },
   "dsh_plugins":      { synthesizable: false, runtime: "plugin_lifecycle" },
 };

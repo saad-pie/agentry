@@ -368,6 +368,123 @@ async function readPyPiPackage(candidate, deps) {
   return facts;
 }
 
+// v0.31.0 — read a Rust crate. Uses crates.io API for metadata +
+// GitHub raw README when repo is on GitHub. No runtime install needed:
+// rust-script handles inline cargo deps in synthesized handlers, so
+// the LLM writes `//! \`\`\`cargo\ncrate = "ver"\n//! \`\`\`` at the top
+// of the .rs script and rust-script downloads automatically.
+async function readCrate(candidate, deps) {
+  const crateName = String(candidate.name || candidate.id || "").replace(/^crates:/, "").trim();
+  const session = "synth_crate_" + crateName.replace(/[^a-z0-9_-]/gi, "_").slice(0, 40) + "_" + Date.now().toString(36);
+  const { invoke } = deps;
+  const facts = {
+    session, source_kind: "rust_crate", crate_name: crateName,
+    error: null, version: null, description: null, repository: null, readme: null,
+  };
+  await invoke("agentry.os", { action: "session.create", id: session },
+    { tenant: "local", by: "agentry.synthesize" });
+
+  try {
+    const script = [
+      "import json, urllib.request",
+      "out = {}",
+      "try:",
+      "    req = urllib.request.Request('https://crates.io/api/v1/crates/" + crateName + "', headers={'User-Agent':'agentry/0.31'})",
+      "    with urllib.request.urlopen(req, timeout=15) as r:",
+      "        d = json.load(r)",
+      "    c = d.get('crate', {})",
+      "    out['version'] = c.get('max_version', '')",
+      "    out['description'] = c.get('description', '')",
+      "    out['repository'] = c.get('repository', '')",
+      "except Exception as e:",
+      "    out['meta_error'] = str(e)",
+      "repo = out.get('repository', '')",
+      "if repo and 'github.com' in repo:",
+      "    parts = repo.rstrip('/').split('github.com/')[-1].split('/')",
+      "    if len(parts) >= 2:",
+      "        for branch in ['main', 'master']:",
+      "            url = 'https://raw.githubusercontent.com/' + parts[0] + '/' + parts[1] + '/' + branch + '/README.md'",
+      "            try:",
+      "                req = urllib.request.Request(url, headers={'User-Agent':'agentry/0.31'})",
+      "                with urllib.request.urlopen(req, timeout=10) as r:",
+      "                    out['readme'] = r.read().decode('utf-8', errors='replace')[:8000]",
+      "                break",
+      "            except Exception:",
+      "                continue",
+      "print(json.dumps(out))",
+    ].join("\n");
+    const r = await invoke("agentry.os", { action: "python.run", session, code: script, timeout_ms: 30000 },
+      { tenant: "local", by: "agentry.synthesize" });
+    if (r.ok && r.output && r.output.result) {
+      try {
+        const parsed = JSON.parse(String(r.output.result.stdout || "{}").trim());
+        facts.version = parsed.version || null;
+        facts.description = parsed.description || null;
+        facts.repository = parsed.repository || null;
+        if (parsed.readme) facts.readme = String(parsed.readme).slice(0, MAX_README_CHARS);
+        if (parsed.meta_error) facts.error = parsed.meta_error;
+      } catch {}
+    }
+  } catch (e) { facts.error = "crate read threw: " + e.message; }
+
+  return facts;
+}
+
+// v0.31.0 — read a Go module. proxy.golang.org for latest version +
+// raw GitHub README when module path is on github.com. No runtime
+// install needed: `go mod tidy` inside the kernel session resolves
+// imports automatically, so synthesized code just declares imports.
+async function readGoModule(candidate, deps) {
+  const modPath = String(candidate.name || candidate.id || "").replace(/^gomod:/, "").trim();
+  const session = "synth_gomod_" + modPath.replace(/[^a-z0-9_-]/gi, "_").slice(0, 40) + "_" + Date.now().toString(36);
+  const { invoke } = deps;
+  const facts = {
+    session, source_kind: "go_module", go_module: modPath,
+    error: null, version: null, readme: null,
+  };
+  await invoke("agentry.os", { action: "session.create", id: session },
+    { tenant: "local", by: "agentry.synthesize" });
+
+  try {
+    const script = [
+      "import json, urllib.request",
+      "out = {}",
+      "try:",
+      "    req = urllib.request.Request('https://proxy.golang.org/" + modPath + "/@latest', headers={'User-Agent':'agentry/0.31'})",
+      "    with urllib.request.urlopen(req, timeout=15) as r:",
+      "        d = json.load(r)",
+      "    out['version'] = d.get('Version', '')",
+      "except Exception as e:",
+      "    out['proxy_error'] = str(e)",
+      "if 'github.com' in '" + modPath + "':",
+      "    parts = '" + modPath + "'.rstrip('/').split('github.com/')[-1].split('/')",
+      "    if len(parts) >= 2:",
+      "        for branch in ['main', 'master']:",
+      "            url = 'https://raw.githubusercontent.com/' + parts[0] + '/' + parts[1] + '/' + branch + '/README.md'",
+      "            try:",
+      "                req = urllib.request.Request(url, headers={'User-Agent':'agentry/0.31'})",
+      "                with urllib.request.urlopen(req, timeout=10) as r:",
+      "                    out['readme'] = r.read().decode('utf-8', errors='replace')[:8000]",
+      "                break",
+      "            except Exception:",
+      "                continue",
+      "print(json.dumps(out))",
+    ].join("\n");
+    const r = await invoke("agentry.os", { action: "python.run", session, code: script, timeout_ms: 30000 },
+      { tenant: "local", by: "agentry.synthesize" });
+    if (r.ok && r.output && r.output.result) {
+      try {
+        const parsed = JSON.parse(String(r.output.result.stdout || "{}").trim());
+        facts.version = parsed.version || null;
+        if (parsed.readme) facts.readme = String(parsed.readme).slice(0, MAX_README_CHARS);
+        if (parsed.proxy_error) facts.error = parsed.proxy_error;
+      } catch {}
+    }
+  } catch (e) { facts.error = "gomod read threw: " + e.message; }
+
+  return facts;
+}
+
 async function readAgentSkill(candidate, deps) {
   const facts = {
     source_kind: "skill",
@@ -718,6 +835,83 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("  static import, REWRITE it to use dynamic import as shown above.");
     lines.push("");
   }
+  if (facts.source_kind === "rust_crate" && facts.crate_name) {
+    lines.push("RUST CANDIDATE — this is a Rust crate, not a Node/Python package.");
+    lines.push("");
+    lines.push("- The kernel runs RUST via `rust-script` (crates.io + cargo built in).");
+    lines.push("- Your synthesized capability MUST declare:");
+    lines.push("    \"kernel_language\": \"rust\"");
+    lines.push("    \"requires\": { \"npm\": [], \"pip\": [], \"post_install\": null, \"capability\": [] }");
+    lines.push("");
+    lines.push("RUST RULES (READ TWICE):");
+    lines.push("- The plan MUST contain EXACTLY 1 step with verb \"execute\".");
+    lines.push("- The step.code is a COMPLETE, runnable rust-script file. Structure:");
+    lines.push("    #!/usr/bin/env rust-script");
+    lines.push("    //! ```cargo");
+    lines.push("    //! [dependencies]");
+    lines.push("    //! " + facts.crate_name + " = \"*\"");
+    lines.push("    //! ```");
+    lines.push("    use " + (facts.crate_name || "").replace(/-/g, "_") + ";");
+    lines.push("    fn main() {");
+    lines.push("        // full logic here");
+    lines.push("        println!(\"{}\" , ...);");
+    lines.push("    }");
+    lines.push("- Use `println!` to emit the final JSON. rust-script captures stdout.");
+    lines.push("- Do NOT use `serde_json` unless listed in cargo deps. Simplest is");
+    lines.push("  to build the JSON string manually with format!().");
+    lines.push("- Do NOT use `?` operator without a Result-returning fn; use match/unwrap.");
+    lines.push("- Errors: `panic!` on failure — exit_code will be nonzero, trial fails.");
+    lines.push("- Crates often have hyphens in names (`my-crate`) but underscores in");
+    lines.push("  code (`my_crate::...`). Convert accordingly.");
+    lines.push("");
+    if (facts.version) lines.push("Latest version: " + facts.version);
+    if (facts.description) lines.push("Description: " + facts.description);
+    if (facts.readme) {
+      lines.push("");
+      lines.push("README (first " + Math.min(facts.readme.length, 8000) + " chars):");
+      lines.push("<<<");
+      lines.push(facts.readme.slice(0, 8000));
+      lines.push(">>>");
+    }
+    lines.push("");
+  }
+
+  if (facts.source_kind === "go_module" && facts.go_module) {
+    lines.push("GO CANDIDATE — this is a Go module, not a Node/Python package.");
+    lines.push("");
+    lines.push("- The kernel runs GO with `go mod tidy` resolving imports automatically.");
+    lines.push("- Your synthesized capability MUST declare:");
+    lines.push("    \"kernel_language\": \"go\"");
+    lines.push("    \"requires\": { \"npm\": [], \"pip\": [], \"post_install\": null, \"capability\": [] }");
+    lines.push("");
+    lines.push("GO RULES (READ TWICE):");
+    lines.push("- The plan MUST contain EXACTLY 1 step with verb \"execute\".");
+    lines.push("- The step.code is a COMPLETE Go file. Structure:");
+    lines.push("    package main");
+    lines.push("    import (");
+    lines.push("        \"fmt\"");
+    lines.push("        \"" + facts.go_module + "\"");
+    lines.push("    )");
+    lines.push("    func main() {");
+    lines.push("        // full logic here");
+    lines.push("        fmt.Println(\"{...}\")");
+    lines.push("    }");
+    lines.push("- Use fmt.Println to emit the final JSON. Kernel captures stdout.");
+    lines.push("- Import path MUST be the module path exactly: " + facts.go_module);
+    lines.push("- Do NOT use `errcheck` panics; `if err != nil { panic(err) }` is fine.");
+    lines.push("- Build JSON manually with fmt.Sprintf or structs+encoding/json.");
+    lines.push("");
+    if (facts.version) lines.push("Latest version: " + facts.version);
+    if (facts.readme) {
+      lines.push("");
+      lines.push("README (first " + Math.min(facts.readme.length, 8000) + " chars):");
+      lines.push("<<<");
+      lines.push(facts.readme.slice(0, 8000));
+      lines.push(">>>");
+    }
+    lines.push("");
+  }
+
   if (facts.source_kind === "pypi" && facts.pypi_package_name) {
     lines.push("PYPI CANDIDATE — this is a Python package, not a Node repo.");
     lines.push("");
@@ -876,10 +1070,36 @@ function compilePlanToPython(plan) {
   return parts.join("\n");
 }
 
+// v0.31.0 — Rust compilers. Rust uses rust-script which reads an
+// inline `//! \`\`\`cargo` block for dependencies and executes the file.
+// The plan is exactly 1 step containing the full runnable script
+// (cargo header + use statements + fn main). Compiler just decodes it.
+function compilePlanToRust(plan) {
+  const step = (plan || [])[0];
+  if (!step) return "";
+  return decodeIfDoubleEscaped(String(step.code || "").trim());
+}
+
+// v0.31.0 — Go compiler. Go uses `go mod tidy` at runtime which resolves
+// imports from the source file automatically. Plan is exactly 1 step:
+// complete `package main` file with imports + func main.
+function compilePlanToGo(plan) {
+  const step = (plan || [])[0];
+  if (!step) return "";
+  return decodeIfDoubleEscaped(String(step.code || "").trim());
+}
+
 function renderHandler(spec) {
   const { capability, glue } = spec;
-  const lang = spec.kernel_language === "python" ? "python" : "node";
-  const action = lang === "python" ? "python.run" : "node.run";
+  const lang = ["python", "rust", "go", "java", "dotnet"].includes(spec.kernel_language)
+    ? spec.kernel_language
+    : "node";
+  const action = lang === "python" ? "python.run"
+    : lang === "rust"   ? "rust.run"
+    : lang === "go"     ? "go.run"
+    : lang === "java"   ? "java.run"
+    : lang === "dotnet" ? "dotnet.run"
+    : "node.run";
 
   const out = [];
   out.push("// agentry — synthesized handler for " + capability.id);
@@ -897,9 +1117,11 @@ function renderHandler(spec) {
   out.push("const OUTPUT_MAP = " + JSON.stringify(glue.output_map || {}, null, 2) + ";");
   out.push("const RESULT_PARSE = " + JSON.stringify(glue.result_parse || "stdout_text") + ";");
   out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
-  const compiled = lang === "python"
-    ? compilePlanToPython(spec.plan || [])
-    : compilePlanToScript(spec.plan || []);
+  let compiled;
+  if (lang === "python") compiled = compilePlanToPython(spec.plan || []);
+  else if (lang === "rust") compiled = compilePlanToRust(spec.plan || []);
+  else if (lang === "go") compiled = compilePlanToGo(spec.plan || []);
+  else compiled = compilePlanToScript(spec.plan || []);
   const cleanScript = decodeIfDoubleEscaped(compiled);
   out.push("const KERNEL_SCRIPT = " + JSON.stringify(cleanScript) + ";");
   out.push("");
@@ -1332,6 +1554,11 @@ function validatePlan(plan, shape, capability_id) {
 // v0.17.7 — spec consistency. Cross-references the four sections that
 // must agree: plan code, env_map, accept_spec, produces.
 function validateSpecConsistency(spec, capability_id) {
+  // v0.31.0 — Rust/Go use single-step full-program plans. The standard
+  // env_map/emit-step checks don't apply because the program IS the emit.
+  if (spec.kernel_language === "rust" || spec.kernel_language === "go") {
+    return { ok: true };
+  }
   const plan = Array.isArray(spec.plan) ? spec.plan : [];
   const glue = spec.glue || {};
   const envMap = glue.env_map || {};
@@ -1481,6 +1708,30 @@ export default async function agentrySynthesize(input, ctx) {
       });
     } catch (e) {
       events.emit("synthesize.pypi_read_failed", { proposal_id, candidate_id, error: e.message });
+    }
+  } else if (candidate.kind === "rust_crate" || candidate.source === "crates" || String(candidate.id || "").startsWith("crates:")) {
+    try {
+      facts = await readCrate(candidate, ctx);
+      events.emit("synthesize.crate_read", {
+        proposal_id, candidate_id,
+        crate_name: facts.crate_name, version: facts.version,
+        readme_len: facts.readme ? facts.readme.length : 0,
+        error: facts.error,
+      });
+    } catch (e) {
+      events.emit("synthesize.crate_read_failed", { proposal_id, candidate_id, error: e.message });
+    }
+  } else if (candidate.kind === "go_module" || candidate.source === "gomod" || String(candidate.id || "").startsWith("gomod:")) {
+    try {
+      facts = await readGoModule(candidate, ctx);
+      events.emit("synthesize.gomod_read", {
+        proposal_id, candidate_id,
+        go_module: facts.go_module, version: facts.version,
+        readme_len: facts.readme ? facts.readme.length : 0,
+        error: facts.error,
+      });
+    } catch (e) {
+      events.emit("synthesize.gomod_read_failed", { proposal_id, candidate_id, error: e.message });
     }
   } else if (candidate.kind === "repo" && candidate.url) {
     try {
