@@ -1106,19 +1106,34 @@ function compilePlanToPython(plan) {
 //   rust: requires.rust_crates → compilePlanToRust prepends cargo block
 //                               → rust-script fetches → use finds it
 function compilePlanToRust(plan, spec) {
+  // v0.31.5 — wrap body explicitly in fn main. rust-script 0.36's
+  // auto-wrap puts the whole file body inside fn main, which means
+  // the cargo header ends up INSIDE fn main and cargo never sees it.
+  // Result: 'error[E0432]: unresolved import topdf'.
   if (!Array.isArray(plan) || !plan.length) return "";
-  const codes = plan.map(s => decodeIfDoubleEscaped(String(s.code || "").trim())).filter(Boolean);
-  let body;
-  if (codes.length === 0) return "";
-  else if (codes.length === 1) body = codes[0];
-  else {
-    const withMain = codes.filter(c => /fn\s+main\s*\(/.test(c));
-    if (withMain.length === 1) body = withMain[0];
-    else if (withMain.length > 1) body = withMain[withMain.length - 1];
-    else body = codes.join("\n\n");
+
+  const cleaned = plan.map(st => {
+    let code = decodeIfDoubleEscaped(String(st.code || "").trim());
+    code = code.replace(/^#![^\n]*\n?/m, "");
+    code = code.replace(/\/\/!\s*```cargo[\s\S]*?\/\/!\s*```\s*\n?/g, "");
+    code = code.split("\n").filter(l => !/^\s*\/\/!/.test(l)).join("\n");
+    code = code.trim();
+    if (code.startsWith("{") && code.endsWith("}")) {
+      const inner = code.slice(1, -1).trim();
+      const opens = (inner.match(/\{/g) || []).length;
+      const closes = (inner.match(/\}/g) || []).length;
+      if (opens === closes) code = inner;
+    }
+    return code.trim();
+  }).filter(Boolean);
+
+  let body = cleaned.join("\n\n");
+
+  const mains = (body.match(/fn\s+main\s*\(/g) || []).length;
+  if (mains === 0) {
+    body = "fn main() {\n" + body.split("\n").map(l => "    " + l).join("\n") + "\n}\n";
   }
 
-  // Build cargo block from requires.rust_crates
   const crates = (spec && spec.capability && spec.capability.requires
     && Array.isArray(spec.capability.requires.rust_crates))
     ? spec.capability.requires.rust_crates : [];
@@ -1145,11 +1160,7 @@ function compilePlanToRust(plan, spec) {
     "",
   ].join("\n");
 
-  // Strip any cargo block the LLM may have added (avoid duplicate blocks)
-  const stripped = body.replace(/^\s*#!\/usr\/bin\/env rust-script\s*\n/, "")
-                       .replace(/\/\/!\s*```cargo[\s\S]*?\/\/!\s*```\s*\n?/, "");
-
-  return cargoHeader + stripped;
+  return cargoHeader + body;
 }
 
 // v0.31.0 — Go compiler. Go uses `go mod tidy` at runtime which resolves
