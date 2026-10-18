@@ -1075,18 +1075,33 @@ function compilePlanToPython(plan) {
 // The plan is exactly 1 step containing the full runnable script
 // (cargo header + use statements + fn main). Compiler just decodes it.
 function compilePlanToRust(plan) {
-  const step = (plan || [])[0];
-  if (!step) return "";
-  return decodeIfDoubleEscaped(String(step.code || "").trim());
+  // v0.31.1 — pick the step that actually has fn main. Prior version
+  // returned plan[0] which is usually the empty "prepare" scaffold
+  // from the tool shape. Result: fn main() { } compiled, exited 0,
+  // printed nothing, trial failed "kernel produced no output".
+  if (!Array.isArray(plan) || !plan.length) return "";
+  const codes = plan.map(s => decodeIfDoubleEscaped(String(s.code || "").trim())).filter(Boolean);
+  if (codes.length === 0) return "";
+  if (codes.length === 1) return codes[0];
+  const withMain = codes.filter(c => /fn\s+main\s*\(/.test(c));
+  if (withMain.length === 1) return withMain[0];
+  if (withMain.length > 1) return withMain[withMain.length - 1];
+  return codes.join("\n\n");
 }
 
 // v0.31.0 — Go compiler. Go uses `go mod tidy` at runtime which resolves
 // imports from the source file automatically. Plan is exactly 1 step:
 // complete `package main` file with imports + func main.
 function compilePlanToGo(plan) {
-  const step = (plan || [])[0];
-  if (!step) return "";
-  return decodeIfDoubleEscaped(String(step.code || "").trim());
+  // v0.31.1 — same fix as compilePlanToRust but matching `func main`.
+  if (!Array.isArray(plan) || !plan.length) return "";
+  const codes = plan.map(s => decodeIfDoubleEscaped(String(s.code || "").trim())).filter(Boolean);
+  if (codes.length === 0) return "";
+  if (codes.length === 1) return codes[0];
+  const withMain = codes.filter(c => /func\s+main\s*\(/.test(c));
+  if (withMain.length === 1) return withMain[0];
+  if (withMain.length > 1) return withMain[withMain.length - 1];
+  return codes.join("\n\n");
 }
 
 function renderHandler(spec) {
