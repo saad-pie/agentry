@@ -839,18 +839,18 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("RUST CANDIDATE — this is a Rust crate, not a Node/Python package.");
     lines.push("");
     lines.push("- The kernel runs RUST via `rust-script` (crates.io + cargo built in).");
-    lines.push("- Your synthesized capability MUST declare:");
+    const _version = facts.version || "*";
+    lines.push("- Your synthesized capability MUST declare deps in requires.rust_crates:");
     lines.push("    \"kernel_language\": \"rust\"");
-    lines.push("    \"requires\": { \"npm\": [], \"pip\": [], \"post_install\": null, \"capability\": [] }");
+    lines.push("    \"requires\": { \"npm\": [], \"pip\": [], \"rust_crates\": [\"" + facts.crate_name + "@" + _version + "\"], \"post_install\": null, \"capability\": [] }");
+    lines.push("- Do NOT declare it in requires.npm — that is for JavaScript only.");
+    lines.push("- The compiler WILL PREPEND the cargo block automatically from");
+    lines.push("  requires.rust_crates. Do NOT write `//! ```cargo` yourself.");
     lines.push("");
     lines.push("RUST RULES (READ TWICE):");
-    lines.push("- The plan MUST contain EXACTLY 1 step with verb \"execute\".");
-    lines.push("- The step.code is a COMPLETE, runnable rust-script file. Structure:");
-    lines.push("    #!/usr/bin/env rust-script");
-    lines.push("    //! ```cargo");
-    lines.push("    //! [dependencies]");
-    lines.push("    //! " + facts.crate_name + " = \"*\"");
-    lines.push("    //! ```");
+    lines.push("- The step.code is just `fn main() { ... }` — NO cargo header, NO shebang.");
+    lines.push("  The compiler prepends the cargo block from requires.rust_crates.");
+    lines.push("  Correct shape:");
     lines.push("    use " + (facts.crate_name || "").replace(/-/g, "_") + ";");
     lines.push("    fn main() {");
     lines.push("        // full logic here");
@@ -1096,19 +1096,60 @@ function compilePlanToPython(plan) {
 // inline `//! \`\`\`cargo` block for dependencies and executes the file.
 // The plan is exactly 1 step containing the full runnable script
 // (cargo header + use statements + fn main). Compiler just decodes it.
-function compilePlanToRust(plan) {
-  // v0.31.1 — pick the step that actually has fn main. Prior version
-  // returned plan[0] which is usually the empty "prepare" scaffold
-  // from the tool shape. Result: fn main() { } compiled, exited 0,
-  // printed nothing, trial failed "kernel produced no output".
+// v0.31.3 — Rust compiler. Mirrors how npm/pypi work: the deps
+// declared in spec.capability.requires.rust_crates are the source of
+// truth, and the compiler prepends the inline `//! \`\`\`cargo` block
+// so rust-script knows to fetch them. LLM NEVER writes cargo syntax.
+// Pattern parallels installer.prepareSession for npm/pip:
+//   npm:  requires.npm  → installer → node_modules/ → await import()
+//   pip:  requires.pip  → installer → .venv/        → import
+//   rust: requires.rust_crates → compilePlanToRust prepends cargo block
+//                               → rust-script fetches → use finds it
+function compilePlanToRust(plan, spec) {
   if (!Array.isArray(plan) || !plan.length) return "";
   const codes = plan.map(s => decodeIfDoubleEscaped(String(s.code || "").trim())).filter(Boolean);
+  let body;
   if (codes.length === 0) return "";
-  if (codes.length === 1) return codes[0];
-  const withMain = codes.filter(c => /fn\s+main\s*\(/.test(c));
-  if (withMain.length === 1) return withMain[0];
-  if (withMain.length > 1) return withMain[withMain.length - 1];
-  return codes.join("\n\n");
+  else if (codes.length === 1) body = codes[0];
+  else {
+    const withMain = codes.filter(c => /fn\s+main\s*\(/.test(c));
+    if (withMain.length === 1) body = withMain[0];
+    else if (withMain.length > 1) body = withMain[withMain.length - 1];
+    else body = codes.join("\n\n");
+  }
+
+  // Build cargo block from requires.rust_crates
+  const crates = (spec && spec.capability && spec.capability.requires
+    && Array.isArray(spec.capability.requires.rust_crates))
+    ? spec.capability.requires.rust_crates : [];
+
+  if (crates.length === 0) return body;
+
+  const deps = crates.map(c => {
+    const str = String(c);
+    const at = str.indexOf("@");
+    if (at > 0) {
+      const name = str.slice(0, at).trim();
+      const ver = str.slice(at + 1).trim();
+      return "//! " + name + " = \"" + ver + "\"";
+    }
+    return "//! " + str.trim() + " = \"*\"";
+  }).join("\n");
+
+  const cargoHeader = [
+    "#!/usr/bin/env rust-script",
+    "//! ```cargo",
+    "//! [dependencies]",
+    deps,
+    "//! ```",
+    "",
+  ].join("\n");
+
+  // Strip any cargo block the LLM may have added (avoid duplicate blocks)
+  const stripped = body.replace(/^\s*#!\/usr\/bin\/env rust-script\s*\n/, "")
+                       .replace(/\/\/!\s*```cargo[\s\S]*?\/\/!\s*```\s*\n?/, "");
+
+  return cargoHeader + stripped;
 }
 
 // v0.31.0 — Go compiler. Go uses `go mod tidy` at runtime which resolves
@@ -1156,7 +1197,7 @@ function renderHandler(spec) {
   out.push("const KERNEL_ACTION = " + JSON.stringify(action) + ";");
   let compiled;
   if (lang === "python") compiled = compilePlanToPython(spec.plan || []);
-  else if (lang === "rust") compiled = compilePlanToRust(spec.plan || []);
+  else if (lang === "rust") compiled = compilePlanToRust(spec.plan || [], spec);
   else if (lang === "go") compiled = compilePlanToGo(spec.plan || []);
   else compiled = compilePlanToScript(spec.plan || []);
   const cleanScript = decodeIfDoubleEscaped(compiled);
