@@ -428,6 +428,10 @@ export default async function agentryAdopt(input, ctx) {
       source: "synthesized:" + (
         candidate.kind === "npm_package" ? "npm" :
         candidate.kind === "mcp_server" ? "mcp" :
+        candidate.kind === "rust_crate" ? "crates" :
+        candidate.kind === "go_module" ? "gomod" :
+        candidate.kind === "python_package" ? "pypi" :
+        candidate.kind === "agent_skill" ? "skill" :
         candidate.kind === "repo" ? "github" : "web"
       ) + ":" + candidate.id,
       notes: candidate.url || null,

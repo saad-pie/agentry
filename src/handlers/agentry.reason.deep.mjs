@@ -131,7 +131,7 @@ function systemPrompt(graph) {
     "    best matches the task and put its exact id in missing.wanted_id.\n" +
     "    When more than one candidate fits, prefer sources in this order\n" +
     "    (most to least reliable for our pipeline):\n" +
-    "      agentskills_code > npm > pypi > github > clawhub > web\n" +
+    "      agentskills_code > npm > pypi > crates > gomod > github > clawhub > web\n" +
     "\n" +
     "    CRITICAL — synthesis support boundary:\n" +
     "    Sources that CANNOT be synthesized (no runtime kernel, roadmap only):\n" +
@@ -497,6 +497,31 @@ export default async function agentryReasonDeep(input, ctx) {
   let matched_via = null;
 
   const rawMissing = parsed.missing;
+
+  // v0.31.9 — deterministic kind from wanted_id prefix. The LLM's
+  // kind enum (bua|cua|mua|memory|tool|notify|web|harness|unknown) is
+  // undefined in the prompt, so it guesses. img2pdf got "cua" because
+  // "image" pattern-matched "computer use" -> getShape("cua") returned
+  // perceive/decide/act verbs for a library wrapper. That mis-shaped the
+  // synthesis prompt and wasted trial attempts. Override from prefix.
+  if (rawMissing && rawMissing.wanted_id) {
+    const _wid = String(rawMissing.wanted_id);
+    const _origKind = rawMissing.kind;
+    if (_wid.startsWith("bua.")) rawMissing.kind = "bua";
+    else if (_wid.startsWith("cua.")) rawMissing.kind = "cua";
+    else if (_wid.startsWith("mua.")) rawMissing.kind = "mua";
+    else if (_wid.startsWith("memory.")) rawMissing.kind = "memory";
+    else if (_wid.startsWith("notify.")) rawMissing.kind = "notify";
+    else if (_wid.startsWith("web.")) rawMissing.kind = "web";
+    else if (_wid.startsWith("harness.") || _wid.startsWith("agent.")) rawMissing.kind = "harness";
+    else if (/^(crates|npm|pypi|gomod|maven|nuget|clawhub|agentskills|hermes_atlas|github|mcp|apt|docker):/.test(_wid)) rawMissing.kind = "tool";
+    if (_origKind !== rawMissing.kind) {
+      ctx.events.emit("agentry.reason.deep.kind_overridden", {
+        wanted_id: _wid, from: _origKind, to: rawMissing.kind,
+      });
+    }
+  }
+
   if (rawMissing && rawMissing.wanted_id) {
     proposed_id = rawMissing.wanted_id;
     const res = resolveWantedId(ctx.graph, proposed_id);
