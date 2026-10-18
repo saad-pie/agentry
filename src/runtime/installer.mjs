@@ -131,12 +131,30 @@ export async function prepareSession(deps, { capId, session, stack = [] }) {
 
   // ── post_install — a shell command run once after packages are installed. ──
   if (typeof requires.post_install === "string" && requires.post_install.length) {
-        const _postInstallTimeout = Math.max(30000, Math.min(1800000, Number(requires.post_install_timeout_ms) || 300000));
+        const _piCmd = String(requires.post_install || "");
+        let _piDefault = 300000;
+        if (/\bcargo\s+install\b/.test(_piCmd)) _piDefault = 900000;
+        else if (/\bpip[3]?\s+install\b/.test(_piCmd) && /torch|transformers|cuda|tensorflow|jax/i.test(_piCmd)) _piDefault = 900000;
+        else if (/\bapt(?:-get)?\s+install\b/.test(_piCmd)) _piDefault = 300000;
+        else if (/\bgit\s+clone\b/.test(_piCmd) && /\b(make|cmake|cargo\s+build|npm\s+install|pnpm\s+install)\b/.test(_piCmd)) _piDefault = 900000;
+        else if (/(curl|wget)\s+-/.test(_piCmd) && /\.(tar\.gz|tgz|zip|bin|deb)\b/.test(_piCmd)) _piDefault = 600000;
+        const _postInstallTimeout = Math.max(30000, Math.min(1800000, Number(requires.post_install_timeout_ms) || _piDefault));
     events.emit("installer.post_install_starting", {
       capId,
       session,
       cmd: requires.post_install,
     });
+
+    // v0.31.8 — persistent cargo cache env so repeat installs skip
+    // recompilation. CARGO_HOME and RUSTUP_HOME match Dockerfile ENV.
+    try {
+      await invoke("agentry.os", { action: "shell.spawn", session, cmd: "sh", args: ["-c", "mkdir -p /tmp/home/.cargo-target"], timeout_ms: 5000 }, { tenant: "local", by: "installer" });
+      await invoke("agentry.os", { action: "session.env", session, key: "CARGO_TARGET_DIR", value: "/tmp/home/.cargo-target" }, { tenant: "local", by: "installer" });
+      await invoke("agentry.os", { action: "session.env", session, key: "CARGO_HOME", value: "/usr/local/cargo" }, { tenant: "local", by: "installer" });
+      await invoke("agentry.os", { action: "session.env", session, key: "RUSTUP_HOME", value: "/usr/local/rustup" }, { tenant: "local", by: "installer" });
+    } catch (e) {
+      events.emit("installer.cargo_env_setup_failed", { capId, session, error: e.message });
+    }
     const res = await invoke(
       "agentry.os",
       {
@@ -161,8 +179,12 @@ export async function prepareSession(deps, { capId, session, stack = [] }) {
     );
     const out = read.output.result;
     if (out.exit_code !== 0) {
+      const _sig = out.signal ? (" signal=" + out.signal) : "";
+      const _exitLabel = (out.exit_code === null || out.exit_code === undefined)
+        ? "killed (likely timeout after " + _postInstallTimeout + "ms" + _sig + ")"
+        : ("exited " + out.exit_code);
       throw new Error(
-        `installer: post_install exited ${out.exit_code} — ${String(out.stderr || "").slice(0, 200)}`
+        `installer: post_install ${_exitLabel} — ${String(out.stderr || "").slice(0, 400)}`
       );
     }
     steps.push({ step: "post_install", ok: true, cmd: requires.post_install });
