@@ -13,6 +13,13 @@
 // that already has a fn, so keeping the original handler id would silently
 // run the ORIGINAL broken handler after a passing retrial.
 //
+// v0.32.1 — pass `failure` alongside `repair_context` in the repair
+// invoke. reason.deep's seed declares `failure` as required and the
+// invoker's accepts gate rejects calls that omit it, before the handler
+// (and its repair branch) ever runs. The failure string is honest: it
+// names the trial failure we're trying to repair. The handler's repair
+// branch fires first and ignores it.
+//
 // Notify: routes through notify.fallback so a Gmail outage doesn't
 // swallow the adoption follow-up. On failure, notify.console writes
 // the full body to stdout — visible in the HF Space log.
@@ -233,9 +240,15 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
   }
 
   // 2. Ask reason.deep for a decision.
+  // v0.32.1 — pass `failure` alongside `repair_context`. The seed for
+  // reason.deep declares `failure` as a required accept and the invoker
+  // enforces accepts BEFORE the handler runs. The failure string here is
+  // the honest reason we're calling: the trial failure we're repairing.
+  // The handler's `if (repair_context)` branch fires first and ignores it.
   let repairRes;
   try {
     repairRes = await ctx.invoke("agentry.reason.deep", {
+      failure: "repair mode: " + synthesis.capability_id + " failed trial at phase \"" + phase + "\"",
       repair_context: {
         error: errMsg,
         phase,
