@@ -4,11 +4,12 @@
   "invoked_via": "invoker.in_process_js",
   "handler": "agentry.reason.deep",
   "accepts": {
-    "failure": "string",
+    "failure": { "type": "string", "optional": true },
     "intent": { "type": "string", "optional": true },
     "attempted": { "type": "array", "optional": true },
     "workspace_id": { "type": "string", "optional": true },
-    "session_id": { "type": "string", "optional": true }
+    "session_id": { "type": "string", "optional": true },
+    "repair_context": { "type": "object", "optional": true }
   },
   "produces": {
     "analysis": "string",
@@ -17,10 +18,13 @@
     "suggestions": "array",
     "gap_recorded": "string|null",
     "model_used": "string",
-    "tools_used": "array"
+    "tools_used": "array",
+    "repair_action": { "type": "string", "optional": true },
+    "patched_handler_code": { "type": "string|null", "optional": true },
+    "reason_for_action": { "type": "string|null", "optional": true }
   },
   "cost": { "money_usd": 0, "time_ms": 30000 },
   "limits": {},
   "source": "seeded:agentry",
-  "notes": "Deep reasoning on Groq with native tool use (web_search, fetch_url). Loops up to 5 turns calling tools, then produces the final JSON. Same input/output contract as agentry.reason."
+  "notes": "v0.32.2 — `failure` is optional so repair mode (which fires on `repair_context` alone) satisfies the accepts gate. `repair_context` is declared so callers don't need a synthetic `failure` string. Produces declares repair-mode output fields. Handler enforces 'failure or intent or repair_context' at the top of the function."
 }

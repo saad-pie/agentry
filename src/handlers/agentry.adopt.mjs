@@ -240,15 +240,12 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
   }
 
   // 2. Ask reason.deep for a decision.
-  // v0.32.1 — pass `failure` alongside `repair_context`. The seed for
-  // reason.deep declares `failure` as a required accept and the invoker
-  // enforces accepts BEFORE the handler runs. The failure string here is
-  // the honest reason we're calling: the trial failure we're repairing.
-  // The handler's `if (repair_context)` branch fires first and ignores it.
+  // v0.32.2 — the seed now declares `repair_context` and marks `failure`
+  // optional, so we pass repair_context alone. The v0.32.1 hotfix that
+  // passed a synthetic `failure` string is no longer needed.
   let repairRes;
   try {
     repairRes = await ctx.invoke("agentry.reason.deep", {
-      failure: "repair mode: " + synthesis.capability_id + " failed trial at phase \"" + phase + "\"",
       repair_context: {
         error: errMsg,
         phase,
