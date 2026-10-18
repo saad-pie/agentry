@@ -1,7 +1,5 @@
 // agentry/src/kernel/languages/dotnet.mjs
-// .NET 8 — writes Program.cs, creates a project if needed, runs `dotnet run`.
-// Package refs via inline #:package directive (dotnet 9+ feature) or
-// by adding <PackageReference> to the .csproj before running.
+// .NET 8 — writes Program.cs, creates project if needed, runs dotnet run.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -32,21 +30,28 @@ export async function dotnetRun(sessions, { session, code, file, args = [], cwd,
     const fs = await import("node:fs");
     source = fs.readFileSync(filePath, "utf8");
   }
-  writeFileSync(join(projDir, "Program.cs"), source);
 
   const mergedEnv = { ...process.env, ...s.env, ...env };
+  mergedEnv.DOTNET_SYSTEM_GLOBALIZATION_INVARIANT = "1";
   mergedEnv.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   mergedEnv.DOTNET_NOLOGO = "1";
   mergedEnv.DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1";
 
-  // Init project if not present
   const csproj = join(projDir, projName + ".csproj");
+
+  // v0.30.1 — MUST init project BEFORE writing our source.
+  // Prior version wrote Program.cs first, then `dotnet new console --force`
+  // OVERWROTE it with the default "Hello, World!" template. Result: our
+  // source never ran; test got default output with exit 0 (silently wrong).
   if (!existsSync(csproj)) {
     const init = runSync("dotnet", ["new", "console", "-n", projName, "-o", ".", "--force"], { cwd: projDir, env: mergedEnv, timeout: 60000 });
     if (init.exit_code !== 0) {
       return { stdout: init.stdout, stderr: init.stderr, exit_code: init.exit_code, script_path: "(inline)", lang: "dotnet", runner: "dotnet-new", error: init.error };
     }
   }
+
+  // Now write our source — after template creation, so it sticks.
+  writeFileSync(join(projDir, "Program.cs"), source);
 
   const r = runSync("dotnet", ["run", "--project", csproj, "--", ...args], { cwd: projDir, env: mergedEnv, timeout: timeout_ms });
   return { stdout: r.stdout, stderr: r.stderr, exit_code: r.exit_code, signal: r.signal, script_path: code ? "(inline)" : file, lang: "dotnet", runner: "dotnet-run", error: r.error };

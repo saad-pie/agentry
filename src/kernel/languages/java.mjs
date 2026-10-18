@@ -1,10 +1,8 @@
 // agentry/src/kernel/languages/java.mjs
-// Java 17+ — expects a single .java file with `public class <Main>`.
-// Compiles with javac then runs with java. Works with maven deps? No —
-// for external jars use requires.jar and put them on the classpath.
+// Java 17+ — single .java file, javac + java.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 180000;
 const MAX_OUTPUT_BYTES = 1 * 1024 * 1024;
@@ -43,8 +41,12 @@ export function javaRun(sessions, { session, code, file, args = [], cwd, env = {
   if (cmp.exit_code !== 0) {
     return { stdout: cmp.stdout, stderr: cmp.stderr, exit_code: cmp.exit_code, script_path: code ? scriptPath.replace(s.root + "/", "") : file, lang: "java", runner: "javac", error: cmp.error };
   }
-  const ex = runSync("java", ["-cp", absCwd, mainClass, ...args], { cwd: absCwd, env: mergedEnv, timeout: timeout_ms });
-  return { stdout: ex.stdout, stderr: ex.stderr, exit_code: ex.exit_code, signal: ex.signal, script_path: code ? scriptPath.replace(s.root + "/", "") : file, lang: "java", runner: "java", main_class: mainClass, error: ex.error };
+  // v0.30.1 — classpath must point where javac wrote .class files
+  // (the scripts dir), not absCwd (session root). Prior version
+  // passed -cp absCwd, java couldn't find Main.class, exit 1 empty stdout.
+  const scriptDir = dirname(scriptPath);
+  const ex = runSync("java", ["-cp", scriptDir, mainClass, ...args], { cwd: absCwd, env: mergedEnv, timeout: timeout_ms });
+  return { stdout: ex.stdout, stderr: ex.stderr, exit_code: ex.exit_code, signal: ex.signal, script_path: code ? scriptPath.replace(s.root + "/", "") : file, lang: "java", runner: "java", main_class: mainClass, class_dir: scriptDir, error: ex.error };
 }
 
 export function javaVersion() {
