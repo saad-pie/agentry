@@ -487,6 +487,13 @@ export default async function agentryReasonDeep(input, ctx) {
   if (repair_context) {
     if (typeof ctx.invoke !== "function") throw new Error("agentry.reason.deep requires ctx.invoke");
     const repairStarted = Date.now();
+    // v0.32.3 — repair generates a full patched handler (up to ~8KB,
+    // ~2000 tokens) on top of processing the failing handler + spec in
+    // the input. The default 30s timeout in llm.openai_compat aborts at
+    // ~half the budget gemini-flash needs through the antigravity proxy.
+    // 120s with env override; if the model itself can't do it in 2 min,
+    // that's a signal to swap models, not to raise this further.
+    const repairTimeoutMs = Number(process.env.AGENTRY_REPAIR_TIMEOUT_MS || "120000");
     const r = await ctx.invoke("llm.openai_compat", {
       provider: REPAIR_PROVIDER,
       model: REPAIR_MODEL,
@@ -496,6 +503,7 @@ export default async function agentryReasonDeep(input, ctx) {
       ],
       temperature: 0.1,
       max_tokens: 8000,
+      timeout_ms: repairTimeoutMs,
     }, { tenant: "local", by: "agentry.reason.deep" });
     if (!r.ok) {
       throw new Error("agentry.reason.deep repair: " + r.error.code + ": " + r.error.message);
