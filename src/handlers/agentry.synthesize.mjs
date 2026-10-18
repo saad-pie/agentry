@@ -396,6 +396,8 @@ async function readCrate(candidate, deps) {
       "    out['version'] = c.get('max_version', '')",
       "    out['description'] = c.get('description', '')",
       "    out['repository'] = c.get('repository', '')",
+      "    out['categories'] = [cat for cat in (c.get('categories') or []) if isinstance(cat, str)]",
+      "    out['keywords'] = [kw for kw in (c.get('keywords') or []) if isinstance(kw, str)]",
       "except Exception as e:",
       "    out['meta_error'] = str(e)",
       "repo = out.get('repository', '')",
@@ -421,8 +423,28 @@ async function readCrate(candidate, deps) {
         facts.version = parsed.version || null;
         facts.description = parsed.description || null;
         facts.repository = parsed.repository || null;
+        facts.categories = Array.isArray(parsed.categories) ? parsed.categories : [];
+        facts.keywords = Array.isArray(parsed.keywords) ? parsed.keywords : [];
         if (parsed.readme) facts.readme = String(parsed.readme).slice(0, MAX_README_CHARS);
         if (parsed.meta_error) facts.error = parsed.meta_error;
+
+        // v0.31.10 — API-client / SDK crates cannot solve local-artifact
+        // tasks. Categories tell the truth. api2convert had
+        // ["multimedia","api-bindings","web-programming::http-client"]
+        // and required an api2convert.com API key. Reasoner picked it
+        // because keywords matched; categories are definitive.
+        const _blockers = [];
+        if (facts.categories.some(c => /api-bindings|web-programming::http-client|web-programming::api-wrapper/i.test(c))) {
+          _blockers.push("requires_remote_api");
+        }
+        if (facts.categories.some(c => /web-programming::wasm|gpu|gui|android|ios|embedded/i.test(c))) {
+          _blockers.push("requires_runtime_we_dont_have");
+        }
+        if (_blockers.length > 0) {
+          facts.rejected_reason = _blockers[0];
+          facts.blockers = _blockers;
+          facts.error = "crate " + crateName + " cannot run locally: blockers=[" + _blockers.join(",") + "] categories=[" + facts.categories.join(",") + "]";
+        }
       } catch {}
     }
   } catch (e) { facts.error = "crate read threw: " + e.message; }
@@ -1955,6 +1977,21 @@ export default async function agentrySynthesize(input, ctx) {
       throw new Error("agentry.synthesize: skill candidate " + candidate.id + " has empty SKILL.md body (" + _why + "). Refusing to fabricate.");
     }
   }
+  // v0.31.10 — hard-fail when readCrate flagged the candidate as unusable.
+  // Belt: readCrate sets rejected_reason. Suspenders: this catches anything
+  // else with a blockers array. Emits candidate_rejected so the pipeline
+  // records the specific reason, then throws — candidate marked failed,
+  // gap re-opens, next candidate tried.
+  if (facts && facts.rejected_reason) {
+    events.emit("synthesize.candidate_rejected", {
+      proposal_id, candidate_id,
+      reason: facts.rejected_reason,
+      blockers: facts.blockers || [facts.rejected_reason],
+      categories: facts.categories || [],
+    });
+    throw new Error("agentry.synthesize: candidate " + candidate.id + " rejected — " + String(facts.error || facts.rejected_reason).slice(0, 400));
+  }
+
   const prompt = buildPrompt({ gap, candidate, facts, shape });
 
   const messages = [

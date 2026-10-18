@@ -146,6 +146,16 @@ function systemPrompt(graph) {
     "    pypi install deterministically. github clones cleanly. clawhub\n" +
     "    serves HTML pages that often 404 on raw fetch \u2014 pick it only\n" +
     "    when no other source has a match. web results are last resort.\n" +
+    "    BEFORE picking any candidate, apply this FILTER:\n" +
+    "    - REJECT candidates whose categories/description indicate they are\n" +
+    "      API clients or SDKs (categories: api-bindings, http-client,\n" +
+    "      web-programming; description starting with 'API for', 'SDK for',\n" +
+    "      'REST client', or containing 'remote API' / 'requires API key').\n" +
+    "    - REJECT candidates that need GPU, display, wasm, android, ios, or\n" +
+    "      a runtime not in [node, python, rust, go, java, dotnet].\n" +
+    "    - PREFER candidates that: install offline (cargo/npm/pip/apt/go),\n" +
+    "      take a file path in and produce a file path out, need no\n" +
+    "      credentials. This rule OVERRIDES the source preference list.\n" +
     "    Prefer a specific id ONLY if it is installable (npm:*, pypi:*,\n" +
     "    mcp:*) or a real skill (clawhub:*, agentskills:*, hermes_atlas:*)\n" +
     "    that clearly fits.\n" +
