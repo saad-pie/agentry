@@ -29,6 +29,14 @@ const ROUTES = {
 
   "node.run":       "POST /node/run",
   "node.install":   "POST /node/install",
+  "rust.run":       "POST /rust/run",
+  "rust.version":   "POST /rust/version",
+  "go.run":         "POST /go/run",
+  "go.version":     "POST /go/version",
+  "java.run":       "POST /java/run",
+  "java.version":   "POST /java/version",
+  "dotnet.run":     "POST /dotnet/run",
+  "dotnet.version": "POST /dotnet/version",
   "node.npx":       "POST /node/npx",
   "node.version":   "POST /node/version",
 

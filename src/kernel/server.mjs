@@ -5,6 +5,10 @@ import { fsRead, fsWrite, fsList } from "./fs.mjs";
 import { ShellStore } from "./shell.mjs";
 import { pythonRun, pythonInstall, pythonVersion } from "./languages/python.mjs";
 import { nodeRun, nodeInstall, nodeNpx, nodeVersion } from "./languages/node.mjs";
+import { rustRun, rustVersion } from "./languages/rust.mjs";
+import { goRun, goVersion } from "./languages/go.mjs";
+import { javaRun, javaVersion } from "./languages/java.mjs";
+import { dotnetRun, dotnetVersion } from "./languages/dotnet.mjs";
 import { gitClone, gitStatus, gitCommit, gitLog, gitVersion } from "./git.mjs";
 import { ProcStore } from "./procs.mjs";
 
@@ -72,6 +76,15 @@ const ROUTES = {
   "POST /python/run":     async (b) => pythonRun(sessions, shell, b),
   "POST /python/install": async (b) => pythonInstall(sessions, b),
   "POST /python/version": async (b) => pythonVersion(sessions, b),
+
+  "POST /rust/run":     async (b) => rustRun(sessions, b),
+  "POST /rust/version": async () => rustVersion(),
+  "POST /go/run":       async (b) => goRun(sessions, b),
+  "POST /go/version":   async () => goVersion(),
+  "POST /java/run":     async (b) => javaRun(sessions, b),
+  "POST /java/version": async () => javaVersion(),
+  "POST /dotnet/run":     async (b) => await dotnetRun(sessions, b),
+  "POST /dotnet/version": async () => dotnetVersion(),
 
   "POST /node/run":     async (b) => nodeRun(sessions, b),
   "POST /node/install": async (b) => nodeInstall(sessions, b),
