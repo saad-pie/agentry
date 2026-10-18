@@ -25,6 +25,13 @@
 // v0.23.0: source preference. Prefer agentskills_code > npm > pypi >
 // github > clawhub > web by fetch reliability. clawhub pages often
 // 404 on raw fetch; npm/pypi install deterministically.
+//
+// v0.32.0: repair mode. When input.repair_context is set, run a
+// separate single-shot prompt path that returns a structured
+// {repair_action, patched_handler_code} decision, backed by a
+// large-context model (default gemini-2.5-flash). The reasoning path
+// is untouched. Repair mode's output contract is disjoint from the
+// reasoning path's output contract.
 
 import { recordGap } from "./agentry.capability_gap.mjs";
 import { supportFor, synthesizableSources, unsynthesizableSources } from "../adapters/_synthesis_support.mjs";
@@ -35,6 +42,12 @@ const FALLBACK_PROVIDER = process.env.AGENTRY_DEEP_FALLBACK_PROVIDER || "google"
 const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "gemini-2.5-flash";
 const MAX_TURNS = Number(process.env.AGENTRY_DEEP_MAX_TURNS || "5");
 const MAX_TOOL_CALLS_PER_TURN = 4;
+
+// v0.32.0 — repair uses a larger-context model by default. Groq's 8K
+// TPM is overrun by handler code + spec + error in a single input;
+// Gemini 2.5 flash takes it comfortably. Overridable per env.
+const REPAIR_PROVIDER = process.env.AGENTRY_REPAIR_PROVIDER || "google";
+const REPAIR_MODEL = process.env.AGENTRY_REPAIR_MODEL || "gemini-2.5-flash";
 
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
 const MAX_CAP_LIST = 60;
@@ -374,8 +387,147 @@ async function executeTool(ctx, call) {
   }
 }
 
+// ── v0.32.0 — repair mode helpers ──────────────────────────────
+// Disjoint from the reasoning path. Different output contract, different
+// model default, different prompt. Does not touch tools, does not touch
+// graph state, does not write gaps.
+
+function repairSystemPrompt() {
+  return "You are agentry's repair engineer. A synthesized handler failed trial.\n\n" +
+    "Return exactly one of four decisions.\n\n" +
+    "REWRITE_HANDLER — the failure is a fixable bug:\n" +
+    "  * wrong API call shape\n" +
+    "  * wrong arg order or missing arg\n" +
+    "  * wrong module import name (e.g. 'pdf-lib' vs 'pdf-lib/cjs')\n" +
+    "  * logic error (wrong variable, wrong loop bound, wrong cast)\n" +
+    "  * missing null check, unhandled error path, wrong JSON shape on emit\n" +
+    "  Return the FULL corrected handler in patched_handler_code.\n\n" +
+    "DIFFERENT_CANDIDATE — the library/tool itself is wrong:\n" +
+    "  * needs a remote API or credentials\n" +
+    "  * needs a runtime we don't have (GPU, browser, wasm)\n" +
+    "  * output shape is fundamentally incompatible with what the spec wants\n" +
+    "  * the fix would require a DIFFERENT npm/pip/crates dependency\n" +
+    "  (Do NOT return rewrite_handler if the fix requires changing deps —\n" +
+    "   trial installs deps from the seed file BEFORE importing your code;\n" +
+    "   a dep change won't take effect and the retrial will fail identically.)\n\n" +
+    "UNSOLVABLE — no candidate from this source could satisfy the spec.\n\n" +
+    "NONE — no clear repair path; err toward this when uncertain.\n\n" +
+    "PRESERVATION RULES for rewrite_handler (violating these guarantees retrial failure):\n" +
+    "  * Preserve ALL THREE exports exactly:\n" +
+    "      export const capability = {...}\n" +
+    "      export async function accept(deps, opts = {}) {...}\n" +
+    "      export default run;  (or 'export default <fn>' at the file end)\n" +
+    "  * Preserve every top-level const declaration (CAP_ID, ACCEPTS, PRODUCES,\n" +
+    "    REQUIRES, ENV_MAP, PRE_INVOKE, OUTPUT_MAP, RESULT_PARSE, KERNEL_ACTION,\n" +
+    "    KERNEL_SCRIPT / SKILL_BODY / LLM_*, REQUIRES). Do not delete any.\n" +
+    "  * Preserve the prepareSession call — installer wiring must survive.\n" +
+    "  * Preserve the artifact_magic verification block — Phase 1 honesty\n" +
+    "    invariant. If the original handler checks magic bytes, the repaired\n" +
+    "    one must too.\n" +
+    "  * Change ONLY the code inside functions and the KERNEL_SCRIPT body\n" +
+    "    (or skill body prompt). That is where the bug lives.\n" +
+    "  * Same dependencies. Same accepts. Same produces. Same env_map.\n" +
+    "  * Same ES module structure. Same imports.\n" +
+    "  * The repaired file must pass `node --check`. Your output is checked\n" +
+    "    for syntax + exports + preservation before trial runs. Failure on\n" +
+    "    any of these gates rejects the repair without trying it.\n\n" +
+    "Output ONLY this JSON, no prose, no fences:\n\n" +
+    "{\n" +
+    "  \"analysis\": \"<1-2 sentences: the actual root cause>\",\n" +
+    "  \"repair_action\": \"rewrite_handler\" | \"different_candidate\" | \"unsolvable\" | \"none\",\n" +
+    "  \"patched_handler_code\": \"<full corrected handler file>\" | null,\n" +
+    "  \"reason_for_action\": \"<short justification>\"\n" +
+    "}\n\n" +
+    "Rules:\n" +
+    "- Prefer rewrite_handler when the failure names a specific API/arg/import/logic bug.\n" +
+    "- Use different_candidate only when the whole library is unfit.\n" +
+    "- Do NOT invent API surface. If you are unsure how the library's API works,\n" +
+    "  return 'none' rather than guessing — guessing guarantees another failure.\n" +
+    "- Do not include ``` fences inside patched_handler_code.\n" +
+    "- Output only the JSON object as your final message.";
+}
+
+function repairUserPrompt(repair_context) {
+  const { error, phase, handler_code, spec, capability_id } = repair_context || {};
+  const lines = [];
+  if (capability_id) lines.push("CAPABILITY: " + capability_id);
+  if (phase) lines.push("FAILED PHASE: " + phase);
+  lines.push("");
+  lines.push("TRIAL ERROR:");
+  lines.push(String(error || "(none)").slice(0, 4000));
+  lines.push("");
+  lines.push("CURRENT HANDLER CODE:");
+  lines.push("```js");
+  lines.push(String(handler_code || ""));
+  lines.push("```");
+  if (spec) {
+    lines.push("");
+    lines.push("SPEC (accepts, produces, requires, plan):");
+    lines.push("```json");
+    lines.push(JSON.stringify(spec, null, 2).slice(0, 8000));
+    lines.push("```");
+  }
+  return lines.join("\n");
+}
+
+function stripFences(code) {
+  if (!code) return null;
+  let s = String(code).trim();
+  const m = s.match(/^```(?:js|javascript|mjs)?\s*\n([\s\S]*?)\n```$/);
+  if (m) s = m[1];
+  return s;
+}
+
 export default async function agentryReasonDeep(input, ctx) {
-  const { failure, intent, workspace_id, session_id } = input || {};
+  const { failure, intent, workspace_id, session_id, repair_context } = input || {};
+
+  // ── v0.32.0 — repair mode branch ──
+  // Separate from the reasoning path entirely. No tools, no graph
+  // state, no gap recording. Different model default (large context).
+  if (repair_context) {
+    if (typeof ctx.invoke !== "function") throw new Error("agentry.reason.deep requires ctx.invoke");
+    const repairStarted = Date.now();
+    const r = await ctx.invoke("llm.openai_compat", {
+      provider: REPAIR_PROVIDER,
+      model: REPAIR_MODEL,
+      messages: [
+        { role: "system", content: repairSystemPrompt() },
+        { role: "user", content: repairUserPrompt(repair_context) },
+      ],
+      temperature: 0.1,
+      max_tokens: 8000,
+    }, { tenant: "local", by: "agentry.reason.deep" });
+    if (!r.ok) {
+      throw new Error("agentry.reason.deep repair: " + r.error.code + ": " + r.error.message);
+    }
+    const repairContent = String(r.output.content || "");
+    const repairParsed = parseJson(repairContent);
+    if (!repairParsed) {
+      ctx.events.emit("agentry.reason.deep.repair_unparseable", {
+        preview: repairContent.slice(0, 300),
+      });
+      throw new Error("agentry.reason.deep repair: could not parse JSON. Raw: " + repairContent.slice(0, 300));
+    }
+    const patched = stripFences(repairParsed.patched_handler_code) || null;
+    ctx.events.emit("agentry.reason.deep.repair_completed", {
+      repair_action: repairParsed.repair_action || null,
+      has_patched_code: !!patched,
+      model: REPAIR_PROVIDER + "/" + REPAIR_MODEL,
+      ms: Date.now() - repairStarted,
+    });
+    return {
+      output: {
+        analysis: repairParsed.analysis || null,
+        repair_action: repairParsed.repair_action || "none",
+        patched_handler_code: patched,
+        reason_for_action: repairParsed.reason_for_action || null,
+        model_used: REPAIR_PROVIDER + "/" + REPAIR_MODEL,
+      },
+      cost: { time_ms: Date.now() - repairStarted, http_calls: 1 },
+    };
+  }
+  // ── end repair mode ──
+
   if (!failure && !intent) throw new Error("agentry.reason.deep requires failure or intent");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.reason.deep requires ctx.invoke");
 
