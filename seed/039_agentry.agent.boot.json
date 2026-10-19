@@ -1,0 +1,29 @@
+{
+  "id": "agentry.agent.boot",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.agent.boot",
+  "accepts": {
+    "agent_id": { "type": "string", "optional": true },
+    "name": { "type": "string", "optional": true },
+    "skills": { "type": "array", "optional": true },
+    "parent_agent_id": { "type": "string", "optional": true },
+    "memory_refs": { "type": "array", "optional": true },
+    "home_session": { "type": "string", "optional": true },
+    "force_new": { "type": "boolean", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "agent_id": "string",
+    "existing": "boolean",
+    "home_session": "string",
+    "skills": "array",
+    "parent_agent_id": "string|null",
+    "task_count": "number",
+    "state": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 5000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.34.0 — persistent agent identity. Creates a graph node (kind: 'agent') with a home kernel session, declared skills, parent chain for PPECC. Idempotent on agent_id. Once agent.run ships, invoking an agent node will dispatch through agent.run."
+}
