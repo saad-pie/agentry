@@ -1,24 +1,30 @@
 // agentry/src/handlers/agentry.task.run.mjs
-// v0.33.0 — the task primitive.
+// v0.33.1 — task primitive.
 //
 // A task is a plan of capability invocations executed in sequence, with
 // persistent state in the graph. It is the runtime: the thing that calls
-// capabilities on your behalf. Composition works; this wraps composition
-// in a durable, inspectable unit of work.
+// capabilities on your behalf.
+//
+// v0.33.1 fix: extractArtifacts also scans step INPUT for path-like
+// fields pointing to files that now exist. Some handlers (modbender QR
+// skill) write to save_path but don't echo the path in output, violating
+// their own produces contract. The runtime observes the session — if the
+// caller committed to a path and the file exists afterward, it's an
+// artifact. Handlers will always be inconsistent about this.
 //
 // Design:
 //   - task node written via graph.putCapability (kind: "task")
 //   - per-step putCapability so a mid-run crash leaves resumable state
 //   - state: created → running → done | failed | handoff
 //   - budget enforced per step; exhaustion → handoff (not failure)
-//   - artifacts extracted from step outputs (path + base64, magic + size)
+//   - artifacts extracted from step outputs AND step inputs
 //   - trace: {step, capability_id, ok, ms, cost, input_keys, output_keys, error?}
 //
 // Substitution in step input (string values starting with "$"):
 //   $intent              — the task's intent
 //   $prev                — previous step's full output
 //   $prev.field.sub      — path into previous step's output
-//   $last_artifact       — last path-like field from any prior step's output
+//   $last_artifact       — last file-path artifact from any prior step
 //
 // NOT in v1 (deliberate):
 //   - retry on failure (future: task.retry)
@@ -30,42 +36,75 @@
 import { statSync, readFileSync } from "node:fs";
 
 const MAX_ERROR_LEN = 400;
-const ARTIFACT_PATH_PATTERN = /(_path$|^path$|artifact_path$|_file$)/i;
+const ARTIFACT_PATH_PATTERN = /(_path$|^path$|artifact_path$|_file$|^save_path$|^dstPath$|^srcPath$|^output_path$|^input_path$)/i;
 const ARTIFACT_B64_PATTERN = /_base64$/i;
+const FILE_EXT_PATTERN = /\.(png|jpg|jpeg|pdf|mp4|mp3|wav|json|txt|md|csv|html|zip|gif|webp)$/i;
 
 function genTaskId() {
   return "task_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
 }
 
-function extractArtifacts(output, stepIndex) {
+function looksLikePath(key, val) {
+  if (typeof val !== "string" || !val) return false;
+  if (ARTIFACT_PATH_PATTERN.test(key)) return true;
+  if (FILE_EXT_PATTERN.test(val)) return true;
+  return false;
+}
+
+function extractArtifacts(output, stepInput, stepIndex) {
   const artifacts = [];
-  if (!output || typeof output !== "object") return artifacts;
-  for (const [key, val] of Object.entries(output)) {
-    if (typeof val !== "string" || !val) continue;
-    if (ARTIFACT_PATH_PATTERN.test(key)) {
+  const seenPaths = new Set();
+
+  // 1. From output — the well-behaved case
+  if (output && typeof output === "object") {
+    for (const [key, val] of Object.entries(output)) {
+      if (typeof val !== "string" || !val) continue;
+      if (ARTIFACT_PATH_PATTERN.test(key)) {
+        try {
+          const st = statSync(val);
+          if (st.isFile() && st.size > 0) {
+            const magic = readFileSync(val).slice(0, 8).toString("hex");
+            artifacts.push({ kind: "file", field: key, path: val, bytes: st.size, magic, from_step: stepIndex });
+            seenPaths.add(val);
+          }
+        } catch {}
+      } else if (ARTIFACT_B64_PATTERN.test(key)) {
+        try {
+          const buf = Buffer.from(val, "base64");
+          if (buf.length > 0) {
+            artifacts.push({ kind: "base64", field: key, bytes: buf.length, magic: buf.slice(0, 8).toString("hex"), from_step: stepIndex });
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // 2. From input — the "handler wrote to save_path but didn't echo it" case.
+  // If the caller declared a path and the file exists now, it's an artifact.
+  if (stepInput && typeof stepInput === "object") {
+    for (const [key, val] of Object.entries(stepInput)) {
+      if (!looksLikePath(key, val)) continue;
+      if (seenPaths.has(val)) continue;
       try {
         const st = statSync(val);
         if (st.isFile() && st.size > 0) {
           const magic = readFileSync(val).slice(0, 8).toString("hex");
-          artifacts.push({ kind: "file", field: key, path: val, bytes: st.size, magic, from_step: stepIndex });
-        }
-      } catch {}
-    } else if (ARTIFACT_B64_PATTERN.test(key)) {
-      try {
-        const buf = Buffer.from(val, "base64");
-        if (buf.length > 0) {
-          artifacts.push({ kind: "base64", field: key, bytes: buf.length, magic: buf.slice(0, 8).toString("hex"), from_step: stepIndex });
+          artifacts.push({ kind: "file", field: "input:" + key, path: val, bytes: st.size, magic, from_step: stepIndex, from_input: true });
+          seenPaths.add(val);
         }
       } catch {}
     }
   }
-  if (artifacts.length === 0 && typeof output.bytes === "number" && output.bytes > 0) {
+
+  // 3. Bytes-only fallback for outputs that report size without a path
+  if (artifacts.length === 0 && output && typeof output === "object" && typeof output.bytes === "number" && output.bytes > 0) {
     artifacts.push({ kind: "bytes_only", bytes: output.bytes, from_step: stepIndex });
   }
+
   return artifacts;
 }
 
-function resolveRef(ref, stepOutputs, intent) {
+function resolveRef(ref, stepOutputs, artifacts, intent) {
   if (ref === "$intent") return intent;
   if (ref === "$prev") return stepOutputs.length > 0 ? stepOutputs[stepOutputs.length - 1] : undefined;
   if (ref.startsWith("$prev.")) {
@@ -74,31 +113,28 @@ function resolveRef(ref, stepOutputs, intent) {
     return v;
   }
   if (ref === "$last_artifact") {
-    for (let i = stepOutputs.length - 1; i >= 0; i--) {
-      const out = stepOutputs[i];
-      if (out && typeof out === "object") {
-        for (const [k, v] of Object.entries(out)) {
-          if (typeof v === "string" && ARTIFACT_PATH_PATTERN.test(k)) return v;
-        }
-      }
+    // Prefer file-path artifacts over base64/bytes_only.
+    for (let i = artifacts.length - 1; i >= 0; i--) {
+      const a = artifacts[i];
+      if (a.kind === "file" && a.path) return a.path;
     }
     return undefined;
   }
   return ref;
 }
 
-function resolveStepInput(inputSpec, stepOutputs, intent) {
+function resolveStepInput(inputSpec, stepOutputs, artifacts, intent) {
   if (inputSpec === null || typeof inputSpec !== "object" || Array.isArray(inputSpec)) {
     return inputSpec;
   }
   const out = {};
   for (const [key, val] of Object.entries(inputSpec)) {
     if (typeof val === "string" && val.startsWith("$")) {
-      out[key] = resolveRef(val, stepOutputs, intent);
+      out[key] = resolveRef(val, stepOutputs, artifacts, intent);
     } else if (Array.isArray(val)) {
-      out[key] = val.map(v => typeof v === "string" && v.startsWith("$") ? resolveRef(v, stepOutputs, intent) : v);
+      out[key] = val.map(v => typeof v === "string" && v.startsWith("$") ? resolveRef(v, stepOutputs, artifacts, intent) : v);
     } else if (val && typeof val === "object") {
-      out[key] = resolveStepInput(val, stepOutputs, intent);
+      out[key] = resolveStepInput(val, stepOutputs, artifacts, intent);
     } else {
       out[key] = val;
     }
@@ -219,7 +255,7 @@ export default async function agentryTaskRun(input, ctx) {
 
     let stepInput;
     try {
-      stepInput = resolveStepInput(step.input || {}, stepOutputs, task.intent);
+      stepInput = resolveStepInput(step.input || {}, stepOutputs, artifacts, task.intent);
     } catch (e) {
       const err = { step: i, code: "input_resolve_failed", message: e.message };
       graph.putCapability({ ...runningTask, state: "failed", error: err, trace, artifacts, step_index: i, updated_at: Date.now() });
@@ -273,7 +309,9 @@ export default async function agentryTaskRun(input, ctx) {
     }
 
     stepOutputs.push(stepRes.output);
-    const stepArtifacts = extractArtifacts(stepRes.output, i);
+    // v0.33.1 — pass stepInput so artifacts include files the handler wrote
+    // to a caller-provided path but didn't echo back.
+    const stepArtifacts = extractArtifacts(stepRes.output, stepInput, i);
     for (const a of stepArtifacts) artifacts.push(a);
 
     events.emit("task.step", {
