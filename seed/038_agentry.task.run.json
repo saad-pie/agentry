@@ -1,0 +1,26 @@
+{
+  "id": "agentry.task.run",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.task.run",
+  "accepts": {
+    "intent": { "type": "string", "optional": true },
+    "plan": { "type": "array", "optional": true },
+    "task_id": { "type": "string", "optional": true },
+    "session_id": { "type": "string", "optional": true },
+    "parent_task_id": { "type": "string", "optional": true },
+    "budget": { "type": "object", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "task_id": "string",
+    "state": "string",
+    "artifacts": "array",
+    "trace": "array",
+    "error": "object|null"
+  },
+  "cost": { "money_usd": 0, "time_ms": 120000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.33.0 — task execution primitive. Executes a plan of capability invocations in sequence, persisting state to the graph at each step. Supports $prev and $intent substitution in step input. Budget enforced per step; on exhaustion, state=handoff. Artifacts extracted from any *_path/*_base64/path/artifact_path field on step outputs. On step failure, state=failed and step_index stays at the failing step for resume. $prev does not survive process restarts (step outputs are in-memory)."
+}
