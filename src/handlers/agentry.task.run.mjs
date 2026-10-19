@@ -1,16 +1,19 @@
 // agentry/src/handlers/agentry.task.run.mjs
-// v0.33.1 — task primitive.
+// v0.33.2 — task primitive.
 //
 // A task is a plan of capability invocations executed in sequence, with
 // persistent state in the graph. It is the runtime: the thing that calls
 // capabilities on your behalf.
 //
-// v0.33.1 fix: extractArtifacts also scans step INPUT for path-like
-// fields pointing to files that now exist. Some handlers (modbender QR
-// skill) write to save_path but don't echo the path in output, violating
-// their own produces contract. The runtime observes the session — if the
-// caller committed to a path and the file exists afterward, it's an
-// artifact. Handlers will always be inconsistent about this.
+// v0.33.1: extractArtifacts also scans step INPUT for path-like fields
+// pointing to files that now exist. Some handlers (modbender QR skill)
+// write to save_path but don't echo the path in output.
+//
+// v0.33.2: $last_artifact is now belt-and-suspenders. It first checks
+// the artifacts array (which includes from_input artifacts), then falls
+// back to scanning stepOutputs for path-like fields. Trace now includes
+// resolved_small_input so post-mortem debugging shows exactly what value
+// a $ref substitution produced.
 //
 // Design:
 //   - task node written via graph.putCapability (kind: "task")
@@ -18,13 +21,13 @@
 //   - state: created → running → done | failed | handoff
 //   - budget enforced per step; exhaustion → handoff (not failure)
 //   - artifacts extracted from step outputs AND step inputs
-//   - trace: {step, capability_id, ok, ms, cost, input_keys, output_keys, error?}
+//   - trace includes resolved_small_input for debugging
 //
 // Substitution in step input (string values starting with "$"):
 //   $intent              — the task's intent
 //   $prev                — previous step's full output
 //   $prev.field.sub      — path into previous step's output
-//   $last_artifact       — last file-path artifact from any prior step
+//   $last_artifact       — last file path from any prior step (artifacts first, then output scan)
 //
 // NOT in v1 (deliberate):
 //   - retry on failure (future: task.retry)
@@ -55,7 +58,6 @@ function extractArtifacts(output, stepInput, stepIndex) {
   const artifacts = [];
   const seenPaths = new Set();
 
-  // 1. From output — the well-behaved case
   if (output && typeof output === "object") {
     for (const [key, val] of Object.entries(output)) {
       if (typeof val !== "string" || !val) continue;
@@ -79,8 +81,6 @@ function extractArtifacts(output, stepInput, stepIndex) {
     }
   }
 
-  // 2. From input — the "handler wrote to save_path but didn't echo it" case.
-  // If the caller declared a path and the file exists now, it's an artifact.
   if (stepInput && typeof stepInput === "object") {
     for (const [key, val] of Object.entries(stepInput)) {
       if (!looksLikePath(key, val)) continue;
@@ -96,7 +96,6 @@ function extractArtifacts(output, stepInput, stepIndex) {
     }
   }
 
-  // 3. Bytes-only fallback for outputs that report size without a path
   if (artifacts.length === 0 && output && typeof output === "object" && typeof output.bytes === "number" && output.bytes > 0) {
     artifacts.push({ kind: "bytes_only", bytes: output.bytes, from_step: stepIndex });
   }
@@ -113,10 +112,19 @@ function resolveRef(ref, stepOutputs, artifacts, intent) {
     return v;
   }
   if (ref === "$last_artifact") {
-    // Prefer file-path artifacts over base64/bytes_only.
+    // v0.33.2 — preferred path: scan artifacts array (includes from_input).
     for (let i = artifacts.length - 1; i >= 0; i--) {
       const a = artifacts[i];
       if (a.kind === "file" && a.path) return a.path;
+    }
+    // Fallback: scan stepOutputs for path-like fields.
+    for (let i = stepOutputs.length - 1; i >= 0; i--) {
+      const out = stepOutputs[i];
+      if (out && typeof out === "object") {
+        for (const [k, v] of Object.entries(out)) {
+          if (typeof v === "string" && v && ARTIFACT_PATH_PATTERN.test(k)) return v;
+        }
+      }
     }
     return undefined;
   }
@@ -142,6 +150,20 @@ function resolveStepInput(inputSpec, stepOutputs, artifacts, intent) {
   return out;
 }
 
+function smallInput(stepInput) {
+  const out = {};
+  if (!stepInput || typeof stepInput !== "object") return out;
+  for (const [k, v] of Object.entries(stepInput)) {
+    if (typeof v === "string" && v.length < 300) out[k] = v;
+    else if (typeof v === "number" || typeof v === "boolean") out[k] = v;
+    else if (v === null) out[k] = null;
+    else if (v === undefined) out[k] = "undefined";
+    else if (typeof v === "string") out[k] = "<string:" + v.length + ">";
+    else out[k] = "<" + typeof v + ">";
+  }
+  return out;
+}
+
 function budgetExhausted(budget, spent) {
   return (budget.cost_usd - spent.cost_usd) <= 0
       || (budget.tokens - spent.tokens) <= 0
@@ -156,7 +178,6 @@ export default async function agentryTaskRun(input, ctx) {
   const events = ctx.events;
   const started = Date.now();
 
-  // ── Resolve or create task node ──
   let task;
   let isNew = false;
 
@@ -203,7 +224,6 @@ export default async function agentryTaskRun(input, ctx) {
     events.emit("task.created", { task_id: id, plan_steps: plan.length, intent: intent || null });
   }
 
-  // ── Load budget, trace, artifacts from node ──
   const startIndex = Number(task.step_index || 0);
   const budget = {
     cost_usd: Number(task.budget?.cost_usd ?? 0.10),
@@ -217,14 +237,13 @@ export default async function agentryTaskRun(input, ctx) {
   };
   const trace = Array.isArray(task.trace) ? [...task.trace] : [];
   const artifacts = Array.isArray(task.artifacts) ? [...task.artifacts] : [];
-  const stepOutputs = []; // in-memory only; enables $prev within a single run
+  const stepOutputs = [];
   const taskSession = session_id || task.session_id || ("task_" + task.id);
 
   const runningTask = { ...task, state: "running", step_index: startIndex, updated_at: Date.now() };
   graph.putCapability(runningTask);
   events.emit("task.running", { task_id: task.id, from_step: startIndex, resume: !isNew });
 
-  // ── Execute each step ──
   for (let i = startIndex; i < task.plan.length; i++) {
     const step = task.plan[i];
 
@@ -289,6 +308,7 @@ export default async function agentryTaskRun(input, ctx) {
       ms: stepMs,
       cost: { money_usd: Number(stepCost.money_usd || 0), tokens: Number(stepCost.tokens || 0) },
       input_keys: Object.keys(stepInput),
+      resolved_small_input: smallInput(stepInput),
       output_keys: stepRes.ok ? Object.keys(stepRes.output || {}) : null,
       error: stepRes.ok ? null : {
         code: stepRes.error?.code || "unknown",
@@ -309,8 +329,6 @@ export default async function agentryTaskRun(input, ctx) {
     }
 
     stepOutputs.push(stepRes.output);
-    // v0.33.1 — pass stepInput so artifacts include files the handler wrote
-    // to a caller-provided path but didn't echo back.
     const stepArtifacts = extractArtifacts(stepRes.output, stepInput, i);
     for (const a of stepArtifacts) artifacts.push(a);
 
@@ -326,7 +344,6 @@ export default async function agentryTaskRun(input, ctx) {
     });
   }
 
-  // ── Done ──
   const doneTask = {
     ...runningTask,
     state: "done",
