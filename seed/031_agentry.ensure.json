@@ -1,0 +1,27 @@
+{
+  "id": "agentry.ensure",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.ensure",
+  "accepts": {
+    "capability_id": "string",
+    "timeout_ms": { "type": "number", "optional": true },
+    "wanted_kind": { "type": "string", "optional": true },
+    "wanted_description": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "available": "boolean",
+    "capability_id": "string",
+    "kind": "string|null",
+    "handler_file": "string|null",
+    "gap_id": "string|null",
+    "proposal_id": "string|null",
+    "waited_ms": "number",
+    "reason": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 120000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.36.0 — the vision loop as a capability. If a capability_id is not in the graph, records a gap and polls until it is adopted (or times out). Ports the mcp/tools.mjs ensure_capability logic without the agentry.reason call — caller already knows the id. Used by task.run to auto-recover from not_found failures (retry-on-not-found ships in v0.37.0)."
+}
