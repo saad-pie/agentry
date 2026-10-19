@@ -1,0 +1,27 @@
+{
+  "id": "agentry.agent.task",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.agent.task",
+  "accepts": {
+    "agent_id": "string",
+    "intent": { "type": "string", "optional": true },
+    "plan": { "type": "array", "optional": true },
+    "task_id": { "type": "string", "optional": true },
+    "budget": { "type": "object", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "task_id": "string",
+    "state": "string",
+    "owner_agent": "string",
+    "home_session": "string",
+    "artifacts": "array",
+    "trace": "array",
+    "error": "object|null"
+  },
+  "cost": { "money_usd": 0, "time_ms": 120000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.35.0 — agent-scoped task execution. Wraps agentry.task.run, binding the task to the agent's home_session and stamping owner_agent on the resulting task node. Increments agent.task_count and records last_task_id on success. On task failure, propagates the failure with owner_agent attached but does NOT increment task_count."
+}
