@@ -1,40 +1,39 @@
 // agentry/src/handlers/agentry.task.run.mjs
-// v0.33.2 — task primitive.
+// v0.37.0 — task primitive with retry-on-missing-capability.
 //
-// A task is a plan of capability invocations executed in sequence, with
-// persistent state in the graph. It is the runtime: the thing that calls
-// capabilities on your behalf.
-//
-// v0.33.1: extractArtifacts also scans step INPUT for path-like fields
-// pointing to files that now exist. Some handlers (modbender QR skill)
-// write to save_path but don't echo the path in output.
-//
-// v0.33.2: $last_artifact is now belt-and-suspenders. It first checks
-// the artifacts array (which includes from_input artifacts), then falls
-// back to scanning stepOutputs for path-like fields. Trace now includes
-// resolved_small_input so post-mortem debugging shows exactly what value
-// a $ref substitution produced.
+// v0.33.0: initial primitive.
+// v0.33.1: extractArtifacts scans step input for path-like fields (some
+//          handlers write to save_path but don't echo it back).
+// v0.33.2: $last_artifact belt+suspenders, resolved_small_input in trace.
+// v0.37.0: on step failure with error.code === "invalid_capability",
+//          call agentry.ensure(capability_id) once, then retry the step
+//          once. If ensure times out or retry fails, task fails with
+//          retry metadata in the trace. Disable via
+//          input.retry_on_missing_capability=false. This is the loop
+//          that closes: agent hits a wall -> agentry builds the tool ->
+//          agent continues.
 //
 // Design:
 //   - task node written via graph.putCapability (kind: "task")
 //   - per-step putCapability so a mid-run crash leaves resumable state
 //   - state: created → running → done | failed | handoff
-//   - budget enforced per step; exhaustion → handoff (not failure)
+//   - budget enforced per step; exhaustion → handoff
 //   - artifacts extracted from step outputs AND step inputs
-//   - trace includes resolved_small_input for debugging
+//   - trace: {step, capability_id, ok, ms, cost, input_keys,
+//             resolved_small_input, output_keys, error, retry?}
 //
 // Substitution in step input (string values starting with "$"):
 //   $intent              — the task's intent
 //   $prev                — previous step's full output
 //   $prev.field.sub      — path into previous step's output
-//   $last_artifact       — last file path from any prior step (artifacts first, then output scan)
+//   $last_artifact       — last file path from any prior step
 //
 // NOT in v1 (deliberate):
-//   - retry on failure (future: task.retry)
+//   - retry beyond one attempt per step (future: task.retry)
 //   - handoff to another owner (future: task.handoff)
-//   - $step.N references (needs persisted step outputs — future)
+//   - $step.N references (needs persisted step outputs)
 //   - parallel steps (future: task.run_dag)
-//   - resume $prev across process restarts (step outputs are in-memory only)
+//   - resume $prev across process restarts (in-memory only)
 
 import { statSync, readFileSync } from "node:fs";
 
@@ -42,6 +41,7 @@ const MAX_ERROR_LEN = 400;
 const ARTIFACT_PATH_PATTERN = /(_path$|^path$|artifact_path$|_file$|^save_path$|^dstPath$|^srcPath$|^output_path$|^input_path$)/i;
 const ARTIFACT_B64_PATTERN = /_base64$/i;
 const FILE_EXT_PATTERN = /\.(png|jpg|jpeg|pdf|mp4|mp3|wav|json|txt|md|csv|html|zip|gif|webp)$/i;
+const DEFAULT_ENSURE_TIMEOUT_MS = 120000;
 
 function genTaskId() {
   return "task_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
@@ -112,12 +112,10 @@ function resolveRef(ref, stepOutputs, artifacts, intent) {
     return v;
   }
   if (ref === "$last_artifact") {
-    // v0.33.2 — preferred path: scan artifacts array (includes from_input).
     for (let i = artifacts.length - 1; i >= 0; i--) {
       const a = artifacts[i];
       if (a.kind === "file" && a.path) return a.path;
     }
-    // Fallback: scan stepOutputs for path-like fields.
     for (let i = stepOutputs.length - 1; i >= 0; i--) {
       const out = stepOutputs[i];
       if (out && typeof out === "object") {
@@ -171,8 +169,14 @@ function budgetExhausted(budget, spent) {
 }
 
 export default async function agentryTaskRun(input, ctx) {
-  const { intent, plan, task_id, session_id, parent_task_id, budget: budgetOverride } = input || {};
+  const {
+    intent, plan, task_id, session_id, parent_task_id, budget: budgetOverride,
+    retry_on_missing_capability, ensure_timeout_ms,
+  } = input || {};
   if (typeof ctx.invoke !== "function") throw new Error("agentry.task.run requires ctx.invoke");
+
+  const retryOnMissing = retry_on_missing_capability !== false;
+  const ensureTimeout = Math.max(2000, Math.min(600000, Number(ensure_timeout_ms) || DEFAULT_ENSURE_TIMEOUT_MS));
 
   const graph = ctx.graph;
   const events = ctx.events;
@@ -202,22 +206,12 @@ export default async function agentryTaskRun(input, ctx) {
       time_ms: Number(budgetOverride?.time_ms ?? 120000),
     };
     task = {
-      id,
-      kind: "task",
-      intent: intent || null,
-      plan,
-      state: "created",
-      owner_agent: null,
-      parent_task_id: parent_task_id || null,
-      session_id: session_id || null,
+      id, kind: "task", intent: intent || null, plan,
+      state: "created", owner_agent: null,
+      parent_task_id: parent_task_id || null, session_id: session_id || null,
       budget: { ...bud, spent_cost_usd: 0, spent_tokens: 0, spent_time_ms: 0 },
-      artifacts: [],
-      trace: [],
-      error: null,
-      step_index: 0,
-      created_at: Date.now(),
-      updated_at: Date.now(),
-      completed_at: null,
+      artifacts: [], trace: [], error: null, step_index: 0,
+      created_at: Date.now(), updated_at: Date.now(), completed_at: null,
     };
     graph.putCapability(task);
     isNew = true;
@@ -287,19 +281,84 @@ export default async function agentryTaskRun(input, ctx) {
     let stepRes;
     try {
       stepRes = await ctx.invoke(step.capability_id, stepInput, {
-        tenant: "local",
-        by: "agentry.task.run",
-        task_id: task.id,
+        tenant: "local", by: "agentry.task.run", task_id: task.id,
       });
     } catch (e) {
       stepRes = { ok: false, error: { code: "internal", message: e.message } };
     }
-    const stepMs = Date.now() - stepStarted;
+    let stepMs = Date.now() - stepStarted;
+    let retryInfo = null;
+
+    // ── v0.37.0 — retry-on-missing-capability ──
+    if (!stepRes.ok && stepRes.error?.code === "invalid_capability" && retryOnMissing) {
+      retryInfo = {
+        attempted: true,
+        original_error: {
+          code: stepRes.error.code,
+          message: String(stepRes.error.message || "").slice(0, MAX_ERROR_LEN),
+        },
+      };
+      events.emit("task.retry.started", {
+        task_id: task.id, step: i, capability_id: step.capability_id,
+        ensure_timeout_ms: ensureTimeout,
+      });
+
+      let ensureRes;
+      const ensureStarted = Date.now();
+      try {
+        ensureRes = await ctx.invoke("agentry.ensure", {
+          capability_id: step.capability_id,
+          timeout_ms: ensureTimeout,
+          wanted_kind: step.wanted_kind || "tool",
+          wanted_description: step.wanted_description || null,
+        }, { tenant: "local", by: "agentry.task.run", task_id: task.id });
+      } catch (e) {
+        ensureRes = { ok: false, error: { message: e.message } };
+      }
+      const ensureMs = Date.now() - ensureStarted;
+      const ensureOut = ensureRes.ok ? (ensureRes.output || {}) : {};
+      retryInfo.ensure = {
+        available: ensureOut.available === true,
+        gap_id: ensureOut.gap_id || null,
+        proposal_id: ensureOut.proposal_id || null,
+        reason: ensureOut.reason || (ensureRes.error?.message || "ensure_threw"),
+        waited_ms: ensureMs,
+      };
+      events.emit("task.retry.ensure", {
+        task_id: task.id, step: i, capability_id: step.capability_id,
+        available: retryInfo.ensure.available,
+        gap_id: retryInfo.ensure.gap_id,
+        reason: retryInfo.ensure.reason,
+        waited_ms: ensureMs,
+      });
+
+      if (ensureOut.available === true) {
+        const retryStarted = Date.now();
+        try {
+          stepRes = await ctx.invoke(step.capability_id, stepInput, {
+            tenant: "local", by: "agentry.task.run", task_id: task.id,
+          });
+        } catch (e) {
+          stepRes = { ok: false, error: { code: "internal", message: e.message } };
+        }
+        stepMs = Date.now() - retryStarted;
+        retryInfo.retry_ok = stepRes.ok === true;
+        retryInfo.retry_ms = stepMs;
+        events.emit(stepRes.ok ? "task.retry.succeeded" : "task.retry.failed", {
+          task_id: task.id, step: i, capability_id: step.capability_id, ms: stepMs,
+        });
+      } else {
+        events.emit("task.retry.ensure_unavailable", {
+          task_id: task.id, step: i, capability_id: step.capability_id,
+          reason: retryInfo.ensure.reason,
+        });
+      }
+    }
 
     const stepCost = stepRes.cost || {};
     spent.cost_usd += Number(stepCost.money_usd || 0);
     spent.tokens += Number(stepCost.tokens || 0);
-    spent.time_ms += stepMs;
+    spent.time_ms += stepMs + (retryInfo ? (retryInfo.ensure.waited_ms || 0) : 0);
 
     const entry = {
       step: i,
@@ -314,6 +373,7 @@ export default async function agentryTaskRun(input, ctx) {
         code: stepRes.error?.code || "unknown",
         message: String(stepRes.error?.message || "").slice(0, MAX_ERROR_LEN),
       },
+      ...(retryInfo ? { retry: retryInfo } : {}),
     };
     trace.push(entry);
 
@@ -335,6 +395,7 @@ export default async function agentryTaskRun(input, ctx) {
     events.emit("task.step", {
       task_id: task.id, step: i, capability_id: step.capability_id,
       ok: true, ms: stepMs, artifacts: stepArtifacts.length,
+      ...(retryInfo ? { retried: true } : {}),
     });
 
     graph.putCapability({

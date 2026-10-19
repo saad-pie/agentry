@@ -9,7 +9,9 @@
     "task_id": { "type": "string", "optional": true },
     "session_id": { "type": "string", "optional": true },
     "parent_task_id": { "type": "string", "optional": true },
-    "budget": { "type": "object", "optional": true }
+    "budget": { "type": "object", "optional": true },
+    "retry_on_missing_capability": { "type": "boolean", "optional": true },
+    "ensure_timeout_ms": { "type": "number", "optional": true }
   },
   "produces": {
     "ok": "boolean",
@@ -22,5 +24,5 @@
   "cost": { "money_usd": 0, "time_ms": 120000 },
   "limits": {},
   "source": "seeded:agentry",
-  "notes": "v0.33.0 — task execution primitive. Executes a plan of capability invocations in sequence, persisting state to the graph at each step. Supports $prev and $intent substitution in step input. Budget enforced per step; on exhaustion, state=handoff. Artifacts extracted from any *_path/*_base64/path/artifact_path field on step outputs. On step failure, state=failed and step_index stays at the failing step for resume. $prev does not survive process restarts (step outputs are in-memory)."
+  "notes": "v0.37.0 — on step failure with error.code=invalid_capability, calls agentry.ensure once and retries the step once. Disable via retry_on_missing_capability=false. ensure_timeout_ms defaults 120000, clamped 2000-600000. Retry metadata is nested under trace[i].retry."
 }
