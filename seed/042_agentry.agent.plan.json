@@ -1,0 +1,29 @@
+{
+  "id": "agentry.agent.plan",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.agent.plan",
+  "accepts": {
+    "intent": "string",
+    "agent_id": { "type": "string", "optional": true },
+    "skills": { "type": "array", "optional": true },
+    "max_steps": { "type": "number", "optional": true },
+    "execute": { "type": "boolean", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "plan": "array",
+    "agent_id": "string|null",
+    "model_used": "string",
+    "reasoning": "string|null",
+    "capabilities_considered": "number",
+    "steps": "number",
+    "executed": "boolean",
+    "task": "object",
+    "execute_error": "string"
+  },
+  "cost": { "money_usd": 0, "time_ms": 30000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.38.0 — agent generates plan from intent. If agent_id is set, filters capabilities to agent.skills. Steps can reference capabilities that don't exist yet (with wanted_kind + wanted_description); task.run's retry-on-missing path picks those up. execute=true hands the plan straight to agentry.agent.task. Model: groq/openai-gpt-oss-120b by default, overridable via AGENTRY_PLANNER_PROVIDER + AGENTRY_PLANNER_MODEL."
+}
