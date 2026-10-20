@@ -140,7 +140,17 @@ function buildPlanPrompt({ intent, capabilities, maxSteps }) {
     "   \"$prev.final\" (not \"$prev.stdout\").\n" +
     "10. If the intent is a SINGLE deterministic operation (convert X to Y,\n" +
     "    fetch URL, generate QR, render PDF) — use the direct capability,\n" +
-    "    not DSH.";
+    "    not DSH.\n" +
+    "11. PATH FORMAT — path inputs (save_path, output_path, file_path, etc.)\n" +
+    "    MUST be either (a) an absolute path (e.g. \"/tmp/qr.png\"), or (b)\n" +
+    "    a $tmp/... reference (e.g. \"$tmp/qr.png\") which resolves to a\n" +
+    "    writable scratch directory. Do NOT invent $ tokens like \"$home\",\n" +
+    "    \"$cwd\", \"$work\". Only these are recognized: $tmp, $prev,\n" +
+    "    $last_artifact, $intent. Any other $ prefix is passed literally.\n" +
+    "12. If a capability's `produces` already contains a file path or\n" +
+    "    `data_url` (e.g. modbender QR skill returns `path`), the file\n" +
+    "    already exists. Do NOT add a separate save/write step to persist it.\n" +
+    "    Reference it downstream via \"$last_artifact\" or \"$prev.<field>\".";
 }
 
 function parseJson(text) {

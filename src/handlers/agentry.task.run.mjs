@@ -1,4 +1,6 @@
 // agentry/src/handlers/agentry.task.run.mjs
+// v0.44.0 — $tmp substitution → /tmp/agentry-scratch
+//
 // v0.43.1 — failure returns carry state:"failed"
 //
 // v0.42.0 — task primitive with retry-on-missing + tool_calls
@@ -40,7 +42,7 @@
 //   - parallel steps (future: task.run_dag)
 //   - resume $prev across process restarts (in-memory only)
 
-import { statSync, readFileSync } from "node:fs";
+import { statSync, readFileSync, mkdirSync } from "node:fs";
 
 const MAX_ERROR_LEN = 400;
 const ARTIFACT_PATH_PATTERN = /(_path$|^path$|artifact_path$|_file$|^save_path$|^dstPath$|^srcPath$|^output_path$|^input_path$)/i;
@@ -153,6 +155,11 @@ function resolveRef(ref, stepOutputs, artifacts, intent) {
     for (const p of ref.slice(6).split(".")) v = v?.[p];
     return v;
   }
+  // v0.44.0 — $tmp substitution. LLMs naturally write "$tmp/x.png" as a
+  // path prefix; resolve it to a shared writable scratch directory so
+  // the file actually lands on disk where downstream steps can read it.
+  if (ref === "$tmp") return "/tmp/agentry-scratch";
+  if (ref.startsWith("$tmp/")) return "/tmp/agentry-scratch/" + ref.slice(5);
   if (ref === "$last_artifact") {
     for (let i = artifacts.length - 1; i >= 0; i--) {
       const a = artifacts[i];
@@ -275,6 +282,9 @@ export default async function agentryTaskRun(input, ctx) {
   const artifacts = Array.isArray(task.artifacts) ? [...task.artifacts] : [];
   const stepOutputs = [];
   const taskSession = session_id || task.session_id || ("task_" + task.id);
+
+  // v0.44.0 — ensure scratch dir exists so $tmp/... resolves to a real path.
+  try { mkdirSync("/tmp/agentry-scratch", { recursive: true }); } catch {}
 
   const runningTask = { ...task, state: "running", step_index: startIndex, updated_at: Date.now() };
   graph.putCapability(runningTask);
