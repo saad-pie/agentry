@@ -29,6 +29,22 @@ export function loadSeed({ graph, events, seedDir }) {
       continue;
     }
 
+    // v0.45.1 — check raw history (including retired) so a retired seed
+    // cap isn't re-added on every boot. getCapability() returns only live
+    // caps, so a retired seed cap looked "missing" and got resurrected,
+    // undoing any deliberate retirement of a seed-file capability.
+    let everExisted = false;
+    if (existsSync(graph.capsFile)) {
+      const raw = readFileSync(graph.capsFile, "utf8");
+      for (const line of raw.split("\n")) {
+        if (!line) continue;
+        try {
+          const o = JSON.parse(line);
+          if (o.id === spec.id) { everExisted = true; break; }
+        } catch {}
+      }
+    }
+    if (everExisted) { skipped++; continue; }
     const existing = graph.getCapability(spec.id);
     if (existing) { skipped++; continue; }
 

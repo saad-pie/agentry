@@ -1,0 +1,23 @@
+{
+  "id": "agentry.message.read",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.message.read",
+  "accepts": {
+    "agent_id": "string",
+    "thread_id": { "type": "string", "optional": true },
+    "since": { "type": "number", "optional": true },
+    "limit": { "type": "number", "optional": true },
+    "include_sent": { "type": "boolean", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "agent_id": "string",
+    "count": "number",
+    "messages": "array"
+  },
+  "cost": { "money_usd": 0, "time_ms": 100 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.46.0 — read an agent's messages. Filters by thread_id, since timestamp, and limit. include_sent=true also returns messages FROM this agent (for thread reconstruction)."
+}

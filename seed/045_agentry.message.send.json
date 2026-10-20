@@ -1,0 +1,25 @@
+{
+  "id": "agentry.message.send",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.message.send",
+  "accepts": {
+    "from_agent": "string",
+    "to_agent": "string",
+    "body": "string",
+    "thread_id": { "type": "string", "optional": true },
+    "task_id": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "message_id": "string",
+    "thread_id": "string",
+    "from_agent": "string",
+    "to_agent": "string",
+    "sent_at": "number"
+  },
+  "cost": { "money_usd": 0, "time_ms": 100 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.46.0 — the message primitive. Writes a kind:'message' node to the graph. Agents read their inbox via agentry.message.read or by including thread_id in their chat context."
+}
