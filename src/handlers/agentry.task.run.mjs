@@ -1,4 +1,6 @@
 // agentry/src/handlers/agentry.task.run.mjs
+// v0.43.1 — failure returns carry state:"failed"
+//
 // v0.42.0 — task primitive with retry-on-missing + tool_calls
 //          artifact extraction.
 //
@@ -285,7 +287,7 @@ export default async function agentryTaskRun(input, ctx) {
       const err = { step: i, code: "invalid_step", message: "step missing capability_id" };
       graph.putCapability({ ...runningTask, state: "failed", error: err, trace, artifacts, step_index: i, updated_at: Date.now() });
       events.emit("task.failed", { task_id: task.id, step: i, code: "invalid_step" });
-      return { output: { ok: false, task_id: task.id, error: err, artifacts, trace }, cost: { time_ms: Date.now() - started } };
+      return { output: { ok: false, state: "failed", task_id: task.id, error: err, artifacts, trace }, cost: { time_ms: Date.now() - started } };
     }
 
     if (budgetExhausted(budget, spent)) {
@@ -425,7 +427,7 @@ export default async function agentryTaskRun(input, ctx) {
         updated_at: Date.now(),
       });
       events.emit("task.failed", { task_id: task.id, step: i, capability_id: step.capability_id, code: entry.error.code });
-      return { output: { ok: false, task_id: task.id, error: err, artifacts, trace }, cost: { time_ms: Date.now() - started } };
+      return { output: { ok: false, state: "failed", task_id: task.id, error: err, artifacts, trace }, cost: { time_ms: Date.now() - started } };
     }
 
     stepOutputs.push(stepRes.output);

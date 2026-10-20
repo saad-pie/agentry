@@ -45,7 +45,9 @@ function genEphemeralAgentName(conversationId) {
 // messages for done/failed/handoff so the caller can act on the state.
 function summariseTask(task) {
   if (!task) return "(no task)";
-  const state = task.state || "unknown";
+  // v0.43.1 — task.run's older failure returns omit state; use error as
+  // a fallback signal so we name the failure instead of "unknown".
+  const state = task.state || (task.error ? "failed" : "unknown");
   const steps = task.trace || [];
   const artifacts = task.artifacts || [];
   const ok_steps = steps.filter(s => s.ok).length;
