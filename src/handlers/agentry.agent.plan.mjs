@@ -150,7 +150,15 @@ function buildPlanPrompt({ intent, capabilities, maxSteps }) {
     "12. If a capability's `produces` already contains a file path or\n" +
     "    `data_url` (e.g. modbender QR skill returns `path`), the file\n" +
     "    already exists. Do NOT add a separate save/write step to persist it.\n" +
-    "    Reference it downstream via \"$last_artifact\" or \"$prev.<field>\".";
+    "    Reference it downstream via \"$last_artifact\" or \"$prev.<field>\".\n" +
+    "13. USE EXISTING CAPABILITIES. If ANY capability in the list can\n" +
+    "    accomplish a step, use its EXACT id. Inventing new dotted ids\n" +
+    "    (like \"pdf.from_image\", \"file.write_base64\", \"node.run\") when\n" +
+    "    a real one exists (like \"pdf-lib-table\") causes the pipeline to\n" +
+    "    hang for 2 minutes trying to build the fake capability, then fail.\n" +
+    "    Only invent a new id when NO existing capability can work. If 2+\n" +
+    "    existing capabilities fit, pick the one whose `produces` fields\n" +
+    "    most closely match this step's required output.";
 }
 
 function parseJson(text) {

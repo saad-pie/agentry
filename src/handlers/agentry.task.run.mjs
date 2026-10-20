@@ -394,12 +394,20 @@ export default async function agentryTaskRun(input, ctx) {
         ensure_timeout_ms: ensureTimeout,
       });
 
+      // v0.44.3 — if the step has no wanted_kind / wanted_description, the
+      // planner thought the capability already existed. That's almost always
+      // a hallucinated id (e.g. "pdf.from_image", "file.write_base64"). Don't
+      // wait 2 minutes for adoption that was never going to happen. Short-
+      // circuit to 5s so the task fails fast and the caller can retry with a
+      // corrected plan.
+      const isPlannedNewCap = !!(step.wanted_kind || step.wanted_description);
+      const effectiveEnsureTimeout = isPlannedNewCap ? ensureTimeout : Math.min(ensureTimeout, 5000);
       let ensureRes;
       const ensureStarted = Date.now();
       try {
         ensureRes = await ctx.invoke("agentry.ensure", {
           capability_id: step.capability_id,
-          timeout_ms: ensureTimeout,
+          timeout_ms: effectiveEnsureTimeout,
           wanted_kind: step.wanted_kind || "tool",
           wanted_description: step.wanted_description || null,
         }, { tenant: "local", by: "agentry.task.run", task_id: task.id });
