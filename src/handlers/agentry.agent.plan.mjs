@@ -173,6 +173,31 @@ function parseJson(text) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
+// v0.46.2 — post-plan canonicalization. The LLM sometimes invents a
+// capability_id (e.g. "pdf.from_image") even when a real one matching
+// its own wanted_description exists in the enumeration (e.g. "pdf-lib-table").
+function canonicalizePlan(steps, capabilities) {
+  const capIds = new Set(capabilities.map(c => c.id));
+  const out = [];
+  for (const step of steps) {
+    if (capIds.has(step.capability_id)) { out.push(step); continue; }
+    if (!step.wanted_description) { out.push(step); continue; }
+    const desc = String(step.wanted_description).toLowerCase();
+    const keywords = desc.split(/[^a-z0-9]+/).filter(w => w.length > 2);
+    let best = null, bestScore = 0;
+    for (const cap of capabilities) {
+      const corpus = (cap.id + " " + (cap.kind || "") + " " + (cap.accepts || []).join(" ") + " " + (cap.produces || [])).toLowerCase();
+      let score = 0;
+      for (const kw of keywords) if (corpus.includes(kw)) score++;
+      if (score > bestScore) { bestScore = score; best = cap; }
+    }
+    if (best && bestScore >= 2) {
+      out.push({ ...step, capability_id: best.id, original_planned_id: step.capability_id, canonicalized: true });
+    } else { out.push(step); }
+  }
+  return out;
+}
+
 function validatePlan(parsed, maxSteps) {
   if (!parsed || !Array.isArray(parsed.steps)) {
     return { ok: false, reason: "steps_not_array" };
@@ -274,6 +299,12 @@ export default async function agentryAgentPlan(input, ctx) {
     throw new Error("agentry.agent.plan: invalid plan: " + validation.reason);
   }
 
+  const canonicalSteps = canonicalizePlan(validation.steps, capabilities);
+  const rewrites = canonicalSteps.filter(s => s.canonicalized);
+  if (rewrites.length > 0) {
+    events.emit("agent.plan.canonicalized", { rewrites: rewrites.map(r => ({ from: r.original_planned_id, to: r.capability_id })) });
+  }
+
   events.emit("agent.plan.completed", {
     intent: String(intent).slice(0, 200),
     steps: validation.steps.length,
@@ -283,12 +314,13 @@ export default async function agentryAgentPlan(input, ctx) {
 
   const output = {
     ok: true,
-    plan: validation.steps,
+    plan: canonicalSteps,
     agent_id: agent_id || null,
     model_used: llmRes.output.model || (PROVIDER + "/" + MODEL),
     reasoning: parsed.reasoning || null,
     capabilities_considered: capabilities.length,
-    steps: validation.steps.length,
+    steps: canonicalSteps.length,
+    ...(rewrites.length > 0 ? { canonicalized_count: rewrites.length } : {}),
   };
 
   if (execute === true) {
@@ -300,7 +332,7 @@ export default async function agentryAgentPlan(input, ctx) {
         const taskRes = await ctx.invoke("agentry.agent.task", {
           agent_id,
           intent: String(intent),
-          plan: validation.steps,
+          plan: canonicalSteps,
         }, { tenant: "local", by: "agentry.agent.plan" });
         output.executed = true;
         output.task = taskRes.output || {};

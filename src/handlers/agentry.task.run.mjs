@@ -408,7 +408,9 @@ export default async function agentryTaskRun(input, ctx) {
       // circuit to 5s so the task fails fast and the caller can retry with a
       // corrected plan.
       const isPlannedNewCap = !!(step.wanted_kind || step.wanted_description);
-      const effectiveEnsureTimeout = isPlannedNewCap ? ensureTimeout : Math.min(ensureTimeout, 5000);
+      const effectiveEnsureTimeout = isPlannedNewCap
+        ? Math.min(ensureTimeout, 30000)
+        : Math.min(ensureTimeout, 5000);
       let ensureRes;
       const ensureStarted = Date.now();
       try {
