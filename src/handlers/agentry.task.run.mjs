@@ -201,6 +201,19 @@ function resolveRef(ref, stepOutputs, artifacts, intent) {
     }
     return undefined;
   }
+  // v0.44.2 — string-embedded substitution. LLMs naturally write templates
+  // like "![]($last_artifact)" or "See output at $prev.path". If the string
+  // starts with $, the branches above handle the whole-value case. If $var
+  // appears INSIDE a longer string, substitute in place. Only recognized
+  // tokens are replaced; unrecognized $foo is left literal.
+  if (typeof ref === "string" && ref.length > 1 && !ref.startsWith("$") && ref.includes("$")) {
+    return ref.replace(/(\$(?:last_artifact|intent|prev(?:\.[\w.]+)?|tmp(?:\/[\w.\-\/]+)?))/g, (m) => {
+      const v = resolveRef(m, stepOutputs, artifacts, intent);
+      return v === undefined ? m : String(v);
+    });
+  }
+
+
   return ref;
 }
 
