@@ -1,24 +1,25 @@
 // agentry/src/handlers/agentry.agent.plan.mjs
-// v0.38.0 — agent generates its own plan from an intent.
+// v0.41.0 — agent generates its own plan from an intent.
 //
-// Given an intent and an agent (optional), produce a plan (array of
-// {capability_id, input} steps) that a caller can hand to
-// agentry.task.run or agentry.agent.task.
+// v0.38.0: initial planner. Excluded kind:"agent" from the enumeration
+//          to prevent the planner seeing itself — but that also hid
+//          agentry.agent.dsh, so agentic tasks never routed to it.
+// v0.41.0: replace kind-based exclusion with explicit PLANNER_EXCLUDED_IDS.
+//          Add prompt hint for preferring agentry.agent.dsh on
+//          write/run/iterate tasks. Add agent.dsh output shape hint
+//          ($prev.final is the answer text).
 //
 // Design:
 //   - Input: {intent, agent_id?, skills?, max_steps?, execute?}
 //   - agent_id given: filter available capabilities to agent.skills
-//   - agent_id omitted: use all invokable capabilities
+//   - agent_id omitted: use all invokable capabilities except the planner
+//     loop-preventing set (PLANNER_EXCLUDED_IDS)
 //   - LLM produces {steps: [...], reasoning: "..."} via groq gpt-oss-120b
 //   - Steps may reference capabilities that don't exist yet; the planner
 //     sets wanted_kind + wanted_description for those, which task.run's
 //     retry-on-missing path picks up
 //   - execute=true: plan is passed directly to agentry.agent.task
 //   - Returns {ok, plan, agent_id, model_used, reasoning, executed?}
-//
-// The prompt is the load-bearing piece. If planning quality is poor, tune
-// the prompt, not the model. gpt-oss-120b reliably produces structured
-// JSON under 1s in this deployment.
 
 const PROVIDER = process.env.AGENTRY_PLANNER_PROVIDER || "groq";
 const MODEL = process.env.AGENTRY_PLANNER_MODEL || "openai/gpt-oss-120b";
@@ -26,14 +27,44 @@ const DEFAULT_MAX_STEPS = 8;
 const MAX_CAPABILITIES_IN_PROMPT = 60;
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
 
+// v0.41.0 — planner must NOT see these. They are either the planner
+// itself (recursion), the executor primitives the caller is already
+// using (agentry.task.run, agentry.agent.task), lifecycle services
+// (boot, proposal pipeline, checkpoint, etc.), or inference
+// capabilities the planner sits on top of (reason.*).
+// agentry.agent.dsh is deliberately NOT in this list — it's the
+// delegation surface for agentic tasks.
+const PLANNER_EXCLUDED_IDS = new Set([
+  "agentry.agent.plan",
+  "agentry.agent.boot",
+  "agentry.agent.task",
+  "agentry.task.run",
+  "agentry.proposal",
+  "agentry.adopt",
+  "agentry.synthesize",
+  "agentry.trial",
+  "agentry.mature",
+  "agentry.discover",
+  "agentry.ensure",
+  "agentry.checkpoint",
+  "agentry.reason",
+  "agentry.reason.deep",
+  "agentry.reason.harness",
+]);
+
 function enumerateCapabilities(graph, skillsFilter) {
   const out = [];
   for (const cap of graph.capabilities().values()) {
     if (cap.retired_at) continue;
     if (!cap.invoked_via) continue;
     if (INTERNAL_KINDS.has(cap.kind)) continue;
-    if (cap.kind === "task" || cap.kind === "agent" || cap.kind === "message" || cap.kind === "proposal" || cap.kind === "capability_gap" || cap.kind === "watch_instance" || cap.kind === "synthesis_attempt") continue;
-    if (cap.kind === "edge") continue;
+    if (PLANNER_EXCLUDED_IDS.has(cap.id)) continue;
+    // Skip orchestration/observation node kinds that aren't invokable work.
+    if (cap.kind === "proposal" || cap.kind === "capability_gap" ||
+        cap.kind === "watch_instance" || cap.kind === "synthesis_attempt" ||
+        cap.kind === "edge" || cap.kind === "task" || cap.kind === "message") {
+      continue;
+    }
     if (Array.isArray(skillsFilter) && skillsFilter.length > 0) {
       if (!skillsFilter.includes(cap.id)) continue;
     }
@@ -94,7 +125,22 @@ function buildPlanPrompt({ intent, capabilities, maxSteps }) {
     "   MUST match what the capability expects. Mismatched keys will fail trial.\n" +
     "6. Do NOT invent fields inside AVAILABLE capabilities. If a capability\n" +
     "   accepts only {image_path}, do not pass {image_path, title}.\n" +
-    "7. Output ONLY the JSON object as your final message.";
+    "7. Output ONLY the JSON object as your final message.\n" +
+    "8. STRONGLY PREFER `agentry.agent.dsh` FOR AGENTIC TASKS. If the intent\n" +
+    "   involves ANY of: (a) writing code, (b) running commands to verify,\n" +
+    "   (c) fixing code after it fails, (d) exploring a filesystem, (e)\n" +
+    "   multi-step debugging — pass the ENTIRE task to agentry.agent.dsh\n" +
+    "   as a single step. Do NOT try to decompose it into file.write /\n" +
+    "   node.run / bash.exec style steps; that's DSH's job and DSH does\n" +
+    "   it better. One step with agentry.agent.dsh beats five fragile\n" +
+    "   primitive steps.\n" +
+    "9. agentry.agent.dsh accepts: { prompt: string, timeout_ms?: number }.\n" +
+    "   produces: { final: string, messages: array, tool_calls: array }.\n" +
+    "   The answer text is in `final`. To chain a step after it, use\n" +
+    "   \"$prev.final\" (not \"$prev.stdout\").\n" +
+    "10. If the intent is a SINGLE deterministic operation (convert X to Y,\n" +
+    "    fetch URL, generate QR, render PDF) — use the direct capability,\n" +
+    "    not DSH.";
 }
 
 function parseJson(text) {
@@ -149,7 +195,6 @@ export default async function agentryAgentPlan(input, ctx) {
   const started = Date.now();
   const maxSteps = Math.max(1, Math.min(20, Number(max_steps) || DEFAULT_MAX_STEPS));
 
-  // ── 1. Resolve agent context (optional) ──
   let agent = null;
   let skillsFilter = null;
   if (agent_id) {
@@ -164,7 +209,6 @@ export default async function agentryAgentPlan(input, ctx) {
     skillsFilter = skills;
   }
 
-  // ── 2. Enumerate available capabilities ──
   const capabilities = enumerateCapabilities(graph, skillsFilter);
   events.emit("agent.plan.started", {
     intent: String(intent).slice(0, 200),
@@ -174,7 +218,6 @@ export default async function agentryAgentPlan(input, ctx) {
     execute: execute === true,
   });
 
-  // ── 3. Ask the LLM ──
   const messages = [
     { role: "system", content: "You output only JSON. No prose. No fences." },
     { role: "user", content: buildPlanPrompt({ intent: String(intent), capabilities, maxSteps }) },
@@ -207,7 +250,6 @@ export default async function agentryAgentPlan(input, ctx) {
     throw new Error("agentry.agent.plan: could not parse JSON. Raw: " + String(llmRes.output.content || "").slice(0, 300));
   }
 
-  // ── 4. Validate ──
   const validation = validatePlan(parsed, maxSteps);
   if (!validation.ok) {
     events.emit("agent.plan.invalid", { reason: validation.reason });
@@ -231,7 +273,6 @@ export default async function agentryAgentPlan(input, ctx) {
     steps: validation.steps.length,
   };
 
-  // ── 5. Optional: execute via agent.task ──
   if (execute === true) {
     if (!agent_id) {
       output.executed = false;
