@@ -1,5 +1,8 @@
 // agentry/src/handlers/agentry.task.run.mjs
-// v0.37.0 — task primitive with retry-on-missing-capability.
+// v0.42.0 — task primitive with retry-on-missing + tool_calls
+//          artifact extraction.
+//
+// v0.37.0 — retry-on-missing-capability.
 //
 // v0.33.0: initial primitive.
 // v0.33.1: extractArtifacts scans step input for path-like fields (some
@@ -93,6 +96,43 @@ function extractArtifacts(output, stepInput, stepIndex) {
           seenPaths.add(val);
         }
       } catch {}
+    }
+  }
+
+  // v0.42.0 — tool_calls artifact extraction. DSH (agentry.agent.dsh)
+  // returns { tool_calls: [{ tool, input: { file_path, ... }, result }] }.
+  // Files created/modified by those tools live on disk but aren't
+  // top-level output fields, so the output-scan above misses them.
+  // Extract every path-like input to a non-read tool that resolves to
+  // a real file. Downstream steps can then reference them via $last_artifact.
+  if (output && Array.isArray(output.tool_calls)) {
+    for (const tc of output.tool_calls) {
+      if (!tc || typeof tc !== "object" || !tc.input || typeof tc.input !== "object") continue;
+      const tool = String(tc.tool || "").toLowerCase();
+      // Read-only tools' inputs point at pre-existing files, not artifacts
+      // this step produced. Skip them so we don't claim credit for inputs.
+      if (tool === "read" || tool === "list" || tool === "search" ||
+          tool === "grep" || tool === "glob" || tool === "ls") continue;
+      for (const [key, val] of Object.entries(tc.input)) {
+        if (!looksLikePath(key, val)) continue;
+        if (seenPaths.has(val)) continue;
+        try {
+          const st = statSync(val);
+          if (st.isFile() && st.size > 0) {
+            const magic = readFileSync(val).slice(0, 8).toString("hex");
+            artifacts.push({
+              kind: "file",
+              field: "tool_call:" + (tc.tool || "?") + ":" + key,
+              path: val,
+              bytes: st.size,
+              magic,
+              from_step: stepIndex,
+              from_tool_call: true,
+            });
+            seenPaths.add(val);
+          }
+        } catch {}
+      }
     }
   }
 
