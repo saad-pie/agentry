@@ -207,7 +207,10 @@ function resolveRef(ref, stepOutputs, artifacts, intent) {
   // appears INSIDE a longer string, substitute in place. Only recognized
   // tokens are replaced; unrecognized $foo is left literal.
   if (typeof ref === "string" && ref.length > 1 && !ref.startsWith("$") && ref.includes("$")) {
-    return ref.replace(/(\$(?:last_artifact|intent|prev(?:\.[\w.]+)?|tmp(?:\/[\w.\-\/]+)?))/g, (m) => {
+    // v0.46.1 — exclude bare $prev from mid-string substitution (returns
+    // an object, stringified would be [object Object]). Only $prev.field.sub
+    // is safe inside a template string.
+    return ref.replace(/(\$(?:last_artifact|intent|tmp(?:\/[\w.\-\/]+)?|prev\.[\w.]+))/g, (m) => {
       const v = resolveRef(m, stepOutputs, artifacts, intent);
       return v === undefined ? m : String(v);
     });
@@ -223,10 +226,14 @@ function resolveStepInput(inputSpec, stepOutputs, artifacts, intent) {
   }
   const out = {};
   for (const [key, val] of Object.entries(inputSpec)) {
-    if (typeof val === "string" && val.startsWith("$")) {
+    // v0.46.1 — call resolveRef for ANY string containing $, not just
+    // strings that START with $. The mid-string substitution lives inside
+    // resolveRef (v0.44.2) but was unreachable because this gate rejected
+    // markdown templates like "![]($last_artifact)".
+    if (typeof val === "string" && val.includes("$")) {
       out[key] = resolveRef(val, stepOutputs, artifacts, intent);
     } else if (Array.isArray(val)) {
-      out[key] = val.map(v => typeof v === "string" && v.startsWith("$") ? resolveRef(v, stepOutputs, artifacts, intent) : v);
+      out[key] = val.map(v => typeof v === "string" && v.includes("$") ? resolveRef(v, stepOutputs, artifacts, intent) : v);
     } else if (val && typeof val === "object") {
       out[key] = resolveStepInput(val, stepOutputs, artifacts, intent);
     } else {
