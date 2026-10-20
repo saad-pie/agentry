@@ -1,0 +1,27 @@
+{
+  "id": "agentry.chat",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.chat",
+  "accepts": {
+    "message": "string",
+    "agent_id": { "type": "string", "optional": true },
+    "conversation_id": { "type": "string", "optional": true },
+    "max_steps": { "type": "number", "optional": true },
+    "execute_default": { "type": "boolean", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "conversation_id": "string",
+    "agent_id": "string|null",
+    "message": "string",
+    "plan": "array|null",
+    "task": "object|null",
+    "executed": "boolean",
+    "error": "object|null"
+  },
+  "cost": { "money_usd": 0, "time_ms": 300000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.43.0 — the user-facing parent loop. Accepts a natural-language message, plans via agent.plan, executes via agent.task, returns a human-readable summary + the structured trace. conversation_id maintains thread continuity (prior turns passed to planner, ephemeral agent booted per conversation). execute_default=false returns the plan without side effects. This is the primary MCP tool."
+}
