@@ -1,0 +1,31 @@
+{
+  "id": "agentry.agent.dsh",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.agent.dsh",
+  "accepts": {
+    "prompt": "string",
+    "timeout_ms": { "type": "number", "optional": true },
+    "session_id": { "type": "string", "optional": true }
+  },
+  "produces": {
+    "ok": "boolean",
+    "exit_code": "number|null",
+    "duration_ms": "number",
+    "session_id": "string|null",
+    "cwd": "string|null",
+    "final": "string|null",
+    "messages": "array",
+    "tool_calls": "array",
+    "events_raw": "array",
+    "usage": "object",
+    "turn_count": "number",
+    "step_count": "number",
+    "stderr": "string",
+    "errors": "array"
+  },
+  "cost": { "money_usd": 0, "time_ms": 180000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.40.0 — DSH headless execution with full JSON trace. Spawns `dsh headless --json <prompt>` in an isolated kernel session, parses NDJSON run events into structured messages/tool_calls/usage/final, returns the complete trace for UI rendering. Model: unorouter/qwen3.8-27b:free (free tier, tool-call capable). Optional session_id resumes a prior DSH session. Use for agentic steps in plans (agent.plan routes here via capability_id when the task needs multi-turn file/code work)."
+}
