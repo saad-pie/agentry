@@ -87,6 +87,11 @@ export default async function agentryAgentBoot(input, ctx) {
     throw new Error("agentry.agent.boot: session.create failed: " + (sessionRes.error?.message || "unknown"));
   }
 
+  // v0.45.0 — agent instances are NOT invokable capabilities. They are
+  // targets for agentry.agent.task and chat.mjs. Setting invoked_via made
+  // them appear in planner enumeration as if they could be called directly,
+  // causing "no handler registered for agentry.agent.run" failures.
+  // Removed invoked_via + handler + accepts/produces/requires.
   const node = {
     id,
     kind: "agent",
@@ -97,12 +102,6 @@ export default async function agentryAgentBoot(input, ctx) {
     parent_agent_id: parent_agent_id || null,
     task_count: 0,
     state: "active",
-    invoked_via: "invoker.in_process_js",  // enables invoke(id) to work; dispatches to agent.run which is added later
-    handler: "agentry.agent.run",          // placeholder — will resolve when agent.run ships; for now invocation returns not_implemented
-    handler_file: null,
-    accepts: { task_id: "string", plan: "array", intent: "string" },
-    produces: { ok: "boolean", task_id: "string", state: "string" },
-    requires: { npm: [], pip: [], post_install: null, capability: [] },
     created_at: Date.now(),
     updated_at: Date.now(),
     booted_at: Date.now(),
