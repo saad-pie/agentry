@@ -61,6 +61,35 @@ function looksLikePath(key, val) {
   return false;
 }
 
+// v0.44.1 — resolve a path that may be relative to the session workdir.
+// LLMs often emit bare filenames like "world_qr.png" even when told not
+// to; the file exists at <session-workdir>/world_qr.png but statSync on
+// the bare string from the runtime process misses it. Try absolute-first,
+// then session-relative. Return the resolved absolute path, or null.
+function resolveExistingPath(path, session) {
+  if (!path || typeof path !== "string") return null;
+  // Try as-is (absolute or CWD-relative)
+  try {
+    const st = statSync(path);
+    if (st.isFile() && st.size > 0) return path;
+  } catch {}
+  // Try session workdir (kernel convention)
+  if (session && !path.startsWith("/")) {
+    const candidates = [
+      "/tmp/home/.dsh/agentry-kernel/work/" + session + "/" + path,
+      "/tmp/home/.dsh/" + path,
+      "/tmp/home/.dsh/agentry-scratch/" + path,
+    ];
+    for (const c of candidates) {
+      try {
+        const st = statSync(c);
+        if (st.isFile() && st.size > 0) return c;
+      } catch {}
+    }
+  }
+  return null;
+}
+
 function extractArtifacts(output, stepInput, stepIndex) {
   const artifacts = [];
   const seenPaths = new Set();
@@ -69,14 +98,13 @@ function extractArtifacts(output, stepInput, stepIndex) {
     for (const [key, val] of Object.entries(output)) {
       if (typeof val !== "string" || !val) continue;
       if (ARTIFACT_PATH_PATTERN.test(key)) {
-        try {
-          const st = statSync(val);
-          if (st.isFile() && st.size > 0) {
-            const magic = readFileSync(val).slice(0, 8).toString("hex");
-            artifacts.push({ kind: "file", field: key, path: val, bytes: st.size, magic, from_step: stepIndex });
-            seenPaths.add(val);
-          }
-        } catch {}
+        const resolved = resolveExistingPath(val, stepInput?.session);
+        if (resolved) {
+          const st = statSync(resolved);
+          const magic = readFileSync(resolved).slice(0, 8).toString("hex");
+          artifacts.push({ kind: "file", field: key, path: resolved, bytes: st.size, magic, from_step: stepIndex });
+          seenPaths.add(resolved);
+        }
       } else if (ARTIFACT_B64_PATTERN.test(key)) {
         try {
           const buf = Buffer.from(val, "base64");
@@ -92,14 +120,13 @@ function extractArtifacts(output, stepInput, stepIndex) {
     for (const [key, val] of Object.entries(stepInput)) {
       if (!looksLikePath(key, val)) continue;
       if (seenPaths.has(val)) continue;
-      try {
-        const st = statSync(val);
-        if (st.isFile() && st.size > 0) {
-          const magic = readFileSync(val).slice(0, 8).toString("hex");
-          artifacts.push({ kind: "file", field: "input:" + key, path: val, bytes: st.size, magic, from_step: stepIndex, from_input: true });
-          seenPaths.add(val);
-        }
-      } catch {}
+      const resolved = resolveExistingPath(val, stepInput?.session);
+      if (resolved) {
+        const st = statSync(resolved);
+        const magic = readFileSync(resolved).slice(0, 8).toString("hex");
+        artifacts.push({ kind: "file", field: "input:" + key, path: resolved, bytes: st.size, magic, from_step: stepIndex, from_input: true });
+        seenPaths.add(resolved);
+      }
     }
   }
 
@@ -120,22 +147,21 @@ function extractArtifacts(output, stepInput, stepIndex) {
       for (const [key, val] of Object.entries(tc.input)) {
         if (!looksLikePath(key, val)) continue;
         if (seenPaths.has(val)) continue;
-        try {
-          const st = statSync(val);
-          if (st.isFile() && st.size > 0) {
-            const magic = readFileSync(val).slice(0, 8).toString("hex");
-            artifacts.push({
-              kind: "file",
-              field: "tool_call:" + (tc.tool || "?") + ":" + key,
-              path: val,
-              bytes: st.size,
-              magic,
-              from_step: stepIndex,
-              from_tool_call: true,
-            });
-            seenPaths.add(val);
-          }
-        } catch {}
+        const resolved = resolveExistingPath(val, stepInput?.session);
+        if (resolved) {
+          const st = statSync(resolved);
+          const magic = readFileSync(resolved).slice(0, 8).toString("hex");
+          artifacts.push({
+            kind: "file",
+            field: "tool_call:" + (tc.tool || "?") + ":" + key,
+            path: resolved,
+            bytes: st.size,
+            magic,
+            from_step: stepIndex,
+            from_tool_call: true,
+          });
+          seenPaths.add(resolved);
+        }
       }
     }
   }
