@@ -32,6 +32,8 @@
 // to agentry, it calls chat. Everything below (agent.plan, agent.task,
 // task.run, ensure, agentry.agent.dsh) is now internal machinery.
 
+// v0.49.1 — boot error captured + fallback to task.run on boot failure.
+//
 // v0.49.0 — structured failure task. Prior version returned task:null on
 // every failure path, so callers (and tests) could not distinguish boot
 // failure from empty plan from execution throw. Every failure now carries
@@ -164,12 +166,22 @@ export default async function agentryChat(input, ctx) {
     if (existingCandidates.length > 0) {
       agentId = existingCandidates[0].id;
     } else {
+            let bootError = null;
       try {
         const boot = await ctx.invoke("agentry.agent.boot", { name: agentName },
           { tenant: "local", by: "agentry.chat" });
-        if (boot.ok) agentId = boot.output.agent_id;
+        if (boot.ok && boot.output?.agent_id) {
+          agentId = boot.output.agent_id;
+        } else {
+          bootError = "boot returned ok=" + boot.ok +
+            " agent_id=" + JSON.stringify(boot.output?.agent_id || null) +
+            " error=" + (boot.error?.message || "none");
+        }
       } catch (e) {
-        events.emit("chat.agent_boot_failed", { conversation_id: conversationId, error: e.message });
+        bootError = "boot threw: " + e.message;
+      }
+      if (bootError) {
+        events.emit("chat.agent_boot_failed", { conversation_id: conversationId, error: bootError });
       }
     }
   }

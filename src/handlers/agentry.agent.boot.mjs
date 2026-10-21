@@ -75,22 +75,32 @@ export default async function agentryAgentBoot(input, ctx) {
   const id = (agent_id && !force_new) ? agent_id : genAgentId(name);
   const homeSession = homeSessionOverride || ("agent_" + id + "_home");
 
-  // Create kernel session (idempotent — if it already exists, kernel returns it)
-  // v0.48.0 — verify with session.get. Same silent-failure class as agent.dsh.
-  let sessionRes;
-  try {
-    sessionRes = await ctx.invoke("agentry.os", { action: "session.create", id: homeSession },
-      { tenant: "local", by: "agentry.agent.boot" });
-    if (!sessionRes.ok) {
-      throw new Error("session.create returned ok=false: " + (sessionRes.error?.message || "unknown"));
+  // v0.49.1 — retry session setup up to 3 times with backoff. Prior version
+  // was a single-shot try/catch that turned transient kernel failures into
+  // hard boot failures, which chat then silently swallowed.
+  let sessionOk = false;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const createRes = await ctx.invoke("agentry.os", { action: "session.create", id: homeSession },
+        { tenant: "local", by: "agentry.agent.boot" });
+      if (!createRes.ok) { lastErr = createRes.error?.message || "create_not_ok"; }
+      else {
+        const verify = await ctx.invoke("agentry.os", { action: "session.get", session: homeSession },
+          { tenant: "local", by: "agentry.agent.boot" });
+        if (!verify.ok) { lastErr = verify.error?.message || "verify_not_ok"; }
+        else { sessionOk = true; break; }
+      }
+    } catch (e) {
+      lastErr = e.message;
     }
-    const verify = await ctx.invoke("agentry.os", { action: "session.get", session: homeSession },
-      { tenant: "local", by: "agentry.agent.boot" });
-    if (!verify.ok) {
-      throw new Error("session.get after create failed: " + (verify.error?.message || "unknown"));
-    }
-  } catch (e) {
-    throw new Error("agentry.agent.boot: session setup failed: " + e.message);
+    if (attempt < 2) await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+  }
+  if (!sessionOk) {
+    events.emit("agent.boot.session_setup_failed", {
+      agent_id: id, home_session: homeSession, attempts: 3, error: String(lastErr || "unknown"),
+    });
+    throw new Error("agentry.agent.boot: session setup failed after 3 attempts: " + (lastErr || "unknown"));
   }
 
   // v0.45.0 — agent instances are NOT invokable capabilities. They are
