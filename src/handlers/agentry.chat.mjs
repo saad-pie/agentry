@@ -32,6 +32,21 @@
 // to agentry, it calls chat. Everything below (agent.plan, agent.task,
 // task.run, ensure, agentry.agent.dsh) is now internal machinery.
 
+// v0.49.0 — structured failure task. Prior version returned task:null on
+// every failure path, so callers (and tests) could not distinguish boot
+// failure from empty plan from execution throw. Every failure now carries
+// phase + message.
+function failTask(phase, message) {
+  return {
+    task_id: null,
+    state: "failed",
+    owner_agent: null,
+    trace: [],
+    artifacts: [],
+    error: { phase: String(phase), message: String(message || "unknown") },
+  };
+}
+
 const DEFAULT_MAX_STEPS = 8;
 const CONVERSATION_MEMORY_CAP = 10; // last N turns kept per thread
 
@@ -189,7 +204,7 @@ export default async function agentryChat(input, ctx) {
     return {
       output: {
         ok: false, conversation_id: conversationId, agent_id: agentId,
-        message: errMsg, plan: null, task: null, executed: false,
+        message: errMsg, plan: null, task: failTask("plan", e.message), executed: false,
         error: { phase: "plan", message: e.message },
       },
       cost: { time_ms: Date.now() - started },
@@ -202,7 +217,7 @@ export default async function agentryChat(input, ctx) {
     return {
       output: {
         ok: false, conversation_id: conversationId, agent_id: agentId,
-        message: errMsg, plan: null, task: null, executed: false,
+        message: errMsg, plan: null, task: failTask("plan", planRes.error?.message || "unknown"), executed: false,
         error: { phase: "plan", message: planRes.error?.message || "unknown" },
       },
       cost: { time_ms: Date.now() - started },
@@ -243,8 +258,8 @@ export default async function agentryChat(input, ctx) {
     return {
       output: {
         ok: false, conversation_id: conversationId, agent_id: null,
-        message: errMsg, plan, task: null, executed: false,
-        error: { phase: "execute", message: "no agent" },
+        message: errMsg, plan, task: failTask("boot", bootReason || "no agent"), executed: false,
+        error: { phase: "boot", message: bootReason || "no agent" },
       },
       cost: { time_ms: Date.now() - started },
     };
@@ -264,7 +279,7 @@ export default async function agentryChat(input, ctx) {
     return {
       output: {
         ok: false, conversation_id: conversationId, agent_id: agentId,
-        message: errMsg, plan, task: null, executed: true,
+        message: errMsg, plan, task: failTask("execute", e.message), executed: true,
         error: { phase: "execute", message: e.message },
       },
       cost: { time_ms: Date.now() - started },
