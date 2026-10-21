@@ -417,6 +417,100 @@ export function registerAgentryTools(deps) {
     }
   );
 
+  // --- agentry.chat (v0.50.0 — the parent loop) ---
+  registerTool(
+    {
+      name: "chat",
+      description:
+        "Talk to agentry in natural language. Give it a task intent; it plans (agent.plan), executes the plan (agent.task), and returns a summary plus the full structured trace. This is the primary tool — use it when you want agentry to decide HOW to accomplish something, not just to invoke a specific capability. Returns {ok, message, conversation_id, agent_id, plan, task, executed, error}. conversation_id maintains thread continuity across calls. For direct capability invocation where you already know the capability_id, use 'invoke' instead.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "Natural-language task description. E.g. 'generate a QR for hello and save as PDF'." },
+          conversation_id: { type: "string", description: "Optional. Reuse a prior conversation for continuity — prior turns are passed to the planner." },
+          agent_id: { type: "string", description: "Optional. Use a specific agent. If absent, chat auto-boots a per-conversation agent." },
+          max_steps: { type: "number", description: "Optional. Max plan steps (default 8)." },
+          execute_default: { type: "boolean", description: "Default true. Set false for plan-only mode (returns plan without side effects)." },
+        },
+        required: ["message"],
+      },
+    },
+    async (args, _ctx) => {
+      const message = String(args.message || "").trim();
+      if (!message) {
+        return { content: [{ type: "text", text: "chat: message is required" }], isError: true };
+      }
+      if (typeof deps.graph.invalidateCache === "function") deps.graph.invalidateCache();
+      const input = { message };
+      if (args.conversation_id) input.conversation_id = String(args.conversation_id);
+      if (args.agent_id) input.agent_id = String(args.agent_id);
+      if (typeof args.max_steps === "number") input.max_steps = args.max_steps;
+      if (typeof args.execute_default === "boolean") input.execute_default = args.execute_default;
+
+      const startedAt = Date.now();
+      const res = await deps.invoke("agentry.chat", input, { tenant: "mcp", by: "mcp.chat" });
+      const ms = Date.now() - startedAt;
+
+      if (!res.ok) {
+        deps.events.emit("mcp.chat.failed", {
+          code: res.error?.code || null,
+          message: String(res.error?.message || "").slice(0, 300),
+          ms,
+        });
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ok: false,
+              message: String(res.error?.message || "unknown error"),
+              error: { code: res.error?.code || null, message: res.error?.message || "unknown" },
+              ms,
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
+
+      const o = res.output || {};
+      deps.events.emit("mcp.chat.succeeded", {
+        conversation_id: o.conversation_id,
+        agent_id: o.agent_id,
+        executed: o.executed,
+        steps: (o.plan || []).length,
+        artifacts: (o.task?.artifacts || []).length,
+        state: o.task?.state || null,
+        ms,
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            ok: o.ok === true,
+            message: o.message,
+            conversation_id: o.conversation_id,
+            agent_id: o.agent_id,
+            executed: o.executed === true,
+            plan: (o.plan || []).map(s => s.capability_id),
+            task: o.task ? {
+              task_id: o.task.task_id,
+              state: o.task.state,
+              artifacts: (o.task.artifacts || []).map(a => ({
+                kind: a.kind, path: a.path || null, bytes: a.bytes || 0,
+              })),
+              trace_summary: (o.task.trace || []).map(t => ({
+                step: t.step, cap: t.capability_id, ok: t.ok, ms: t.ms,
+              })),
+              error: o.task.error || null,
+            } : null,
+            error: o.error || null,
+            ms,
+          }, null, 2),
+        }],
+      };
+    }
+  );
+
   // --- agentry.status ---
   // v0.16.2 — richer output so a caller can decide what to invoke
   // without a second round-trip. Lists each live invokable capability
