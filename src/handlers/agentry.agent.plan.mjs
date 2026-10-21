@@ -309,7 +309,57 @@ export default async function agentryAgentPlan(input, ctx) {
     throw new Error("agentry.agent.plan: could not parse JSON. Raw: " + String(llmRes.output.content || "").slice(0, 300));
   }
 
-  const validation = validatePlan(parsed, maxSteps, capabilities);
+  let validation = validatePlan(parsed, maxSteps, capabilities);
+
+  // v0.50.1 — a brain that can't decide should delegate, not fail. When the
+  // LLM returns ZERO steps, retry once with a sharper prompt; if still empty,
+  // fall back to a single DSH step carrying the intent verbatim. This mirrors
+  // how Hermes delegates to OpenCode when its own skills don't cover a case.
+  if (!validation.ok && validation.reason === "no_steps") {
+    events.emit("agent.plan.empty_steps", { intent: String(intent).slice(0, 200) });
+
+    const retryPrompt = buildPlanPrompt({ intent: String(intent), capabilities, maxSteps }) +
+      " ||| RETRY REQUIRED: You returned ZERO steps. This is unacceptable. Return at least ONE step. If no available capability fits, use EXACTLY capability_id 'agentry.agent.dsh' with input: { prompt: <the user's original intent message, verbatim> }.";
+
+    try {
+      const retryRes = await ctx.invoke("llm.openai_compat", {
+        provider: PROVIDER,
+        model: MODEL,
+        messages: [
+          { role: "system", content: "You output only JSON. No prose. No fences." },
+          { role: "user", content: retryPrompt },
+        ],
+        temperature: 0.1,
+        max_tokens: 2000,
+        timeout_ms: 30000,
+      }, { tenant: "local", by: "agentry.agent.plan" });
+      if (retryRes.ok) {
+        const retryParsed = parseJson(retryRes.output.content);
+        if (retryParsed) {
+          const rv = validatePlan(retryParsed, maxSteps, capabilities);
+          if (rv.ok) {
+            validation = rv;
+            events.emit("agent.plan.empty_steps_retry_ok", { steps: rv.steps.length });
+          }
+        }
+      }
+    } catch (e) {
+      events.emit("agent.plan.empty_steps_retry_failed", { error: e.message });
+    }
+
+    if (!validation.ok) {
+      events.emit("agent.plan.empty_steps_dsh_fallback", { intent: String(intent).slice(0, 200) });
+      validation = {
+        ok: true,
+        steps: [{
+          capability_id: "agentry.agent.dsh",
+          input: { prompt: String(intent) },
+          why: "planner returned empty; delegating entire intent to DSH",
+        }],
+      };
+    }
+  }
+
   if (!validation.ok) {
     events.emit("agent.plan.invalid", { reason: validation.reason });
     throw new Error("agentry.agent.plan: invalid plan: " + validation.reason);
