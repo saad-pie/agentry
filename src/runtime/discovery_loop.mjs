@@ -32,13 +32,35 @@ import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 // Every source becomes its own watch, so one gap triggers GitHub search
 // AND (for some kinds) web search in parallel.
 
-// v0.51.1 — bua/cua/mua/memory/harness are a DEDICATED LAYER the user
-// builds (src/arms etc). They must NEVER be synthesized from GitHub
-// discovery — searching "browser automation" returns the entire
-// browser-agent ecosystem (browser-use, playwright, puppeteer) which
-// are agent-runner dependencies, not capabilities. The pipeline only
-// auto-adopts `tool` kind. These kinds route to explicit user action.
-const AUTO_DECIDE_EXCLUDED_KINDS = new Set(["bua", "cua", "mua", "memory", "harness"]);
+// v0.51.2 — WHITELIST not blacklist. Only these kinds auto-adopt:
+//   tool      — discrete utilities (convert, extract, render)
+//   notify    — messaging delivery
+//   web       — HTTP fetch/parse
+//   unknown   — LLM couldn't classify, worth a try
+// Everything else — bua, cua, mua, memory, harness, and any garbage
+// kind the LLM emitted (e.g. "capability") — is EXCLUDED. Those are
+// either the dedicated arms layer or invalid.
+const AUTO_DECIDE_ALLOWED_KINDS = new Set(["tool", "notify", "web", "unknown"]);
+
+// Gaps whose wanted_id contains these markers are test/debug junk from
+// ensure-loop probes. Auto-deciding them pollutes the graph with
+// capabilities nobody needs.
+const GAP_ID_REJECT_MARKERS = [
+  "does.not.exist", "doesnotexist", "test.nonexistent", "example.",
+  ".test.", ".test$", "test.capability",
+];
+
+function gapIdLooksValid(wantedId) {
+  if (!wantedId || typeof wantedId !== "string") return false;
+  const w = wantedId.trim();
+  if (w.length < 3 || w.length > 200) return false;
+  // must be a dotted identifier — letters, digits, dot, underscore, dash
+  if (!/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(w)) return false;
+  for (const marker of GAP_ID_REJECT_MARKERS) {
+    if (w.includes(marker)) return false;
+  }
+  return true;
+}
 
 const SOURCES_BY_KIND = {
   bua: [
@@ -342,9 +364,29 @@ export async function tick(deps, opts = {}) {
     if (cap.kind === "watch_instance" && !cap.retired_at) watchedCount++;
   }
 
-  // v0.51.1 — filter out excluded kinds before watch/proposal creation
-  const gaps = liveGaps(graph).filter(g => !AUTO_DECIDE_EXCLUDED_KINDS.has(g.wanted_kind));
-  const excluded_gap_count = liveGaps(graph).length - gaps.length;
+  // v0.51.2 — allowlist + format check. Rejected gaps are silently
+  // skipped (not retired — they may be from a legitimate retry, but
+  // they'll never auto-adopt while invalid).
+  const _allLiveGaps = liveGaps(graph);
+  const _rejected = [];
+  const gaps = _allLiveGaps.filter(g => {
+    if (!AUTO_DECIDE_ALLOWED_KINDS.has(g.wanted_kind)) {
+      _rejected.push({ gap: g.id, reason: "kind_not_allowed", kind: g.wanted_kind });
+      return false;
+    }
+    if (!gapIdLooksValid(g.wanted_id || g.id.replace(/^gap:/, ""))) {
+      _rejected.push({ gap: g.id, reason: "invalid_wanted_id", wanted_id: g.wanted_id });
+      return false;
+    }
+    return true;
+  });
+  const excluded_gap_count = _allLiveGaps.length - gaps.length;
+  if (_rejected.length > 0) {
+    events.emit("discovery.gaps_rejected", {
+      count: _rejected.length,
+      samples: _rejected.slice(0, 10),
+    });
+  }
 
   if (!gaps.length) {
     events.emit("discovery.no_gaps");
