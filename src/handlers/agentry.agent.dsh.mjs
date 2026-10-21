@@ -145,11 +145,22 @@ export default async function agentryAgentDsh(input, ctx) {
   events_out.emit("agent.dsh.started", { ksess, prompt_len: prompt.length, timeout_ms: timeout });
 
   // ── 1. Create kernel session ──
+  // v0.48.0 — check .ok AND verify with session.get. Prior version ignored
+  // the result and proceeded to spawn in a session that never existed,
+  // producing "INTERNAL: unknown session: <ksess>" on shell.spawn.
   try {
-    await ctx.invoke("agentry.os", { action: "session.create", id: ksess },
+    const createRes = await ctx.invoke("agentry.os", { action: "session.create", id: ksess },
       { tenant: "local", by: "agentry.agent.dsh" });
+    if (!createRes.ok) {
+      throw new Error("session.create returned ok=false: " + (createRes.error?.message || "unknown"));
+    }
+    const verifyRes = await ctx.invoke("agentry.os", { action: "session.get", session: ksess },
+      { tenant: "local", by: "agentry.agent.dsh" });
+    if (!verifyRes.ok) {
+      throw new Error("session.create succeeded but session.get failed: " + (verifyRes.error?.message || "unknown"));
+    }
   } catch (e) {
-    throw new Error("agentry.agent.dsh: session.create failed: " + e.message);
+    throw new Error("agentry.agent.dsh: session setup failed: " + e.message);
   }
 
   // ── 2. Propagate ATRIA_API_KEY into the session env ──

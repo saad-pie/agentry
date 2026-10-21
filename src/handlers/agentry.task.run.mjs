@@ -198,8 +198,21 @@ function resolveRef(ref, stepOutputs, artifacts, intent) {
   if (ref === "$intent") return intent;
   if (ref === "$prev") return stepOutputs.length > 0 ? stepOutputs[stepOutputs.length - 1] : undefined;
   if (ref.startsWith("$prev.")) {
-    let v = stepOutputs.length > 0 ? stepOutputs[stepOutputs.length - 1] : undefined;
+    const prevIndex = stepOutputs.length - 1;
+    let v = prevIndex >= 0 ? stepOutputs[prevIndex] : undefined;
     for (const p of ref.slice(6).split(".")) v = v?.[p];
+    // v0.48.0 — if the field exists as a KEY but its value is null/undefined
+    // (modbender returns path:null despite having a path field), and the
+    // field name is path-like, fall back to any file artifact from that step.
+    if (v === undefined || v === null) {
+      const fieldName = ref.slice(6).split(".")[0];
+      if (/path|file/i.test(fieldName)) {
+        for (let i = artifacts.length - 1; i >= 0; i--) {
+          const a = artifacts[i];
+          if (a.from_step === prevIndex && a.kind === "file" && a.path) return a.path;
+        }
+      }
+    }
     return v;
   }
   // v0.44.0 — $tmp substitution. LLMs naturally write "$tmp/x.png" as a

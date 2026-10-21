@@ -76,15 +76,21 @@ export default async function agentryAgentBoot(input, ctx) {
   const homeSession = homeSessionOverride || ("agent_" + id + "_home");
 
   // Create kernel session (idempotent — if it already exists, kernel returns it)
+  // v0.48.0 — verify with session.get. Same silent-failure class as agent.dsh.
   let sessionRes;
   try {
     sessionRes = await ctx.invoke("agentry.os", { action: "session.create", id: homeSession },
       { tenant: "local", by: "agentry.agent.boot" });
+    if (!sessionRes.ok) {
+      throw new Error("session.create returned ok=false: " + (sessionRes.error?.message || "unknown"));
+    }
+    const verify = await ctx.invoke("agentry.os", { action: "session.get", session: homeSession },
+      { tenant: "local", by: "agentry.agent.boot" });
+    if (!verify.ok) {
+      throw new Error("session.get after create failed: " + (verify.error?.message || "unknown"));
+    }
   } catch (e) {
-    throw new Error("agentry.agent.boot: session.create failed: " + e.message);
-  }
-  if (!sessionRes.ok) {
-    throw new Error("agentry.agent.boot: session.create failed: " + (sessionRes.error?.message || "unknown"));
+    throw new Error("agentry.agent.boot: session setup failed: " + e.message);
   }
 
   // v0.45.0 — agent instances are NOT invokable capabilities. They are
