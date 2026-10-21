@@ -195,32 +195,30 @@ export default async function agentryAgentDsh(input, ctx) {
   // [] or default, DSH falls back to deepseek-official and AUTH fails
   // against the dummy key. Verify + fix on every invocation.
   const HEADLESS_PATCH_PATH = "/tmp/home/.dsh/profiles/headless/cordis.patch.yml";
-  const REQUIRED_PATCH = [
-    "- id: llm-pi-ai",
-    "  config:",
-    "    providers:",
-    "      atria:",
-    "        apiKeyEnv: ATRIA_API_KEY",
-    "        api: openai-completions",
-    "        baseURL: https://antigravity-seven-delta.vercel.app/v1",
-    "        supportsDeveloperRole: false",
-    "        defaultMaxTokens: 2048",
-    "        models:",
-    "          - id: qwen3.8-27b",
-    "            displayName: qwen3.8-27b (atria)",
-    "            maxTokens: 2048",
-    "- id: agent-default-model",
-    "  name: "@deepseek-ai/dsh-agent-default-model"",
-    "  config:",
-    "    provider: atria",
-    "    model: qwen3.8-27b",
-    "- id: agent-preset-registry",
-    "  name: "@deepseek-ai/dsh-agent-preset-registry"",
-    "  config:",
-    "    default: standard",
-    "    selectedDefault: cordis",
-    "",
-  ].join("\n");
+  const REQUIRED_PATCH = `- id: llm-pi-ai
+  config:
+    providers:
+      atria:
+        apiKeyEnv: ATRIA_API_KEY
+        api: openai-completions
+        baseURL: https://antigravity-seven-delta.vercel.app/v1
+        supportsDeveloperRole: false
+        defaultMaxTokens: 2048
+        models:
+          - id: qwen3.8-27b
+            displayName: qwen3.8-27b (atria)
+            maxTokens: 2048
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: atria
+    model: qwen3.8-27b
+- id: agent-preset-registry
+  name: "@deepseek-ai/dsh-agent-preset-registry"
+  config:
+    default: standard
+    selectedDefault: cordis
+`;
 
   try {
     const fs = await import("node:fs");
