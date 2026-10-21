@@ -1,4 +1,6 @@
 // agentry/src/handlers/agentry.chat.mjs
+// v0.48.1 — surface boot failures instead of silent NO_TASK.
+//
 // v0.43.0 — the user-facing parent loop.
 //
 // One capability, one job: take a natural-language message and turn it
@@ -230,7 +232,13 @@ export default async function agentryChat(input, ctx) {
 
   // ── 5. Execute via agent.task ──
   if (!agentId) {
-    const errMsg = "Cannot execute: no agent could be booted. Try again or pass agent_id explicitly.";
+    const bootReason = (function() {
+      try {
+        const recent = ctx.events.all().filter(e => e.kind === "chat.agent_boot_failed" && e.conversation_id === conversationId).slice(-1)[0];
+        return recent ? recent.error : "unknown (no boot attempt logged)";
+      } catch { return "unknown"; }
+    })();
+    const errMsg = "Cannot execute: no agent could be booted. Reason: " + bootReason;
     events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: null, message: errMsg });
     return {
       output: {

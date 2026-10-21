@@ -159,7 +159,9 @@ export default async function agentryAgentDsh(input, ctx) {
     if (!verifyRes.ok) {
       throw new Error("session.create succeeded but session.get failed: " + (verifyRes.error?.message || "unknown"));
     }
+    ctx.events.emit("agent.dsh.session_ready", { ksess, verified: true });
   } catch (e) {
+    ctx.events.emit("agent.dsh.session_failed", { ksess, error: e.message });
     throw new Error("agentry.agent.dsh: session setup failed: " + e.message);
   }
 
@@ -182,6 +184,7 @@ export default async function agentryAgentDsh(input, ctx) {
   if (session_id) args.push("--session-id", String(session_id));
   args.push(prompt);
 
+  events_out.emit("agent.dsh.spawn_started", { ksess, prompt_len: prompt.length });
   let spawn;
   try {
     spawn = await ctx.invoke("agentry.os", {
@@ -192,8 +195,8 @@ export default async function agentryAgentDsh(input, ctx) {
       timeout_ms: timeout,
     }, { tenant: "local", by: "agentry.agent.dsh" });
   } catch (e) {
-    events_out.emit("agent.dsh.spawn_failed", { error: e.message });
-    throw new Error("agentry.agent.dsh: shell.spawn failed: " + e.message);
+    events_out.emit("agent.dsh.spawn_threw", { ksess, error: e.message });
+    throw new Error("agentry.agent.dsh: shell.spawn threw: " + e.message);
   }
   if (!spawn.ok) {
     throw new Error("agentry.agent.dsh: spawn not ok: " + (spawn.error?.message || "unknown"));
@@ -240,37 +243,71 @@ export default async function agentryAgentDsh(input, ctx) {
     ms: elapsed,
   });
 
-  // v0.47.4 — enumerate files created in DSH's cwd during this call.
-  // DSH writes via bash (no file_path in tool_calls), so our existing
-  // tool_calls-based extractor misses them. Walk cwd and pick up any
-  // file modified at-or-after started - 1s.
+  // v0.48.1 — enumerate files created during this call from THREE sources:
+  //   1. explicit paths in tool_calls[].input (write tool file_path, bash
+  //      command string parsed for /tmp/... paths)
+  //   2. DSH's session cwd (kernel session workdir)
+  //   3. /tmp/agentry-scratch/ (the shared scratch dir our prompt hints use)
+  // Prior version only walked cwd, missing files at absolute paths.
   const discovered_files = [];
-  if (structured.session_info.cwd) {
-    try {
-      const fs = await import("node:fs");
-      const path = await import("node:path");
-      const cutoff = started - 1000;
-      const walk = (dir, depth) => {
-        if (depth > 3) return;
-        let entries;
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-          const full = path.join(dir, e.name);
-          if (e.isDirectory()) { walk(full, depth + 1); continue; }
-          if (!e.isFile()) continue;
-          try {
-            const st = fs.statSync(full);
-            if (st.mtimeMs < cutoff) continue;
-            if (st.size === 0) continue;
-            const magic = fs.readFileSync(full).slice(0, 8).toString("hex");
-            discovered_files.push({ path: full, bytes: st.size, magic });
-          } catch {}
+  const seen = new Set();
+  const cutoff = started - 1000;
+
+  try {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+
+    const addFile = (p) => {
+      if (!p || seen.has(p)) return;
+      try {
+        const st = fs.statSync(p);
+        if (!st.isFile() || st.size === 0) return;
+        if (st.mtimeMs < cutoff) return;
+        const magic = fs.readFileSync(p).slice(0, 8).toString("hex");
+        discovered_files.push({ path: p, bytes: st.size, magic });
+        seen.add(p);
+      } catch {}
+    };
+
+    // Source 1: explicit paths in tool_calls
+    const explicitPaths = new Set();
+    for (const tc of structured.tool_calls || []) {
+      if (!tc.input) continue;
+      if (tc.input.file_path) explicitPaths.add(String(tc.input.file_path));
+      if (tc.input.path) explicitPaths.add(String(tc.input.path));
+      if (tc.tool === "bash" && typeof tc.input.command === "string") {
+        const cmd = tc.input.command;
+        for (const m of cmd.matchAll(/(\/tmp\/[^\s"'`;|&<>)]+\.(?:pdf|png|jpg|jpeg|txt|json|csv|md|py|js|sh|html|mp4|mp3|wav))/g)) {
+          explicitPaths.add(m[1]);
         }
-      };
-      walk(structured.session_info.cwd, 0);
-    } catch (e) {
-      ctx.events.emit("agent.dsh.discover_files_failed", { error: e.message });
+      }
     }
+    for (const p of explicitPaths) addFile(p);
+
+    // Source 2 & 3: directory walks
+    const scanDirs = new Set();
+    if (structured.session_info.cwd) scanDirs.add(structured.session_info.cwd);
+    scanDirs.add("/tmp/agentry-scratch");
+
+    const walk = (dir, depth) => {
+      if (depth > 3) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(full, depth + 1); continue; }
+        if (e.isFile()) addFile(full);
+      }
+    };
+    for (const dir of scanDirs) walk(dir, 0);
+
+    ctx.events.emit("agent.dsh.files_discovered", {
+      ksess,
+      count: discovered_files.length,
+      paths: discovered_files.map(f => f.path),
+    });
+  } catch (e) {
+    ctx.events.emit("agent.dsh.discover_files_failed", { error: e.message });
   }
 
   return {
