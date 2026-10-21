@@ -1,25 +1,20 @@
 // agentry/src/handlers/agentry.agent.plan.mjs
-// v0.41.0 — agent generates its own plan from an intent.
+// v0.47.0 — agent generates its own plan from an intent.
 //
 // v0.38.0: initial planner. Excluded kind:"agent" from the enumeration
 //          to prevent the planner seeing itself — but that also hid
 //          agentry.agent.dsh, so agentic tasks never routed to it.
 // v0.41.0: replace kind-based exclusion with explicit PLANNER_EXCLUDED_IDS.
-//          Add prompt hint for preferring agentry.agent.dsh on
-//          write/run/iterate tasks. Add agent.dsh output shape hint
-//          ($prev.final is the answer text).
-//
-// Design:
-//   - Input: {intent, agent_id?, skills?, max_steps?, execute?}
-//   - agent_id given: filter available capabilities to agent.skills
-//   - agent_id omitted: use all invokable capabilities except the planner
-//     loop-preventing set (PLANNER_EXCLUDED_IDS)
-//   - LLM produces {steps: [...], reasoning: "..."} via groq gpt-oss-120b
-//   - Steps may reference capabilities that don't exist yet; the planner
-//     sets wanted_kind + wanted_description for those, which task.run's
-//     retry-on-missing path picks up
-//   - execute=true: plan is passed directly to agentry.agent.task
-//   - Returns {ok, plan, agent_id, model_used, reasoning, executed?}
+// v0.46.2: post-plan canonicalization (safety net).
+// v0.47.0: THE BIG ONE. Prior rules 1, 8, 10, 13 contradicted each other —
+//          rule 1 explicitly permitted inventing new ids, then rules 8/10/13
+//          tried to walk it back with "PREFER" and "USE EXISTING". The LLM
+//          read rule 1 first and invented freely. This version replaces them
+//          with ONE rule: work down a selection hierarchy (exact → adapted
+//          → invent). Inventing requires a `justification` listing which
+//          available capabilities were checked. validatePlan enforces it.
+//          Canonicalization stays as a safety net but is expected to be
+//          silent. If it fires, the prompt is still under-performing.
 
 const PROVIDER = process.env.AGENTRY_PLANNER_PROVIDER || "groq";
 const MODEL = process.env.AGENTRY_PLANNER_MODEL || "openai/gpt-oss-120b";
@@ -27,13 +22,6 @@ const DEFAULT_MAX_STEPS = 8;
 const MAX_CAPABILITIES_IN_PROMPT = 60;
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
 
-// v0.41.0 — planner must NOT see these. They are either the planner
-// itself (recursion), the executor primitives the caller is already
-// using (agentry.task.run, agentry.agent.task), lifecycle services
-// (boot, proposal pipeline, checkpoint, etc.), or inference
-// capabilities the planner sits on top of (reason.*).
-// agentry.agent.dsh is deliberately NOT in this list — it's the
-// delegation surface for agentic tasks.
 const PLANNER_EXCLUDED_IDS = new Set([
   "agentry.agent.plan",
   "agentry.agent.boot",
@@ -59,7 +47,6 @@ function enumerateCapabilities(graph, skillsFilter) {
     if (!cap.invoked_via) continue;
     if (INTERNAL_KINDS.has(cap.kind)) continue;
     if (PLANNER_EXCLUDED_IDS.has(cap.id)) continue;
-    // Skip orchestration/observation node kinds that aren't invokable work.
     if (cap.kind === "proposal" || cap.kind === "capability_gap" ||
         cap.kind === "watch_instance" || cap.kind === "synthesis_attempt" ||
         cap.kind === "edge" || cap.kind === "task" || cap.kind === "message") {
@@ -82,83 +69,74 @@ function enumerateCapabilities(graph, skillsFilter) {
 function buildPlanPrompt({ intent, capabilities, maxSteps }) {
   const capLines = capabilities.map(c =>
     "  - id: " + c.id +
-    "\n    kind: " + c.kind +
     "\n    accepts: " + (c.accepts.length ? c.accepts.join(", ") : "(none)") +
     "\n    produces: " + (c.produces.length ? c.produces.join(", ") : "(none)")
   ).join("\n");
 
-  return "You are agentry's planner. Given an INTENT and a list of AVAILABLE\n" +
-    "CAPABILITIES, produce a plan (ordered steps) that accomplishes the intent.\n\n" +
-    "=== AVAILABLE CAPABILITIES (invoke through agentry.task.run) ===\n" +
-    (capLines || "  (none — you will need to invent capability ids)") + "\n\n" +
+  return "You are agentry's planner. Produce a plan that accomplishes the INTENT.\n\n" +
+    "=== AVAILABLE CAPABILITIES ===\n" +
+    (capLines || "  (none)") + "\n\n" +
     "=== INTENT ===\n" +
     intent + "\n\n" +
-    "=== OUTPUT — a single JSON object, no prose, no fences ===\n" +
+    "=== SELECTION HIERARCHY — check in order, stop at first match ===\n" +
+    "\n" +
+    "(a) EXACT MATCH\n" +
+    "    A capability's `accepts` covers this step's required inputs AND\n" +
+    "    its `produces` covers the required outputs. Use its exact id,\n" +
+    "    verbatim. This is the expected case for 90%+ of steps.\n" +
+    "\n" +
+    "(b) ADAPTED MATCH\n" +
+    "    A capability covers most of it — you can pass extra fields it\n" +
+    "    ignores, drop optional inputs, or reuse an accepts key with\n" +
+    "    similar semantics. Use its exact id.\n" +
+    "\n" +
+    "(c) INVENT — last resort\n" +
+    "    NO available capability can work even after adapting. You MUST\n" +
+    "    include all three fields:\n" +
+    "      - wanted_kind: \"tool\" | \"web\" | \"notify\" | \"memory\" | \"harness\"\n" +
+    "      - wanted_description: short search-friendly phrase (3-10 words)\n" +
+    "      - justification: which available capabilities you checked and\n" +
+    "        why each was insufficient (2-4 sentences)\n" +
+    "    A step missing `justification` will be rejected by validation.\n" +
+    "    Inventing when a real cap fits is a failure of this planner.\n" +
+    "\n" +
+    "=== OUTPUT — one JSON object, no prose, no fences ===\n" +
     "{\n" +
     "  \"steps\": [\n" +
-    "    {\n" +
-    "      \"capability_id\": \"<from AVAILABLE CAPABILITIES, or a NEW dotted id>\",\n" +
-    "      \"input\": { \"<key>\": \"<value>\" },\n" +
-    "      \"why\": \"<one short sentence>\"\n" +
-    "    }\n" +
+    "    { \"capability_id\": \"<exact id>\", \"input\": {...}, \"why\": \"<short>\" }\n" +
+    "    // OR for invented steps (rule c):\n" +
+    "    // { \"capability_id\": \"<new dotted id>\", \"input\": {...}, \"why\": \"<short>\",\n" +
+    "    //   \"wanted_kind\": \"tool\", \"wanted_description\": \"...\", \"justification\": \"...\" }\n" +
     "  ],\n" +
-    "  \"reasoning\": \"<one short sentence: overall approach>\"\n" +
+    "  \"reasoning\": \"<one sentence: overall approach>\"\n" +
     "}\n\n" +
     "=== RULES ===\n" +
-    "1. Each step's capability_id MUST be either:\n" +
-    "   (a) an exact id from AVAILABLE CAPABILITIES, or\n" +
-    "   (b) a NEW dotted id (e.g. \"bua.browser\", \"pdf.from_image\") if the intent\n" +
-    "       needs a capability that is not yet available.\n" +
-    "2. For NEW capabilities, ALSO include \"wanted_kind\" and\n" +
-    "   \"wanted_description\" fields on the step. Example:\n" +
-    "     { \"capability_id\": \"pdf.from_image\",\n" +
-    "       \"wanted_kind\": \"tool\",\n" +
-    "       \"wanted_description\": \"convert PNG image to PDF file\",\n" +
-    "       \"input\": { \"image_path\": \"$last_artifact\" } }\n" +
-    "3. Step inputs may reference PRIOR step outputs:\n" +
-    "   - \"$last_artifact\"  -> file path from the most recent step's output\n" +
-    "   - \"$prev.field.sub\" -> a specific field path from the previous step\n" +
-    "   - \"$intent\"         -> the raw intent string\n" +
-    "4. Steps MUST be ≤ " + maxSteps + " in count. If the intent can be done in fewer\n" +
-    "   steps, do fewer. Do not add filler.\n" +
-    "5. Read capability `accepts` lists carefully — the step's `input` keys\n" +
-    "   MUST match what the capability expects. Mismatched keys will fail trial.\n" +
-    "6. Do NOT invent fields inside AVAILABLE capabilities. If a capability\n" +
-    "   accepts only {image_path}, do not pass {image_path, title}.\n" +
+    "1. Work down the hierarchy. Try (a), then (b), then (c). Only invent\n" +
+    "   when you have ruled out every available capability.\n" +
+    "2. Read `accepts` precisely. The step's input keys MUST match what the\n" +
+    "   capability expects. Do not pass fields it does not declare.\n" +
+    "3. Step inputs may reference prior step outputs:\n" +
+    "   - \"$intent\"            → the raw intent string\n" +
+    "   - \"$last_artifact\"     → file path from the most recent step\n" +
+    "   - \"$prev.field.sub\"    → specific field from the previous step\n" +
+    "   - \"$tmp/x.ext\"         → writable scratch directory\n" +
+    "4. Path inputs must be absolute (\"/tmp/x.png\") or \"$tmp/x.png\".\n" +
+    "   Do not invent $ tokens — only $intent, $last_artifact, $prev, $tmp.\n" +
+    "5. If a capability's `produces` already returns a path or `data_url`,\n" +
+    "   the file exists. Do NOT add a save/write step. Reference it via\n" +
+    "   \"$last_artifact\" or \"$prev.<field>\" in the next step.\n" +
+    "6. Use ≤ " + maxSteps + " steps. Fewer is better. Do not add filler steps.\n" +
     "7. Output ONLY the JSON object as your final message.\n" +
-    "8. STRONGLY PREFER `agentry.agent.dsh` FOR AGENTIC TASKS. If the intent\n" +
-    "   involves ANY of: (a) writing code, (b) running commands to verify,\n" +
-    "   (c) fixing code after it fails, (d) exploring a filesystem, (e)\n" +
-    "   multi-step debugging — pass the ENTIRE task to agentry.agent.dsh\n" +
-    "   as a single step. Do NOT try to decompose it into file.write /\n" +
-    "   node.run / bash.exec style steps; that's DSH's job and DSH does\n" +
-    "   it better. One step with agentry.agent.dsh beats five fragile\n" +
-    "   primitive steps.\n" +
-    "9. agentry.agent.dsh accepts: { prompt: string, timeout_ms?: number }.\n" +
-    "   produces: { final: string, messages: array, tool_calls: array }.\n" +
-    "   The answer text is in `final`. To chain a step after it, use\n" +
-    "   \"$prev.final\" (not \"$prev.stdout\").\n" +
-    "10. If the intent is a SINGLE deterministic operation (convert X to Y,\n" +
-    "    fetch URL, generate QR, render PDF) — use the direct capability,\n" +
-    "    not DSH.\n" +
-    "11. PATH FORMAT — path inputs (save_path, output_path, file_path, etc.)\n" +
-    "    MUST be either (a) an absolute path (e.g. \"/tmp/qr.png\"), or (b)\n" +
-    "    a $tmp/... reference (e.g. \"$tmp/qr.png\") which resolves to a\n" +
-    "    writable scratch directory. Do NOT invent $ tokens like \"$home\",\n" +
-    "    \"$cwd\", \"$work\". Only these are recognized: $tmp, $prev,\n" +
-    "    $last_artifact, $intent. Any other $ prefix is passed literally.\n" +
-    "12. If a capability's `produces` already contains a file path or\n" +
-    "    `data_url` (e.g. modbender QR skill returns `path`), the file\n" +
-    "    already exists. Do NOT add a separate save/write step to persist it.\n" +
-    "    Reference it downstream via \"$last_artifact\" or \"$prev.<field>\".\n" +
-    "13. USE EXISTING CAPABILITIES. If ANY capability in the list can\n" +
-    "    accomplish a step, use its EXACT id. Inventing new dotted ids\n" +
-    "    (like \"pdf.from_image\", \"file.write_base64\", \"node.run\") when\n" +
-    "    a real one exists (like \"pdf-lib-table\") causes the pipeline to\n" +
-    "    hang for 2 minutes trying to build the fake capability, then fail.\n" +
-    "    Only invent a new id when NO existing capability can work. If 2+\n" +
-    "    existing capabilities fit, pick the one whose `produces` fields\n" +
-    "    most closely match this step's required output.";
+    "8. `agentry.agent.dsh` (accepts: {prompt}) exists for tasks that need\n" +
+    "   writing code, running commands to verify, iterating on failures, or\n" +
+    "   exploring a filesystem. For those, pass the ENTIRE task as a single\n" +
+    "   step: { capability_id: \"agentry.agent.dsh\", input: { prompt: \"...\" } }.\n" +
+    "   The answer is in the step's output `final` field — chain via\n" +
+    "   \"$prev.final\" if a later step needs it.\n" +
+    "9. For single deterministic operations (generate QR, convert image→PDF,\n" +
+    "   fetch URL, render markdown→PDF), use the direct capability. Do NOT\n" +
+    "   route to agentry.agent.dsh for these — DSH is for multi-turn\n" +
+    "   iterate/verify/debug work, not one-shot transformations.";
 }
 
 function parseJson(text) {
@@ -173,9 +151,9 @@ function parseJson(text) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
-// v0.46.2 — post-plan canonicalization. The LLM sometimes invents a
-// capability_id (e.g. "pdf.from_image") even when a real one matching
-// its own wanted_description exists in the enumeration (e.g. "pdf-lib-table").
+// Safety net: only fires when the LLM's invented id has a wanted_description
+// that keyword-matches an existing capability. Expect this to be silent on
+// a well-functioning prompt. If it fires on >5% of plans, revisit the prompt.
 function canonicalizePlan(steps, capabilities) {
   const capIds = new Set(capabilities.map(c => c.id));
   const out = [];
@@ -192,13 +170,22 @@ function canonicalizePlan(steps, capabilities) {
       if (score > bestScore) { bestScore = score; best = cap; }
     }
     if (best && bestScore >= 2) {
-      out.push({ ...step, capability_id: best.id, original_planned_id: step.capability_id, canonicalized: true });
+      out.push({
+        ...step,
+        capability_id: best.id,
+        original_planned_id: step.capability_id,
+        canonicalized: true,
+        invented: false,
+        wanted_kind: undefined,
+        wanted_description: undefined,
+        justification: undefined,
+      });
     } else { out.push(step); }
   }
   return out;
 }
 
-function validatePlan(parsed, maxSteps) {
+function validatePlan(parsed, maxSteps, capabilities) {
   if (!parsed || !Array.isArray(parsed.steps)) {
     return { ok: false, reason: "steps_not_array" };
   }
@@ -208,6 +195,7 @@ function validatePlan(parsed, maxSteps) {
   if (parsed.steps.length > maxSteps) {
     return { ok: false, reason: "too_many_steps: " + parsed.steps.length + " > " + maxSteps };
   }
+  const capIds = new Set(capabilities.map(c => c.id));
   const cleaned = [];
   for (let i = 0; i < parsed.steps.length; i++) {
     const s = parsed.steps[i];
@@ -218,9 +206,20 @@ function validatePlan(parsed, maxSteps) {
       capability_id: s.capability_id,
       input: (s.input && typeof s.input === "object") ? s.input : {},
     };
-    if (s.wanted_kind) step.wanted_kind = String(s.wanted_kind);
-    if (s.wanted_description) step.wanted_description = String(s.wanted_description);
     if (s.why) step.why = String(s.why).slice(0, 300);
+
+    if (!capIds.has(s.capability_id)) {
+      if (!s.justification || typeof s.justification !== "string" || !s.justification.trim()) {
+        return { ok: false, reason: "step " + i + " invents \"" + s.capability_id + "\" without justification (rule 1c)" };
+      }
+      if (!s.wanted_description || typeof s.wanted_description !== "string" || !s.wanted_description.trim()) {
+        return { ok: false, reason: "step " + i + " invents \"" + s.capability_id + "\" without wanted_description (rule 1c)" };
+      }
+      step.invented = true;
+      step.wanted_kind = String(s.wanted_kind || "tool");
+      step.wanted_description = String(s.wanted_description).slice(0, 300);
+      step.justification = String(s.justification).slice(0, 800);
+    }
     cleaned.push(step);
   }
   return { ok: true, steps: cleaned };
@@ -293,7 +292,7 @@ export default async function agentryAgentPlan(input, ctx) {
     throw new Error("agentry.agent.plan: could not parse JSON. Raw: " + String(llmRes.output.content || "").slice(0, 300));
   }
 
-  const validation = validatePlan(parsed, maxSteps);
+  const validation = validatePlan(parsed, maxSteps, capabilities);
   if (!validation.ok) {
     events.emit("agent.plan.invalid", { reason: validation.reason });
     throw new Error("agentry.agent.plan: invalid plan: " + validation.reason);
@@ -302,12 +301,35 @@ export default async function agentryAgentPlan(input, ctx) {
   const canonicalSteps = canonicalizePlan(validation.steps, capabilities);
   const rewrites = canonicalSteps.filter(s => s.canonicalized);
   if (rewrites.length > 0) {
-    events.emit("agent.plan.canonicalized", { rewrites: rewrites.map(r => ({ from: r.original_planned_id, to: r.capability_id })) });
+    events.emit("agent.plan.canonicalized", {
+      rewrite_count: rewrites.length,
+      rewrites: rewrites.map(r => ({
+        from: r.original_planned_id,
+        to: r.capability_id,
+        description: r.wanted_description || null,
+      })),
+      warning: "prompt fix should have prevented this — check rule 1 compliance",
+    });
+  }
+
+  const inventedSteps = canonicalSteps.filter(s => s.invented);
+  if (inventedSteps.length > 0) {
+    events.emit("agent.plan.invented", {
+      count: inventedSteps.length,
+      steps: inventedSteps.map(s => ({
+        capability_id: s.capability_id,
+        wanted_description: s.wanted_description,
+        justification: s.justification,
+      })),
+    });
   }
 
   events.emit("agent.plan.completed", {
     intent: String(intent).slice(0, 200),
-    steps: validation.steps.length,
+    steps: canonicalSteps.length,
+    exact_matches: canonicalSteps.filter(s => !s.invented && !s.canonicalized).length,
+    canonicalized: rewrites.length,
+    invented: inventedSteps.length,
     model_used: llmRes.output.model || MODEL,
     ms: Date.now() - started,
   });
@@ -321,12 +343,13 @@ export default async function agentryAgentPlan(input, ctx) {
     capabilities_considered: capabilities.length,
     steps: canonicalSteps.length,
     ...(rewrites.length > 0 ? { canonicalized_count: rewrites.length } : {}),
+    ...(inventedSteps.length > 0 ? { invented_count: inventedSteps.length } : {}),
   };
 
   if (execute === true) {
     if (!agent_id) {
       output.executed = false;
-      output.execute_error = "execute=true requires agent_id (agent.plan does not create tasks without an owner)";
+      output.execute_error = "execute=true requires agent_id";
     } else {
       try {
         const taskRes = await ctx.invoke("agentry.agent.task", {
