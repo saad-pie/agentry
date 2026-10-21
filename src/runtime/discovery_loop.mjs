@@ -40,7 +40,14 @@ import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 // Everything else — bua, cua, mua, memory, harness, and any garbage
 // kind the LLM emitted (e.g. "capability") — is EXCLUDED. Those are
 // either the dedicated arms layer or invalid.
-const AUTO_DECIDE_ALLOWED_KINDS = new Set(["tool", "notify", "web", "unknown"]);
+// v0.51.5 — blocklist not allowlist. Prior allowlist rejected 38/39 gaps
+// because the LLM emits arbitrary kinds ("custom", "pdf", or null) for
+// legitimate tool needs. Now: only explicitly-architecture layers are
+// blocked. Everything else (including null/custom) is treated as tool-like.
+const AUTO_DECIDE_BLOCKED_KINDS = new Set([
+  "bua", "cua", "mua", "memory", "harness",  // arms layer (src/arms)
+  "agent", "chat", "invoker", "service",     // infra / self-reference
+]);
 
 // Gaps whose wanted_id contains these markers are test/debug junk from
 // ensure-loop probes. Auto-deciding them pollutes the graph with
@@ -48,6 +55,7 @@ const AUTO_DECIDE_ALLOWED_KINDS = new Set(["tool", "notify", "web", "unknown"]);
 const GAP_ID_REJECT_MARKERS = [
   "does.not.exist", "doesnotexist", "test.nonexistent", "example.",
   ".test.", ".test$", "test.capability",
+  "chat_conv_", "task_", "conv_", "session_",  // v0.51.5: session IDs leaked as gaps
 ];
 
 function gapIdLooksValid(wantedId) {
@@ -69,8 +77,10 @@ function gapIdLooksValid(wantedId) {
 function isPipelineable(gap, graph) {
   if (!gap) return { ok: false, reason: "no_gap" };
   if (gap.retired_at) return { ok: false, reason: "gap_retired" };
-  if (!AUTO_DECIDE_ALLOWED_KINDS.has(gap.wanted_kind)) {
-    return { ok: false, reason: "kind_not_allowed", kind: gap.wanted_kind };
+  // Only exclude explicitly-blocked layers. Null/custom/unknown kinds are
+  // treated as tool-like — the LLM emits garbage kinds for legitimate needs.
+  if (gap.wanted_kind && AUTO_DECIDE_BLOCKED_KINDS.has(gap.wanted_kind)) {
+    return { ok: false, reason: "kind_blocked", kind: gap.wanted_kind };
   }
   const wid = String(gap.wanted_id || (gap.id || "").replace(/^gap:/, ""));
   if (!gapIdLooksValid(wid)) {
