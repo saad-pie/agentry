@@ -62,6 +62,23 @@ function gapIdLooksValid(wantedId) {
   return true;
 }
 
+// v0.51.4 — consolidated pipelineability check. Called from Pass 1, 2, 3.
+// Prior versions had inconsistent filters: Pass 1/2 only checked kind, so a
+// gap with wanted_kind="tool" but invalid wanted_id (test.nonexistent.*)
+// slipped through to adoption, where synth failed on the dead gap.
+function isPipelineable(gap, graph) {
+  if (!gap) return { ok: false, reason: "no_gap" };
+  if (gap.retired_at) return { ok: false, reason: "gap_retired" };
+  if (!AUTO_DECIDE_ALLOWED_KINDS.has(gap.wanted_kind)) {
+    return { ok: false, reason: "kind_not_allowed", kind: gap.wanted_kind };
+  }
+  const wid = String(gap.wanted_id || (gap.id || "").replace(/^gap:/, ""));
+  if (!gapIdLooksValid(wid)) {
+    return { ok: false, reason: "invalid_wanted_id", wanted_id: wid };
+  }
+  return { ok: true };
+}
+
 const SOURCES_BY_KIND = {
   bua: [
     { source: "discovery.github_search", query: () => ({
@@ -247,16 +264,20 @@ export async function tick(deps, opts = {}) {
     // v0.51.3 — skip watch_results whose gap kind is not auto-decidable.
     // Prior version only filtered in Pass 3, so existing watch_results on
     // orphan gaps (agent.dsh, junk test gaps) still produced proposals.
-    if (!AUTO_DECIDE_ALLOWED_KINDS.has(gap.wanted_kind)) {
-      events.emit("discovery.watch_result_skipped_kind", {
-        watch_result_id: node.id, gap_id: gap.id, kind: gap.wanted_kind,
-      });
-      graph.putCapability({
-        id: node.id, kind: "watch_result",
-        analyzed_at: Date.now(),
-        analysis_skipped_reason: "kind_not_in_allowlist:" + (gap.wanted_kind || "unknown"),
-      });
-      continue;
+    {
+      const _pipe1 = isPipelineable(gap, graph);
+      if (!_pipe1.ok) {
+        events.emit("discovery.watch_result_skipped", {
+          watch_result_id: node.id, gap_id: gap.id, reason: _pipe1.reason,
+          kind: _pipe1.kind || null, wanted_id: _pipe1.wanted_id || null,
+        });
+        graph.putCapability({
+          id: node.id, kind: "watch_result",
+          analyzed_at: Date.now(),
+          analysis_skipped_reason: "pipeline_not_valid:" + _pipe1.reason,
+        });
+        continue;
+      }
     }
 
     // Skip: gap already has an open proposal. Mark as analyzed so we
@@ -342,18 +363,23 @@ export async function tick(deps, opts = {}) {
     // v0.51.3 — skip decided proposals whose gap kind is not auto-decidable.
     // Prevents adopt from attempting synthesis for agent/bua/cua/mua/memory/
     // harness kinds that slipped into state=decided before v0.51.2 shipped.
-    if (!AUTO_DECIDE_ALLOWED_KINDS.has(node.gap_wanted_kind)) {
-      events.emit("discovery.proposal_skipped_kind", {
-        proposal_id: node.id, gap_id: node.gap_id, kind: node.gap_wanted_kind,
-      });
-      try {
-        graph.putCapability({
-          id: node.id, kind: "proposal",
-          state: "rejected", adopted_at: Date.now(),
-          rejected_reason: "kind_not_in_allowlist:" + (node.gap_wanted_kind || "unknown"),
+    {
+      const _gap2 = graph.getCapability(node.gap_id);
+      const _pipe2 = isPipelineable(_gap2, graph);
+      if (!_pipe2.ok) {
+        events.emit("discovery.proposal_skipped", {
+          proposal_id: node.id, gap_id: node.gap_id, reason: _pipe2.reason,
+          kind: _pipe2.kind || null, wanted_id: _pipe2.wanted_id || null,
         });
-      } catch {}
-      continue;
+        try {
+          graph.putCapability({
+            id: node.id, kind: "proposal",
+            state: "rejected", adopted_at: Date.now(),
+            rejected_reason: "pipeline_not_valid:" + _pipe2.reason,
+          });
+        } catch {}
+        continue;
+      }
     }
     // v0.21.0 — prevent double-adopt when ticks overlap.
     if (node.adoption_in_progress_at && (Date.now() - node.adoption_in_progress_at) < 300000) continue;
