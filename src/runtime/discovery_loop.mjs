@@ -244,6 +244,21 @@ export async function tick(deps, opts = {}) {
       continue;
     }
 
+    // v0.51.3 — skip watch_results whose gap kind is not auto-decidable.
+    // Prior version only filtered in Pass 3, so existing watch_results on
+    // orphan gaps (agent.dsh, junk test gaps) still produced proposals.
+    if (!AUTO_DECIDE_ALLOWED_KINDS.has(gap.wanted_kind)) {
+      events.emit("discovery.watch_result_skipped_kind", {
+        watch_result_id: node.id, gap_id: gap.id, kind: gap.wanted_kind,
+      });
+      graph.putCapability({
+        id: node.id, kind: "watch_result",
+        analyzed_at: Date.now(),
+        analysis_skipped_reason: "kind_not_in_allowlist:" + (gap.wanted_kind || "unknown"),
+      });
+      continue;
+    }
+
     // Skip: gap already has an open proposal. Mark as analyzed so we
     // don't re-check on every tick, but don't propose.
     if (gapsWithOpenProposal.has(gap.id)) {
@@ -324,6 +339,22 @@ export async function tick(deps, opts = {}) {
     if (node.kind !== "proposal") continue;
     if (node.state !== "decided") continue;
     if (node.adopted_at) continue;
+    // v0.51.3 — skip decided proposals whose gap kind is not auto-decidable.
+    // Prevents adopt from attempting synthesis for agent/bua/cua/mua/memory/
+    // harness kinds that slipped into state=decided before v0.51.2 shipped.
+    if (!AUTO_DECIDE_ALLOWED_KINDS.has(node.gap_wanted_kind)) {
+      events.emit("discovery.proposal_skipped_kind", {
+        proposal_id: node.id, gap_id: node.gap_id, kind: node.gap_wanted_kind,
+      });
+      try {
+        graph.putCapability({
+          id: node.id, kind: "proposal",
+          state: "rejected", adopted_at: Date.now(),
+          rejected_reason: "kind_not_in_allowlist:" + (node.gap_wanted_kind || "unknown"),
+        });
+      } catch {}
+      continue;
+    }
     // v0.21.0 — prevent double-adopt when ticks overlap.
     if (node.adoption_in_progress_at && (Date.now() - node.adoption_in_progress_at) < 300000) continue;
     try { graph.putCapability({ id: node.id, adoption_in_progress_at: Date.now() }); } catch (e) {}
@@ -362,6 +393,24 @@ export async function tick(deps, opts = {}) {
   let watchedCount = 0;
   for (const cap of graph.capabilities().values()) {
     if (cap.kind === "watch_instance" && !cap.retired_at) watchedCount++;
+  }
+
+  // v0.51.3 — orphan gap cleanup: if gap.wanted_id matches a capability
+  // that exists and is retired, this gap is a ghost. Retire it silently.
+  // Example: gap:agent.dsh lingers after agent.dsh was retired in v0.47.3.
+  const _orphanRetired = [];
+  for (const g of liveGaps(graph)) {
+    const wantedId = String(g.wanted_id || g.id.replace(/^gap:/, ""));
+    const cap = graph.getCapability(wantedId);
+    if (cap && cap.retired_at) {
+      try {
+        graph.retireCapability(g.id, "v0.51.3: orphan gap — capability " + wantedId + " is retired");
+        _orphanRetired.push({ gap: g.id, capability: wantedId });
+      } catch {}
+    }
+  }
+  if (_orphanRetired.length > 0) {
+    events.emit("discovery.orphan_gaps_retired", { count: _orphanRetired.length, samples: _orphanRetired.slice(0, 10) });
   }
 
   // v0.51.2 — allowlist + format check. Rejected gaps are silently
