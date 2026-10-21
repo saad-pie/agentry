@@ -199,16 +199,6 @@ export default async function agentryAgentDsh(input, ctx) {
   const REQUIRED_PATCH = `- id: llm-pi-ai
   config:
     providers:
-      unorouter:
-        apiKeyEnv: ATRIA_API_KEY
-        api: openai-completions
-        baseURL: https://antigravity-seven-delta.vercel.app/v1
-        supportsDeveloperRole: false
-        defaultMaxTokens: 2048
-        models:
-          - id: qwen3.8-27b:free
-            displayName: qwen3.8-27b:free (unorouter)
-            maxTokens: 2048
       requesty:
         apiKeyEnv: REQUESTYAI_API_KEY
         api: openai-completions
@@ -219,11 +209,24 @@ export default async function agentryAgentDsh(input, ctx) {
           - id: nemotron-3-ultra-550b-a55b
             displayName: nemotron-3-ultra-550b-a55b (requesty)
             maxTokens: 2048
+          - id: gemma-4-31b-it
+            displayName: gemma-4-31b-it (requesty)
+            maxTokens: 2048
+      unorouter:
+        apiKeyEnv: ATRIA_API_KEY
+        api: openai-completions
+        baseURL: https://antigravity-seven-delta.vercel.app/v1
+        supportsDeveloperRole: false
+        defaultMaxTokens: 2048
+        models:
+          - id: qwen3.8-27b:free
+            displayName: qwen3.8-27b:free (unorouter)
+            maxTokens: 2048
 - id: agent-default-model
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
-    provider: unorouter
-    model: qwen3.8-27b:free
+    provider: requesty
+    model: nemotron-3-ultra-550b-a55b
 - id: agent-preset-registry
   name: "@deepseek-ai/dsh-agent-preset-registry"
   config:
@@ -239,7 +242,7 @@ export default async function agentryAgentDsh(input, ctx) {
       // v0.48.6 — require EXACT provider + model strings. Prior version just
       // matched "atria" substring and skipped even when the profile had
       // qwen3.8-27b (no suffix, which 404s on atria's routing).
-      if (current.includes("provider: unorouter") && current.includes("model: qwen3.8-27b:free")) {
+      if (current.includes("provider: requesty") && current.includes("model: nemotron-3-ultra-550b-a55b")) {
         needsFix = false;
       }
     } catch {}
