@@ -190,6 +190,56 @@ export default async function agentryAgentDsh(input, ctx) {
   const envPrefix = "DEEPSEEK_API_KEY='dummy-not-used' ATRIA_API_KEY=" + shq(atriaKey);
   const cmdParts = [shq(DSH_BIN), ...args.map(shq)];
   const cmdStr = envPrefix + " " + cmdParts.join(" ");
+  // v0.48.3 — self-healing DSH profile. The headless profile's patch must
+  // route agent-default-model to atria (unorouter). If it's been reset to
+  // [] or default, DSH falls back to deepseek-official and AUTH fails
+  // against the dummy key. Verify + fix on every invocation.
+  const HEADLESS_PATCH_PATH = "/tmp/home/.dsh/profiles/headless/cordis.patch.yml";
+  const REQUIRED_PATCH = [
+    "- id: llm-pi-ai",
+    "  config:",
+    "    providers:",
+    "      atria:",
+    "        apiKeyEnv: ATRIA_API_KEY",
+    "        api: openai-completions",
+    "        baseURL: https://antigravity-seven-delta.vercel.app/v1",
+    "        supportsDeveloperRole: false",
+    "        defaultMaxTokens: 2048",
+    "        models:",
+    "          - id: qwen3.8-27b",
+    "            displayName: qwen3.8-27b (atria)",
+    "            maxTokens: 2048",
+    "- id: agent-default-model",
+    "  name: "@deepseek-ai/dsh-agent-default-model"",
+    "  config:",
+    "    provider: atria",
+    "    model: qwen3.8-27b",
+    "- id: agent-preset-registry",
+    "  name: "@deepseek-ai/dsh-agent-preset-registry"",
+    "  config:",
+    "    default: standard",
+    "    selectedDefault: cordis",
+    "",
+  ].join("\n");
+
+  try {
+    const fs = await import("node:fs");
+    let needsFix = true;
+    try {
+      const current = fs.readFileSync(HEADLESS_PATCH_PATH, "utf8");
+      if (current.includes("agent-default-model") && current.includes("atria")) {
+        needsFix = false;
+      }
+    } catch {}
+    if (needsFix) {
+      fs.mkdirSync("/tmp/home/.dsh/profiles/headless", { recursive: true });
+      fs.writeFileSync(HEADLESS_PATCH_PATH, REQUIRED_PATCH);
+      events_out.emit("agent.dsh.profile_healed", { path: HEADLESS_PATCH_PATH });
+    }
+  } catch (e) {
+    events_out.emit("agent.dsh.profile_heal_failed", { error: e.message });
+  }
+
   events_out.emit("agent.dsh.spawn_started", { ksess, prompt_len: prompt.length, cmd_len: cmdStr.length });
   let spawn;
   try {
