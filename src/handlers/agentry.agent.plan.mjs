@@ -6,6 +6,9 @@
 //          agentry.agent.dsh, so agentic tasks never routed to it.
 // v0.41.0: replace kind-based exclusion with explicit PLANNER_EXCLUDED_IDS.
 // v0.46.2: post-plan canonicalization (safety net).
+// v0.47.1: replace rules 8+9 with anti-duplication (rule 8 vs 9 caused
+//          the LLM to wrap QR→PDF in DSH bookends to satisfy both).
+//
 // v0.47.0: THE BIG ONE. Prior rules 1, 8, 10, 13 contradicted each other —
 //          rule 1 explicitly permitted inventing new ids, then rules 8/10/13
 //          tried to walk it back with "PREFER" and "USE EXISTING". The LLM
@@ -127,16 +130,19 @@ function buildPlanPrompt({ intent, capabilities, maxSteps }) {
     "   \"$last_artifact\" or \"$prev.<field>\" in the next step.\n" +
     "6. Use ≤ " + maxSteps + " steps. Fewer is better. Do not add filler steps.\n" +
     "7. Output ONLY the JSON object as your final message.\n" +
-    "8. `agentry.agent.dsh` (accepts: {prompt}) exists for tasks that need\n" +
-    "   writing code, running commands to verify, iterating on failures, or\n" +
-    "   exploring a filesystem. For those, pass the ENTIRE task as a single\n" +
-    "   step: { capability_id: \"agentry.agent.dsh\", input: { prompt: \"...\" } }.\n" +
-    "   The answer is in the step's output `final` field — chain via\n" +
-    "   \"$prev.final\" if a later step needs it.\n" +
-    "9. For single deterministic operations (generate QR, convert image→PDF,\n" +
-    "   fetch URL, render markdown→PDF), use the direct capability. Do NOT\n" +
-    "   route to agentry.agent.dsh for these — DSH is for multi-turn\n" +
-    "   iterate/verify/debug work, not one-shot transformations.";
+    "8. EACH STEP IS ONE CAPABILITY INVOCATION. Do not add a step whose\n" +
+    "   only job is to invoke, wrap, verify, or duplicate the work of other\n" +
+    "   steps. If a task needs generating a QR then saving as PDF, that is\n" +
+    "   TWO steps (modbender → pdf-lib-table), not one DSH step wrapping\n" +
+    "   both, and not a trailing DSH step to 'verify' after the fact.\n" +
+    "9. If a capability's `accepts` field is `prompt` (e.g.\n" +
+    "   agentry.agent.dsh), it accepts a whole task description as a string.\n" +
+    "   Use it ONLY when the intent itself requires writing code, running\n" +
+    "   commands to verify, iterating on failures, or exploring a filesystem.\n" +
+    "   Do NOT use it for one-shot transformations that a direct capability\n" +
+    "   can already accomplish — those are 2 steps (produce → consume), not\n" +
+    "   wrapped in an agent. The result of a DSH step is in `final`; chain\n" +
+    "   via \"$prev.final\" if a later step needs it.";
 }
 
 function parseJson(text) {
