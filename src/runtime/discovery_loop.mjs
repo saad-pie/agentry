@@ -455,7 +455,7 @@ export async function tick(deps, opts = {}) {
   const _allLiveGaps = liveGaps(graph);
   const _rejected = [];
   const gaps = _allLiveGaps.filter(g => {
-    if (!AUTO_DECIDE_ALLOWED_KINDS.has(g.wanted_kind)) {
+    if (g.wanted_kind && AUTO_DECIDE_BLOCKED_KINDS.has(g.wanted_kind)) {
       _rejected.push({ gap: g.id, reason: "kind_not_allowed", kind: g.wanted_kind });
       return false;
     }
