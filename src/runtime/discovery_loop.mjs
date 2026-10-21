@@ -32,6 +32,14 @@ import { liveGaps } from "../handlers/agentry.capability_gap.mjs";
 // Every source becomes its own watch, so one gap triggers GitHub search
 // AND (for some kinds) web search in parallel.
 
+// v0.51.1 — bua/cua/mua/memory/harness are a DEDICATED LAYER the user
+// builds (src/arms etc). They must NEVER be synthesized from GitHub
+// discovery — searching "browser automation" returns the entire
+// browser-agent ecosystem (browser-use, playwright, puppeteer) which
+// are agent-runner dependencies, not capabilities. The pipeline only
+// auto-adopts `tool` kind. These kinds route to explicit user action.
+const AUTO_DECIDE_EXCLUDED_KINDS = new Set(["bua", "cua", "mua", "memory", "harness"]);
+
 const SOURCES_BY_KIND = {
   bua: [
     { source: "discovery.github_search", query: () => ({
@@ -334,7 +342,10 @@ export async function tick(deps, opts = {}) {
     if (cap.kind === "watch_instance" && !cap.retired_at) watchedCount++;
   }
 
-  const gaps = liveGaps(graph);
+  // v0.51.1 — filter out excluded kinds before watch/proposal creation
+  const gaps = liveGaps(graph).filter(g => !AUTO_DECIDE_EXCLUDED_KINDS.has(g.wanted_kind));
+  const excluded_gap_count = liveGaps(graph).length - gaps.length;
+
   if (!gaps.length) {
     events.emit("discovery.no_gaps");
     return {
@@ -606,6 +617,7 @@ export async function tick(deps, opts = {}) {
 
   events.emit("discovery.tick_summary", {
     gaps: gaps.length,
+    excluded_kinds: excluded_gap_count,
     uncovered: uncoveredCount,
     watched: watchedCount,
     created: created.length,
