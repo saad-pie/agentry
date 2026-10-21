@@ -166,6 +166,27 @@ function extractArtifacts(output, stepInput, stepIndex) {
     }
   }
 
+  // v0.47.4 — DSH discovered_files. agentry.agent.dsh now returns a
+  // discovered_files array built by walking its cwd. These are real files
+  // produced by the DSH step that wouldn't be caught by the tool_calls
+  // scan (bash-based writes have no file_path field).
+  if (output && Array.isArray(output.discovered_files)) {
+    for (const f of output.discovered_files) {
+      if (!f || !f.path || seenPaths.has(f.path)) continue;
+      artifacts.push({
+        kind: "file",
+        field: "dsh.discovered:" + (f.path.split("/").pop() || "file"),
+        path: f.path,
+        bytes: f.bytes || 0,
+        magic: f.magic || null,
+        from_step: stepIndex,
+        from_dsh_discovery: true,
+      });
+      seenPaths.add(f.path);
+    }
+  }
+
+
   if (artifacts.length === 0 && output && typeof output === "object" && typeof output.bytes === "number" && output.bytes > 0) {
     artifacts.push({ kind: "bytes_only", bytes: output.bytes, from_step: stepIndex });
   }

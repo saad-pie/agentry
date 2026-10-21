@@ -229,11 +229,45 @@ export default async function agentryAgentDsh(input, ctx) {
     ms: elapsed,
   });
 
+  // v0.47.4 — enumerate files created in DSH's cwd during this call.
+  // DSH writes via bash (no file_path in tool_calls), so our existing
+  // tool_calls-based extractor misses them. Walk cwd and pick up any
+  // file modified at-or-after started - 1s.
+  const discovered_files = [];
+  if (structured.session_info.cwd) {
+    try {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const cutoff = started - 1000;
+      const walk = (dir, depth) => {
+        if (depth > 3) return;
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) { walk(full, depth + 1); continue; }
+          if (!e.isFile()) continue;
+          try {
+            const st = fs.statSync(full);
+            if (st.mtimeMs < cutoff) continue;
+            if (st.size === 0) continue;
+            const magic = fs.readFileSync(full).slice(0, 8).toString("hex");
+            discovered_files.push({ path: full, bytes: st.size, magic });
+          } catch {}
+        }
+      };
+      walk(structured.session_info.cwd, 0);
+    } catch (e) {
+      ctx.events.emit("agent.dsh.discover_files_failed", { error: e.message });
+    }
+  }
+
   return {
     output: {
       ok,
       exit_code,
       duration_ms: elapsed,
+      discovered_files,
       session_id: structured.session_info.sessionId,
       cwd: structured.session_info.cwd,
       final: structured.final_text,

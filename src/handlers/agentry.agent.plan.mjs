@@ -42,8 +42,11 @@ const PLANNER_EXCLUDED_IDS = new Set([
   "agentry.reason.deep",
   "agentry.reason.harness",
   "agentry.chat",
+  "agentry.os",
   "agentry.message.send",
   "agentry.message.read",
+  "agentry.ensure",
+  "agentry.checkpoint",
 ]);
 
 function enumerateCapabilities(graph, skillsFilter) {
