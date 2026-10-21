@@ -187,7 +187,8 @@ export default async function agentryAgentDsh(input, ctx) {
   args.push(prompt);
 
   // v0.48.2 — inline env prefix on sh -c to guarantee propagation
-  const envPrefix = "DEEPSEEK_API_KEY='dummy-not-used' ATRIA_API_KEY=" + shq(atriaKey);
+  const requestyKey = process.env.REQUESTYAI_API_KEY || "";
+  const envPrefix = "DEEPSEEK_API_KEY='dummy-not-used' ATRIA_API_KEY=" + shq(atriaKey) + " REQUESTYAI_API_KEY=" + shq(requestyKey);
   const cmdParts = [shq(DSH_BIN), ...args.map(shq)];
   const cmdStr = envPrefix + " " + cmdParts.join(" ");
   // v0.48.3 — self-healing DSH profile. The headless profile's patch must
@@ -198,21 +199,34 @@ export default async function agentryAgentDsh(input, ctx) {
   const REQUIRED_PATCH = `- id: llm-pi-ai
   config:
     providers:
-      atria:
+      requesty:
+        apiKeyEnv: REQUESTYAI_API_KEY
+        api: openai-completions
+        baseURL: https://router.requesty.ai/v1
+        supportsDeveloperRole: false
+        defaultMaxTokens: 2048
+        models:
+          - id: nemotron-3-ultra-550b-a55b
+            displayName: nemotron-3-ultra-550b-a55b (requesty)
+            maxTokens: 2048
+          - id: gemma-4-31b-it
+            displayName: gemma-4-31b-it (requesty)
+            maxTokens: 2048
+      unorouter:
         apiKeyEnv: ATRIA_API_KEY
         api: openai-completions
         baseURL: https://antigravity-seven-delta.vercel.app/v1
         supportsDeveloperRole: false
         defaultMaxTokens: 2048
         models:
-          - id: qwen3.8-27b
-            displayName: qwen3.8-27b (atria)
+          - id: qwen3.8-27b:free
+            displayName: qwen3.8-27b:free (unorouter)
             maxTokens: 2048
 - id: agent-default-model
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
-    provider: atria
-    model: qwen3.8-27b
+    provider: requesty
+    model: nemotron-3-ultra-550b-a55b
 - id: agent-preset-registry
   name: "@deepseek-ai/dsh-agent-preset-registry"
   config:

@@ -113,6 +113,10 @@ export function loadConfig(overrides = {}) {
           baseUrl: env("ATRIA_BASE_URL", "https://antigravity-seven-delta.vercel.app/v1"),
           apiKey: env("ATRIA_API_KEY", "antigravity-free"),
         },
+        requesty: {
+          baseUrl: env("REQUESTY_BASE_URL", "https://router.requesty.ai/v1"),
+          apiKey: env("REQUESTYAI_API_KEY", null),
+        },
       },
     },
 
