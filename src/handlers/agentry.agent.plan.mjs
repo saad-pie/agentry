@@ -50,6 +50,11 @@ function enumerateCapabilities(graph, skillsFilter) {
     if (!cap.invoked_via) continue;
     if (INTERNAL_KINDS.has(cap.kind)) continue;
     if (PLANNER_EXCLUDED_IDS.has(cap.id)) continue;
+    // v0.47.2 — exclude infra capability families. llm.*, notify.*, watcher.*,
+    // discovery.* are primitives the planner sits above, not work units.
+    // Without this, llm.openai_compat leaks into plans whenever the intent
+    // contains something code-shaped (Date.now(), variables, etc).
+    if (/^(llm|notify|watcher|discovery|agentry)\./.test(cap.id)) continue;
     if (cap.kind === "proposal" || cap.kind === "capability_gap" ||
         cap.kind === "watch_instance" || cap.kind === "synthesis_attempt" ||
         cap.kind === "edge" || cap.kind === "task" || cap.kind === "message") {
