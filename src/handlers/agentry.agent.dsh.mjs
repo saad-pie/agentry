@@ -165,18 +165,20 @@ export default async function agentryAgentDsh(input, ctx) {
     throw new Error("agentry.agent.dsh: session setup failed: " + e.message);
   }
 
-  // ── 2. Propagate ATRIA_API_KEY into the session env ──
-  // dsh reads apiKeyEnv from its provider config; the model provider
-  // (unorouter) uses ATRIA_API_KEY per agentry's config.mjs convention.
-  if (ATRIA_KEY) {
-    try {
-      await ctx.invoke("agentry.os", {
-        action: "session.env", session: ksess,
-        key: "ATRIA_API_KEY", value: ATRIA_KEY,
-      }, { tenant: "local", by: "agentry.agent.dsh" });
-    } catch (e) {
-      events_out.emit("agent.dsh.env_set_failed", { error: e.message });
-    }
+  // ── 2. Set env vars required by DSH bundles ──
+  // v0.48.2 — DSH's llm-deepseek bundle checks for DEEPSEEK_API_KEY at
+  // startup BEFORE atria config takes over model routing. Setting it to a
+  // dummy value satisfies the gate; atria handles actual model calls. This
+  // is the same workaround as the manual `DEEPSEEK_API_KEY=dummy dsh headless`
+  // test that worked earlier in the session.
+  const atriaKey = ATRIA_KEY || "antigravity-free";
+  const shq = (x) => "'" + String(x).replace(/'/g, "'\\''") + "'";
+  try {
+    await ctx.invoke("agentry.os", { action: "session.env", session: ksess, key: "DEEPSEEK_API_KEY", value: "dummy-not-used" }, { tenant: "local", by: "agentry.agent.dsh" });
+    await ctx.invoke("agentry.os", { action: "session.env", session: ksess, key: "ATRIA_API_KEY", value: atriaKey }, { tenant: "local", by: "agentry.agent.dsh" });
+    events_out.emit("agent.dsh.env_set", { ksess, atria_key_present: atriaKey.length > 0 });
+  } catch (e) {
+    events_out.emit("agent.dsh.env_set_failed", { error: e.message });
   }
 
   // ── 3. Spawn dsh ──
@@ -184,14 +186,18 @@ export default async function agentryAgentDsh(input, ctx) {
   if (session_id) args.push("--session-id", String(session_id));
   args.push(prompt);
 
-  events_out.emit("agent.dsh.spawn_started", { ksess, prompt_len: prompt.length });
+  // v0.48.2 — inline env prefix on sh -c to guarantee propagation
+  const envPrefix = "DEEPSEEK_API_KEY='dummy-not-used' ATRIA_API_KEY=" + shq(atriaKey);
+  const cmdParts = [shq(DSH_BIN), ...args.map(shq)];
+  const cmdStr = envPrefix + " " + cmdParts.join(" ");
+  events_out.emit("agent.dsh.spawn_started", { ksess, prompt_len: prompt.length, cmd_len: cmdStr.length });
   let spawn;
   try {
     spawn = await ctx.invoke("agentry.os", {
       action: "shell.spawn",
       session: ksess,
-      cmd: DSH_BIN,
-      args,
+      cmd: "sh",
+      args: ["-c", cmdStr],
       timeout_ms: timeout,
     }, { tenant: "local", by: "agentry.agent.dsh" });
   } catch (e) {
