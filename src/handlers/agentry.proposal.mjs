@@ -252,25 +252,32 @@ function approvalTemplates() {
   };
 }
 
-// v0.15.23 — the auto-approval gate.
-// Returns the recommended candidate if this proposal qualifies for
-// automatic approval, else null. Null means "fall through to email".
-function shouldAutoApprove(gap, analysis, config) {
-  if (!analysis || !analysis.recommended_id) return null;
-  const autoKinds = config?.runtime?.adoptionAutoKinds;
-  if (!Array.isArray(autoKinds) || autoKinds.length === 0) return null;
-  if (!gap.wanted_kind || !autoKinds.includes(gap.wanted_kind)) return null;
-  const recommended = (analysis.candidates || []).find(c => c.id === analysis.recommended_id);
-  if (!recommended) return null;
-  // v0.23.8 — LLM-failed fallback bypasses the confidence gate when the
-  // recommendation is an installable prefix. Trial is the safety net:
-  // a bad pick fails synthesis/trial, candidate marked failed, gap re-opens.
-  if (analysis.llm_failed === true) {
-    const id = String(recommended.id || "");
-    if (Object.keys(PREFIX_RANK).some(pre => id.startsWith(pre))) return recommended;
-  }
-  if (recommended.confidence !== "high") return null;
-  return recommended;
+// v0.51.0 — always auto-decide. The approval gate is gone. Every proposal
+// is written in state "decided" with the reasoner's recommended candidate
+// pre-approved. Trial is the safety net — a bad pick fails synth or trial,
+// candidate marked failed, gap stays open, next tick retries. The user
+// gets one notification per adoption attempt with candidates + outcome.
+//
+// If the LLM returned no viable candidate (recommended_id null), the
+// proposal is still "decided" but with empty decisions. adopt() then
+// writes it as rejected without an attempt, and skips the email — no
+// notification for "nothing found" gaps, only for actual attempts.
+function buildDecisions(analysis) {
+  if (!analysis || !analysis.recommended_id) return { recommended: null, decisions: {} };
+  const rec = (analysis.candidates || []).find(c => c.id === analysis.recommended_id);
+  if (!rec) return { recommended: null, decisions: {} };
+  return {
+    recommended: rec,
+    decisions: {
+      [rec.id]: {
+        decision: "approved",
+        at: Date.now(),
+        auto: true,
+        confidence: rec.confidence,
+        fit: rec.fit,
+      },
+    },
+  };
 }
 
 function renderEmail({ gap, analysis, perCandidateTokens, approveBase }) {
@@ -395,15 +402,14 @@ export default async function agentryProposal(input, ctx) {
   gap._candidatesById = candidatesById;
   gap._proposalId = proposalId;
 
-  // v0.15.23 — auto-approval decision is made before the node is written,
-  // so the node goes into the graph already in its final state.
-  const autoApproved = shouldAutoApprove(gap, analysis, ctx.config);
+  // v0.51.0 — always auto-decide. Every proposal goes to state "decided".
+  const { recommended: chosen, decisions: proposalDecisions } = buildDecisions(analysis);
   const now = Date.now();
 
   const proposalNode = {
     id: proposalId,
     kind: "proposal",
-    state: autoApproved ? "decided" : "pending",
+    state: "decided",
     gap_id: gap.id,
     gap_wanted_kind: gap.wanted_kind || null,
     gap_wanted_id: gap.wanted_id || null,
@@ -422,18 +428,8 @@ export default async function agentryProposal(input, ctx) {
     })),
     tokens: tokenIndex,
     tokens_expires_at: expiresAt,
-    decisions: autoApproved
-      ? {
-          [autoApproved.id]: {
-            decision: "approved",
-            at: now,
-            auto: true,
-            confidence: autoApproved.confidence,
-            fit: autoApproved.fit,
-          },
-        }
-      : {},
-    auto_approved: Boolean(autoApproved),
+    decisions: proposalDecisions,
+    auto_approved: Boolean(chosen),
     created_at: now,
     updated_at: now,
   };
@@ -460,53 +456,21 @@ export default async function agentryProposal(input, ctx) {
     auto_approved: Boolean(autoApproved),
   });
 
-  let notified = false;
-  let deliveredVia = null;
-  let fallbackUsed = false;
+  // v0.51.0 — no notification from proposal. adopt() sends the single
+  // notification per decision (candidates + chosen + outcome). Prior
+  // version sent a "pending" email that never got actioned.
+  const notified = false;
+  const deliveredVia = null;
+  const fallbackUsed = false;
 
-  if (autoApproved) {
-    ctx.events.emit("proposal.auto_approved", {
-      proposal_id: proposalId,
-      gap_id: gap.id,
-      gap_wanted_kind: gap.wanted_kind,
-      recommended_id: autoApproved.id,
-      confidence: autoApproved.confidence,
-      fit: autoApproved.fit ?? null,
-      reason: "kind_whitelist_high_confidence",
-    });
-  } else {
-    const approveBase = approvalTemplates();
-    const body = renderEmail({ gap, analysis, perCandidateTokens, approveBase });
-    const subject = `[agentry] proposal: ${analysis.recommended_id || `${candidates.length} candidates`} for ${gap.wanted_kind || gap.id}`;
-
-    const notifyRes = await deps.invoke("notify.fallback", {
-      subject,
-      body_markdown: body,
-      primary: notify,
-      fallback: "notify.console",
-    }, {
-      tenant: "local", by: "agentry.proposal",
-    });
-
-    if (!notifyRes.ok) {
-      ctx.events.emit("proposal.notify_failed", {
-        proposal_id: proposalId,
-        code: notifyRes.error.code,
-        message: notifyRes.error.message,
-      });
-    } else {
-      notified = true;
-      deliveredVia = notifyRes.output.channel;
-      fallbackUsed = notifyRes.output.fallback_used;
-      ctx.events.emit("proposal.notified", {
-        proposal_id: proposalId,
-        channel: notifyRes.output.channel,
-        primary_ok: notifyRes.output.primary_ok,
-        fallback_used: notifyRes.output.fallback_used,
-        message_id: notifyRes.output.message_id || null,
-      });
-    }
-  }
+  ctx.events.emit("proposal.auto_decided", {
+    proposal_id: proposalId,
+    gap_id: gap.id,
+    gap_wanted_kind: gap.wanted_kind,
+    recommended_id: chosen?.id || null,
+    confidence: chosen?.confidence || null,
+    candidate_count: analysis.candidates?.length || 0,
+  });
 
   return {
     output: {
@@ -516,8 +480,8 @@ export default async function agentryProposal(input, ctx) {
       recommended_id: analysis.recommended_id || null,
       model_used: modelUsed,
       provider_used: providerUsed,
-      auto_approved: Boolean(autoApproved),
-      auto_approved_candidate_id: autoApproved?.id || null,
+      auto_approved: Boolean(chosen),
+      auto_approved_candidate_id: chosen?.id || null,
       notified,
       delivered_via: deliveredVia,
       fallback_used: fallbackUsed,

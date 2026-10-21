@@ -84,6 +84,25 @@ function buildPlaceholderCapability({ proposal, candidate, reason }) {
 function renderAdoptionEmail({ proposal, adopted, failed, retiredGap, retiredWatches }) {
   const lines = [];
 
+  // v0.51.0 — header carries gap + candidate list + chosen so the user
+  // sees what was tried and what was picked.
+  const gapLabel = proposal.gap_wanted_id || proposal.gap_id || proposal.id;
+  const kindLabel = proposal.gap_wanted_kind || "unknown";
+  const candidates = proposal.candidates || [];
+  const decisions = proposal.decisions || {};
+  const chosenIds = Object.entries(decisions).filter(([_, d]) => d?.decision === "approved").map(([id]) => id);
+
+  lines.push(`Gap: ${kindLabel}  (${gapLabel})`);
+  lines.push(`Candidates considered: ${candidates.length}`);
+  for (const c of candidates.slice(0, 10)) {
+    const isChosen = chosenIds.includes(c.id);
+    lines.push(`  ${isChosen ? "→" : " "} ${c.id}${c.url ? " (" + c.url + ")" : ""}`);
+  }
+  if (candidates.length > 10) lines.push(`  ... +${candidates.length - 10} more`);
+  lines.push("");
+  lines.push(`Chosen: ${chosenIds.length ? chosenIds.join(", ") : "(none — nothing qualified)"}`);
+  lines.push("");
+
   if (adopted.length) {
     lines.push(`Capability added: ${adopted.map(a => `\`${a.capability_id}\``).join(", ")}`);
     lines.push("");
@@ -925,6 +944,32 @@ export default async function agentryAdopt(input, ctx) {
         reason: "retry_scheduled",
         attempt: newAttempts,
         max_retries: MAX_RETRIES,
+      },
+      cost: { time_ms: Date.now() - started },
+    };
+  }
+
+  // v0.51.0 — no candidates were approved (LLM said "nothing fits" or
+  // decisions map was empty). Mark rejected, skip notification. User only
+  // gets notified when an actual synth+trial was attempted.
+  if (adopted.length === 0 && failed.length === 0) {
+    graph.putCapability({
+      id: proposal.id,
+      kind: "proposal",
+      state: "rejected",
+      adopted_at: now,
+      rejected_reason: "no_candidates_approved",
+      synthesis_attempt_count: priorAttempts,
+    });
+    events.emit("adoption.no_candidates", {
+      proposal_id,
+      candidates_in_proposal: (proposal.candidates || []).length,
+      decisions: Object.keys(proposal.decisions || {}),
+    });
+    return {
+      output: {
+        adopted: [], failed: [], retired_gap: null, retired_watches: [],
+        notified: false, reason: "no_candidates_approved", attempt: priorAttempts,
       },
       cost: { time_ms: Date.now() - started },
     };

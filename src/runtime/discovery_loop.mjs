@@ -58,11 +58,15 @@ const SOURCES_BY_KIND = {
       }) },
   ],
   tool: [
-      {
-        source: "agentry.discover",
-        query: (gap) => gapSearchSubject(gap),
-      },
-    ],
+    {
+      source: "discovery.github_search",
+      query: (gap) => ({ q: gapSearchSubject(gap), sort: "stars", order: "desc" }),
+    },
+    {
+      source: "discovery.web_search",
+      query: (gap) => ({ query: gapSearchSubject(gap) }),
+    },
+  ],
 };
 
 // Fallback policy: two generic sources based on the gap's wanted id.
@@ -96,18 +100,28 @@ function gapSearchSubject(gap) {
 
 
 function defaultSources(gap) {
+  // v0.51.0 — was "agentry.discover" which returns {results:{...}} shape
+  // that watcher.polling doesn't read (it expects {candidates:[...]}).
+  // Switched to github_search + web_search matching bua/cua/mua pattern.
   return [
     {
-      source: "agentry.discover",
-      query: (gap) => gapSearchSubject(gap),
+      source: "discovery.github_search",
+      query: (gap) => ({ q: gapSearchSubject(gap), sort: "stars", order: "desc" }),
+    },
+    {
+      source: "discovery.web_search",
+      query: (gap) => ({ query: gapSearchSubject(gap) }),
     },
   ];
 }
 
 // Watch interval for gap-driven watches.
 // Default 6h — override with AGENTRY_GAP_WATCH_INTERVAL_MS for testing.
+// v0.51.0 — default 5 min, was 6h. 6h made the pipeline invisible: gaps
+// sat for hours before any watch fired. 5 min is a compromise between
+// responsiveness and GitHub search rate limits.
 const GAP_WATCH_INTERVAL_MS = Number(
-  process.env.AGENTRY_GAP_WATCH_INTERVAL_MS || 6 * 60 * 60 * 1000
+  process.env.AGENTRY_GAP_WATCH_INTERVAL_MS || 5 * 60 * 1000
 );
 
 // Dedupe key: candidate.id is stable for both sources.
@@ -148,6 +162,21 @@ export async function tick(deps, opts = {}) {
     graph.invalidateCache();
   } else if ("_cache" in graph) {
     graph._cache = null;
+  }
+
+  // v0.51.0 — retire obsolete gap-watches sourced from "agentry.discover".
+  // Those return {results:{...}} not {candidates:[...]}, so watcher.polling
+  // never saw candidates. Pass 3 recreates them with discovery.github_search
+  // and discovery.web_search, matching bua/cua/mua.
+  for (const cap of graph.capabilities().values()) {
+    if (cap.kind !== "watch_instance") continue;
+    if (cap.retired_at) continue;
+    if (cap.source === "agentry.discover" && String(cap.reason || "").startsWith("gap:")) {
+      try {
+        graph.retireCapability(cap.id, "v0.51.0: obsolete source, recreated with github_search+web_search");
+        events.emit("discovery.obsolete_watch_retired", { watch_id: cap.id, source: cap.source });
+      } catch {}
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
