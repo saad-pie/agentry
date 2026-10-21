@@ -41,6 +41,9 @@ const PLANNER_EXCLUDED_IDS = new Set([
   "agentry.reason",
   "agentry.reason.deep",
   "agentry.reason.harness",
+  "agentry.chat",
+  "agentry.message.send",
+  "agentry.message.read",
 ]);
 
 function enumerateCapabilities(graph, skillsFilter) {
@@ -54,7 +57,7 @@ function enumerateCapabilities(graph, skillsFilter) {
     // discovery.* are primitives the planner sits above, not work units.
     // Without this, llm.openai_compat leaks into plans whenever the intent
     // contains something code-shaped (Date.now(), variables, etc).
-    if (/^(llm|notify|watcher|discovery|agentry)\./.test(cap.id)) continue;
+    if (/^(llm|notify|watcher|discovery)\./.test(cap.id)) continue;
     if (cap.kind === "proposal" || cap.kind === "capability_gap" ||
         cap.kind === "watch_instance" || cap.kind === "synthesis_attempt" ||
         cap.kind === "edge" || cap.kind === "task" || cap.kind === "message") {
