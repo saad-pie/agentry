@@ -439,7 +439,7 @@ export default async function agentryProposal(input, ctx) {
       from: proposalId,
       to: gap.id,
       relation: RELATIONS.PROPOSAL_SATISFIES_GAP,
-      meta: { auto_approved: Boolean(autoApproved) },
+      meta: { auto_approved: Boolean(chosen) },
     });
   } catch (e) {
     ctx.events.emit("proposal.edge_write_failed", {
@@ -453,7 +453,7 @@ export default async function agentryProposal(input, ctx) {
     model_used: modelUsed,
     provider_used: providerUsed,
     recommended_id: analysis.recommended_id || null,
-    auto_approved: Boolean(autoApproved),
+    auto_approved: Boolean(chosen),
   });
 
   // v0.51.0 — no notification from proposal. adopt() sends the single
