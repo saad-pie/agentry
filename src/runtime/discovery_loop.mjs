@@ -55,14 +55,22 @@ const AUTO_DECIDE_BLOCKED_KINDS = new Set([
 const GAP_ID_REJECT_MARKERS = [
   "does.not.exist", "doesnotexist", "test.nonexistent", "example.",
   ".test.", ".test$", "test.capability",
-  "chat_conv_", "task_", "conv_", "session_",  // v0.51.5: session IDs leaked as gaps
+  "chat_conv_", "task_", "conv_", "session_",
 ];
+
+// v0.52.8 — exact match rejection for junk wanted_ids that pass the regex
+// but are semantically empty. "unknown" gap caused adoption of
+// npm_stylelint-value-no-unknown-custom-properties — a stylelint plugin
+// picked because "unknown" appeared in the package name. Silent lie class.
+const GAP_ID_REJECT_EXACT = new Set([
+  "unknown", "null", "undefined", "gap", "capability", "test",
+]);
 
 function gapIdLooksValid(wantedId) {
   if (!wantedId || typeof wantedId !== "string") return false;
   const w = wantedId.trim();
   if (w.length < 3 || w.length > 200) return false;
-  // must be a dotted identifier — letters, digits, dot, underscore, dash
+  if (GAP_ID_REJECT_EXACT.has(w.toLowerCase())) return false;
   if (!/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(w)) return false;
   for (const marker of GAP_ID_REJECT_MARKERS) {
     if (w.includes(marker)) return false;
@@ -217,20 +225,11 @@ export async function tick(deps, opts = {}) {
     graph._cache = null;
   }
 
-  // v0.51.0 — retire obsolete gap-watches sourced from "agentry.discover".
-  // Those return {results:{...}} not {candidates:[...]}, so watcher.polling
-  // never saw candidates. Pass 3 recreates them with discovery.github_search
-  // and discovery.web_search, matching bua/cua/mua.
-  for (const cap of graph.capabilities().values()) {
-    if (cap.kind !== "watch_instance") continue;
-    if (cap.retired_at) continue;
-    if (cap.source === "agentry.discover" && String(cap.reason || "").startsWith("gap:")) {
-      try {
-        graph.retireCapability(cap.id, "v0.51.0: obsolete source, recreated with github_search+web_search");
-        events.emit("discovery.obsolete_watch_retired", { watch_id: cap.id, source: cap.source });
-      } catch {}
-    }
-  }
+  // v0.52.8 — removed the v0.51.0 "obsolete agentry.discover" retirement
+  // block. It was written when agentry.discover was being REMOVED; v0.52.6
+  // RESTORED it as the sole tool source. The block was retiring every
+  // agentry.discover watch every tick, then Pass 3 recreated them — endless
+  // fight loop, watches died before they could poll.
 
   // ─────────────────────────────────────────────────────────────
   // Pass 1: un-analyzed watch_results → proposals
