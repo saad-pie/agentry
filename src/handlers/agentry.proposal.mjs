@@ -94,7 +94,11 @@ const PREFIX_RANK = {
 
 function rankCandidates(candidates) {
   // v0.24.3 — skip type-only packages before scoring.
-  const filtered = candidates.filter(c => !isTypeOnlyPackage(c && c.id));
+  // v0.52.11 — also skip browser-only packages (-wasm, worker). Those need
+  // Worker/WebAssembly globals Node doesn't provide; trial always fails.
+  const filtered = candidates.filter(c =>
+    !isTypeOnlyPackage(c && c.id) && !isBrowserOnlyPackage(c && c.id)
+  );
   const scored = filtered.map((c, idx) => {
     const id = String(c.id || "");
     let rank = 10;
@@ -129,6 +133,18 @@ function isTypeOnlyPackage(id) {
   if (s.includes("@types/")) return true;
   if (s.startsWith("types-") || s.startsWith("types:") || s.startsWith("types_")) return true;
   if (/\/types\//i.test(s)) return true;
+  return false;
+}
+
+// v0.52.11 — browser-only packages. Contain Web Worker or WebAssembly
+// APIs that Node doesn't provide (no Worker global, no browser wasm loader).
+// Trial fails with `Worker is not defined` on every attempt. Reject before
+// the LLM sees them, or before fallbackPicks.
+function isBrowserOnlyPackage(id) {
+  if (!id) return false;
+  const s = String(id).toLowerCase();
+  if (s.includes("-wasm") || s.includes("/wasm")) return true;
+  if (s.includes("worker")) return true;
   return false;
 }
 
@@ -175,12 +191,18 @@ function parseProposalJSON(text) {
 
 function fallbackProposal(gap, candidates) {
   const ranked = rankCandidates(candidates);
-  const installable = ranked.find(c => {
+  // v0.52.11 — filter by isSynthesizable before auto-pick. Prior version chose
+  // via PREFIX_RANK alone, which still qualified hermes_atlas (rank 80) even
+  // after isSynthesizable was marked false. Result: fallback picked a skill
+  // candidate that always threw skill_body_missing.
+  const _synthOk = ranked.filter(c => isSynthesizable(c));
+  const pool = _synthOk.length > 0 ? _synthOk : ranked;
+  const installable = pool.find(c => {
     const id = String(c.id || "");
     return Object.keys(PREFIX_RANK).some(pre => id.startsWith(pre));
   });
   return {
-    candidates: ranked.slice(0, MAX_LLM_CANDIDATES).map(c => ({
+    candidates: pool.slice(0, MAX_LLM_CANDIDATES).map(c => ({
       id: c.id,
       fit: null,
       confidence: installable && c.id === installable.id ? "medium" : "unknown",

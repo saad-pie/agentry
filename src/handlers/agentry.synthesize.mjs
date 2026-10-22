@@ -1810,6 +1810,21 @@ function validateSpecConsistency(spec, capability_id) {
     }
   }
   const envMapKeys = new Set(Object.keys(envMap));
+  // v0.52.11 — auto-derive missing env_map entries from accepts. Common LLM
+  // mistake: writes process.env.OUTPUT_PATH but forgets the env_map entry.
+  // That's mechanical, not a bug worth rejecting. Derive OUTPUT_PATH -> output_path
+  // (lowercase match against accepts keys) and proceed.
+  const _acceptDeclared = spec.capability && spec.capability.accepts ? spec.capability.accepts : {};
+  for (const key of envKeysUsed) {
+    if (envMapKeys.has(key)) continue;
+    const lower = key.toLowerCase();
+    if (_acceptDeclared[lower] !== undefined) {
+      if (!spec.glue) spec.glue = {};
+      if (!spec.glue.env_map) spec.glue.env_map = envMap;
+      spec.glue.env_map[key] = lower;
+      envMapKeys.add(key);
+    }
+  }
   for (const key of envKeysUsed) {
     if (!envMapKeys.has(key)) {
       return {

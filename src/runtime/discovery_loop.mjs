@@ -56,6 +56,9 @@ const GAP_ID_REJECT_MARKERS = [
   "does.not.exist", "doesnotexist", "test.nonexistent", "example.",
   ".test.", ".test$", "test.capability",
   "chat_conv_", "task_", "conv_", "session_",
+  // v0.52.11 — junk gap markers from test/planner/worker probes.
+  // These were producing proposals for capabilities nobody needs.
+  "planner-test", "test-agent_", "worker-a_", "dsh-worker_",
 ];
 
 // v0.52.8 — exact match rejection for junk wanted_ids that pass the regex
