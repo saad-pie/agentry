@@ -115,16 +115,14 @@ const SOURCES_BY_KIND = {
       }) },
   ],
   tool: [
+    // v0.52.6 — agentry.discover is the ONLY source for tool gaps. Prior
+    // github_search + web_search returned repo/web_result candidates
+    // exclusively, and isSynthesizable() rejects both — so agentry.proposal
+    // ALWAYS returned no_synthesizable_candidates. Zero adoptions for hours.
+    // agentry.discover fans out to npm, pypi, agentskills, github, web and
+    // returns a MIXED set. proposal ranks npm/pypi synthesizable first.
     {
-      source: "discovery.github_search",
-      query: (gap) => ({ q: gapSearchSubject(gap), sort: "stars", order: "desc" }),
-    },
-    {
-      source: "discovery.web_search",
-      // v0.52.1 — return STRING, not {query:string}. watcher.polling wraps
-      // uniformly as {query: watch.query, limit}; discovery.web_search
-      // expects input.query to be a string. Prior shape caused every
-      // web_search poll to throw "requires query (string)".
+      source: "agentry.discover",
       query: (gap) => gapSearchSubject(gap),
     },
   ],
@@ -161,22 +159,12 @@ function gapSearchSubject(gap) {
 
 
 function defaultSources(gap) {
-  // v0.51.0 — was "agentry.discover" which returns {results:{...}} shape
-  // that watcher.polling doesn't read (it expects {candidates:[...]}).
-  // Switched to github_search + web_search matching bua/cua/mua pattern.
+  // v0.52.6 — agentry.discover only. The v0.51.0 comment claiming
+  // watcher.polling doesn't read {results:{...}} was WRONG — it does
+  // (v0.23.6 flattened that shape). Restoring agentry.discover so
+  // synthesizable npm/pypi candidates flow through.
   return [
-    {
-      source: "discovery.github_search",
-      query: (gap) => ({ q: gapSearchSubject(gap), sort: "stars", order: "desc" }),
-    },
-    {
-      source: "discovery.web_search",
-      // v0.52.1 — return STRING, not {query:string}. watcher.polling wraps
-      // uniformly as {query: watch.query, limit}; discovery.web_search
-      // expects input.query to be a string. Prior shape caused every
-      // web_search poll to throw "requires query (string)".
-      query: (gap) => gapSearchSubject(gap),
-    },
+    { source: "agentry.discover", query: (gap) => gapSearchSubject(gap) },
   ];
 }
 
