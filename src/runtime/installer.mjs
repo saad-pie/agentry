@@ -29,10 +29,13 @@
 
 const PREPARE_KEY = (capId) => `prepared:${capId}`;
 
-export async function prepareSession(deps, { capId, session, stack = [] }) {
+export async function prepareSession(deps, { capId, session, stack = [], requires_override = null }) {
   const { graph, events, invoke } = deps;
   const cap = graph.getCapability(capId);
-  if (!cap) throw new Error(`prepareSession: unknown capability ${capId}`);
+  // v0.52.10 — accept() (inside trial) calls this BEFORE adopt writes the
+  // capability node to the graph. requires_override lets the caller pass
+  // the requires block inline so prepareSession can run without the node.
+  if (!cap && !requires_override) throw new Error(`prepareSession: unknown capability ${capId}`);
 
   // Cycle detection: a capability may not transitively require itself.
   if (stack.includes(capId)) {
@@ -45,7 +48,9 @@ export async function prepareSession(deps, { capId, session, stack = [] }) {
   }
   const nextStack = [...stack, capId];
 
-  const requires = cap.requires || {};
+  const requires = (requires_override && typeof requires_override === "object")
+    ? requires_override
+    : (cap?.requires || {});
 
   // Ensure the session exists before we try to install into it.
   // session.create is idempotent — returns { created: false } if it

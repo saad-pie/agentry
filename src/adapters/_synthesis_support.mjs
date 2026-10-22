@@ -22,7 +22,13 @@ export const SYNTHESIS_SUPPORT = {
 
   // Partial / conditional
   "web":              { synthesizable: "conditional", runtime: "repo_if_github_url" },
-  "hermes_atlas":     { synthesizable: "partial",     runtime: "hermes_repo_never_wired" },
+  // v0.52.10 — hermes_atlas path always fails: readAgentSkill fetches
+  // https://github.com/<repo>/HEAD/... which 404s on most repos, and even
+  // when it does return content, SKILL.md body is often empty → trial
+  // throws skill_body_missing. Re-enable when readAgentSkill learns to
+  // handle raw repo URLs. Until then rely on clawhub / agentskills_code /
+  // npm / pypi, all of which have working fetchers.
+  "hermes_atlas":     { synthesizable: false,        runtime: "hermes_repo_never_wired" },
 
   // Discovery-only — no synthesis path exists
   "crates":           { synthesizable: true,  runtime: "rust" },

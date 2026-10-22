@@ -229,6 +229,21 @@ function compositeReason(gapId, sourceId) {
   return `${gapId}${REASON_SEP}${sourceId}`;
 }
 
+// v0.52.10 — legacy watches created pre-v0.52.9 have a `query` field equal
+// to the boilerplate reason string, because old gapSearchSubject fell through
+// to gap.reason. v0.52.9 fixed future watches but never retires existing ones.
+// Retire them here so Pass 3 recreates with the new derivation logic.
+const BOILERPLATE_QUERY_STRINGS = [
+  "capability does not exist in graph",
+  "capability exists but has no handler",
+];
+function isBoilerplateQuery(q) {
+  if (typeof q !== "string") return false;
+  const t = q.trim().toLowerCase();
+  for (const b of BOILERPLATE_QUERY_STRINGS) if (t === b) return true;
+  return false;
+}
+
 /**
  * One pass of the loop. Never throws.
  *
@@ -256,7 +271,33 @@ export async function tick(deps, opts = {}) {
   // block. It was written when agentry.discover was being REMOVED; v0.52.6
   // RESTORED it as the sole tool source. The block was retiring every
   // agentry.discover watch every tick, then Pass 3 recreated them — endless
-  // fight loop, watches died before they could poll.
+  // watches died before they could poll.
+
+  // v0.52.10 — retire watches whose query is a legacy boilerplate string.
+  // Replaces them via Pass 3 with the new derivation logic. Without this,
+  // existing gaps keep polling the boilerplate phrase forever (only NEW
+  // watches benefit from v0.52.9).
+  {
+    const _retiredBoilerplate = [];
+    for (const _cap of graph.capabilities().values()) {
+      if (_cap.kind !== "watch_instance") continue;
+      if (_cap.retired_at) continue;
+      if (isBoilerplateQuery(_cap.query)) {
+        try {
+          graph.retireCapability(_cap.id, "v0.52.10: boilerplate query — retiring for regeneration");
+          _retiredBoilerplate.push({ watch_id: _cap.id, query: String(_cap.query).slice(0, 100) });
+        } catch (e) {
+          events.emit("discovery.boilerplate_retire_failed", { watch_id: _cap.id, error: e.message });
+        }
+      }
+    }
+    if (_retiredBoilerplate.length > 0) {
+      events.emit("discovery.boilerplate_watches_retired", {
+        count: _retiredBoilerplate.length,
+        samples: _retiredBoilerplate.slice(0, 10),
+      });
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────
   // Pass 1: un-analyzed watch_results → proposals

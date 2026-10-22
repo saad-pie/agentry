@@ -839,6 +839,16 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
   lines.push("  Correct: prepare step writes `globalThis.inputPath = path;`.");
   lines.push("           execute step reads `const p = globalThis.inputPath;`.");
   lines.push("");
+  lines.push("INPUTS vs STATE — do not confuse them:");
+  lines.push("- INPUTS arrive in process.env.UPPERCASE_NAME. Always prefer process.env.");
+  lines.push("  input_path -> process.env.INPUT_PATH");
+  lines.push("  output_path -> process.env.OUTPUT_PATH");
+  lines.push("- STATE between steps uses globalThis.X = ...; assigned by an EARLIER");
+  lines.push("  step and read by a LATER step.");
+  lines.push("- globalThis.input is set to the raw input object as a fallback,");
+  lines.push("  so `globalThis.input.input_path` also works. But process.env is");
+  lines.push("  the canonical form. Use it.");
+  lines.push("");
   if (facts.source_kind === "npm" && facts.npm_package_name) {
     lines.push("NPM CANDIDATE — this is an npm package, not a GitHub repo.");
     lines.push("- The package is already installed in the synth session at");
@@ -1108,6 +1118,12 @@ function indentBlock(s, prefix) {
 
 function compilePlanToScript(plan) {
   const parts = [];
+  // v0.52.10 — the prompt teaches "pass state between steps via globalThis.X".
+  // Some LLM outputs generalize this to `globalThis.input.X` for INPUTS,
+  // which never existed before this fix (kernel only passes inputs via env).
+  // Inject globalThis.input from env so both idioms work. Value comes from
+  // env.__AGENTRY_INPUT_JSON set by renderHandler's run().
+  parts.push('globalThis.input = (() => { try { return JSON.parse(process.env.__AGENTRY_INPUT_JSON || "{}"); } catch { return {}; } })();');
   parts.push("(async () => {");
   for (const step of plan) {
     parts.push("");
@@ -1284,7 +1300,7 @@ function renderHandler(spec) {
   out.push("export async function accept(deps, opts = {}) {");
   out.push("  const session = opts.session || (CAP_ID + \"-accept-test\");");
   out.push("  const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
-  out.push("  await prepareSession(deps, { capId: CAP_ID, session });");
+  out.push("  await prepareSession(deps, { capId: CAP_ID, session, requires_override: REQUIRES });");
   out.push("  const FIXTURES = " + JSON.stringify(spec.accept_spec?._fixtures || {}) + ";");
   out.push("  if (Object.keys(FIXTURES).length > 0) {");
   out.push("    const fs = await import(\"node:fs\"); const path = await import(\"node:path\");");
@@ -1314,7 +1330,7 @@ function renderHandler(spec) {
   out.push("");
   out.push("  {");
   out.push("    const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
-  out.push("    await prepareSession(ctx, { capId: CAP_ID, session });");
+  out.push("    await prepareSession(ctx, { capId: CAP_ID, session, requires_override: REQUIRES });");
   out.push("  }");
   out.push("");
   out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session },");
@@ -1340,6 +1356,7 @@ function renderHandler(spec) {
   out.push("    const v = input[inputKey];");
   out.push("    env[envKey] = v === undefined || v === null ? \"\" : String(v);");
   out.push("  }");
+  out.push("  try { env.__AGENTRY_INPUT_JSON = JSON.stringify(input || {}); } catch (e) { env.__AGENTRY_INPUT_JSON = \"{}\"; }");
   out.push("  for (const [k, v] of Object.entries(pre)) env[k] = v;");
   out.push("");
   out.push("  const res = await ctx.invoke(\"agentry.os\", {");
