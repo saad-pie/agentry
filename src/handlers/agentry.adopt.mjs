@@ -543,7 +543,14 @@ export default async function agentryAdopt(input, ctx) {
         ...(proposal.candidates || []).map(c => c.id),
         ...((proposal.failed_syntheses || []).map(f => f.candidate_id)),
       ]);
-      const _query = String(proposal.gap_wanted_id).replace(/^[a-z]+:/, "");
+      const _query = (() => {
+        let s = String(proposal.gap_wanted_id || "");
+        s = s.replace(/^[a-z]+:/i, "");
+        const _k = String(proposal.gap_wanted_kind || "");
+        if (_k && s.startsWith(_k + ".")) s = s.slice(_k.length + 1);
+        s = s.replace(/[._:]+/g, " ").replace(/\s+/g, " ").trim();
+        return s || String(proposal.gap_wanted_id || "");
+      })();
       const _disc = await ctx.invoke("agentry.discover", {
         query: _query,
         sources: ["npm", "agentskills_code"],

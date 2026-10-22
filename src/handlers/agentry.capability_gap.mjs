@@ -76,12 +76,27 @@ export function recordGap(deps, gap) {
   const prevReason = existing && existing.reason ? existing.reason : null;
   const prevDesc = existing && existing.wanted_description ? existing.wanted_description : null;
 
+  // v0.52.9 — derive wanted_description from wanted_id (strip kind prefix, dots→space)
+  // when caller didn't supply one. Fixes observeFailure gaps, whose only "desc"
+  // was the boilerplate reason "capability does not exist in graph".
+  const _deriveDesc = (wid, kind) => {
+    if (!wid || typeof wid !== "string") return null;
+    let s = wid.replace(/^[a-z]+:/i, "");
+    if (kind && typeof kind === "string" && s.startsWith(kind + ".")) s = s.slice(kind.length + 1);
+    s = s.replace(/[._:]+/g, " ").replace(/\s+/g, " ").trim();
+    return s.length >= 4 ? s : null;
+  };
+  const _fallbackDesc = gap.wanted_id ? _deriveDesc(gap.wanted_id, gap.wanted_kind) : null;
+
   const node = {
     id: gap.key,
     kind: "capability_gap",
     wanted_kind: gap.wanted_kind != null ? gap.wanted_kind : prevKind,
     wanted_id: gap.wanted_id != null ? gap.wanted_id : prevId,
-    wanted_description: gap.wanted_description != null ? gap.wanted_description : prevDesc,
+    wanted_description:
+      gap.wanted_description != null
+        ? gap.wanted_description
+        : (prevDesc != null ? prevDesc : _fallbackDesc),
     reason: gap.reason != null ? gap.reason : prevReason,
     example_task_id: gap.example_task_id || null,
     hits: (existing?.hits || 0) + 1,

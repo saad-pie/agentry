@@ -149,20 +149,47 @@ const SOURCES_BY_KIND = {
 // wrong-direction tools). This was the DSH agent's run on 2026-10-17: it
 // recorded a clear failure description, but discovery searched for the id
 // and got 10 useless candidates.
+const BOILERPLATE_REASONS = [
+  /^capability does not exist in graph$/i,
+  /^capability exists but has no handler$/i,
+  /^composed capability .+ requires it, but it is not in the graph$/i,
+  /^invoke_failed: /i,
+];
+
+function isBoilerplateReason(s) {
+  if (!s) return true;
+  const t = String(s).trim();
+  for (const re of BOILERPLATE_REASONS) if (re.test(t)) return true;
+  return false;
+}
+
+function deriveFromWantedId(id, wantedKind) {
+  let s = String(id || "");
+  s = s.replace(/^[a-z]+:/i, "");
+  if (wantedKind && typeof wantedKind === "string" && s.startsWith(wantedKind + ".")) {
+    s = s.slice(wantedKind.length + 1);
+  }
+  s = s.replace(/[._:]+/g, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
 function gapSearchSubject(gap) {
   const desc = gap.wanted_description;
-  if (desc && String(desc).trim().length >= 4) {
+  if (desc && String(desc).trim().length >= 4 && !isBoilerplateReason(desc)) {
     return String(desc).trim().replace(/\s+/g, " ").slice(0, 120);
   }
   let reason = String(gap.reason || "");
   reason = reason.replace(/^(?:(?:deep|harness|fast)\s+)?reasoning:\s*/i, "").trim();
-  const becauseIdx = reason.toLowerCase().indexOf(" because ");
-  if (becauseIdx > 20) reason = reason.slice(0, becauseIdx);
-  if (reason.length >= 12) {
-    return reason.slice(0, 150).replace(/\s+/g, " ").trim();
+  if (!isBoilerplateReason(reason)) {
+    const becauseIdx = reason.toLowerCase().indexOf(" because ");
+    if (becauseIdx > 20) reason = reason.slice(0, becauseIdx);
+    if (reason.length >= 12) {
+      return reason.slice(0, 150).replace(/\s+/g, " ").trim();
+    }
   }
   const id = String(gap.wanted_id || gap.wanted_kind || "agent capability");
-  return id.replace(/^[a-z]+:/i, "").replace(/[._:]/g, " ").trim() || "agent capability";
+  return deriveFromWantedId(id, gap.wanted_kind) || "agent capability";
 }
 
 
