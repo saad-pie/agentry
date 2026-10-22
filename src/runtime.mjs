@@ -99,6 +99,13 @@ export class Runtime {
     for (const cap of this.graph.capabilities().values()) {
       if (cap.kind !== "watch_instance") continue;
       if (cap.retired_at) continue;
+      // v0.52.2 — skip watches whose source is not a real discovery capability.
+      // Legacy watches (pre-v0.15.5) have source:"unknown" from graph.putCapability
+      // default and were never polled until v0.52.1 exposed them. They fail on
+      // every poll and eat file I/O on 62880-line capabilities.jsonl. Skip here
+      // AND retire in the cleanup script; skip is defense in depth.
+      const src = String(cap.source || "");
+      if (!/^(discovery|agentry)\./.test(src)) continue;
       const interval = Number(cap.interval_ms) || 300000;
       const last = Number(cap.last_poll_at) || 0;
       if (now - last >= interval) due.push(cap);
