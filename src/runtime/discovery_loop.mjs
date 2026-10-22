@@ -121,7 +121,11 @@ const SOURCES_BY_KIND = {
     },
     {
       source: "discovery.web_search",
-      query: (gap) => ({ query: gapSearchSubject(gap) }),
+      // v0.52.1 — return STRING, not {query:string}. watcher.polling wraps
+      // uniformly as {query: watch.query, limit}; discovery.web_search
+      // expects input.query to be a string. Prior shape caused every
+      // web_search poll to throw "requires query (string)".
+      query: (gap) => gapSearchSubject(gap),
     },
   ],
 };
@@ -167,7 +171,11 @@ function defaultSources(gap) {
     },
     {
       source: "discovery.web_search",
-      query: (gap) => ({ query: gapSearchSubject(gap) }),
+      // v0.52.1 — return STRING, not {query:string}. watcher.polling wraps
+      // uniformly as {query: watch.query, limit}; discovery.web_search
+      // expects input.query to be a string. Prior shape caused every
+      // web_search poll to throw "requires query (string)".
+      query: (gap) => gapSearchSubject(gap),
     },
   ];
 }

@@ -86,7 +86,23 @@ export class Runtime {
     const now = Date.now();
     this.events.emit("runtime.tick", { n: this.tickCount, at: now });
 
-    const due = watcher.dueWatches(now);
+    // v0.52.1 — read watches from graph each tick instead of the in-process
+    // Map. Prior version used watcher.dueWatches(now) which iterates the
+    // module-level `watches` Map. That Map is populated at Runtime.boot()
+    // and by watcherPolling() on create — but in practice only ~10 of 100
+    // watches were ever visible to _tick, so 90 sat with last_poll_at=null
+    // for hours. Reading from graph is cross-process safe and reflects
+    // ground truth (capabilities.jsonl). Cost is one invalidateCache +
+    // one fold per tick — same work as boot(), negligible at our scale.
+    if (typeof this.graph.invalidateCache === "function") this.graph.invalidateCache();
+    const due = [];
+    for (const cap of this.graph.capabilities().values()) {
+      if (cap.kind !== "watch_instance") continue;
+      if (cap.retired_at) continue;
+      const interval = Number(cap.interval_ms) || 300000;
+      const last = Number(cap.last_poll_at) || 0;
+      if (now - last >= interval) due.push(cap);
+    }
     if (!due.length) return;
 
     const max = this.config.runtime.watchMaxConcurrent;
