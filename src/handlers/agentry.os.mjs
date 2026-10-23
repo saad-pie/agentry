@@ -66,12 +66,23 @@ export default async function agentryOs(input, ctx) {
   const base = kernelUrl(ctx);
   const url = `${base}${path}`;
   const timeoutMs = Number(args.timeout_ms) || DEFAULT_TIMEOUT_MS;
-  delete args.timeout_ms;
+  // v0.52.20 — DO NOT delete args.timeout_ms. Kernel handlers (shell.spawn,
+  // node.run, python.run, rust.run, go.run, java.run, dotnet.run, shell.kill,
+  // proc.start) ALL use timeout_ms as their process timeout. Prior version
+  // deleted it here, so kernel always used its own defaults (30s for
+  // shell.spawn). Callers thought they were setting 180s+ but were getting
+  // 30s kills. Symptom: exit_code:null, done:true, duration exactly 30s,
+  // tool_calls truncated mid-execution. Fix: pass it through to kernel.
+  // The fetch abort below is a separate concern (see next patch).
 
   const fetchOpts = {
     method,
     headers: { "content-type": "application/json" },
-    signal: AbortSignal.timeout(timeoutMs),
+    // v0.52.20 — fetch abort must be LONGER than kernel process timeout,
+    // so the process timeout fires first, kernel returns { killed: true },
+    // and fetch resolves with the result instead of aborting. Prior code
+    // used timeoutMs which raced with kernel timeout at the same instant.
+    signal: AbortSignal.timeout(timeoutMs + 30000),
   };
   if (method === "POST") fetchOpts.body = JSON.stringify(args);
 
