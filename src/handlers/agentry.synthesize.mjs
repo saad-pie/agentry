@@ -1704,10 +1704,18 @@ function autoFixtures(spec) {
   const existing = (spec.accept_spec && spec.accept_spec._fixtures) || {};
   const aug = { ...existing };
   let added = 0;
-  for (const key of Object.keys(accepts)) {
+  // v0.52.16 — iterate acceptInput keys, not accepts. The probe runs against
+  // accept_spec.input; when LLM put input_path there but omitted from accepts
+  // (or named differently), the fixture was never written and trial failed
+  // with "Cannot access file /tmp/input.csv".
+  const _iterKeys = Object.keys(acceptInput).length > 0
+    ? Object.keys(acceptInput)
+    : Object.keys(accepts);
+  for (const key of _iterKeys) {
     const val = acceptInput[key];
     if (typeof val !== "string" || !val) continue;
-    if (!/path|_file|_pdf|_png|_jpg|_md|_txt$/i.test(key) && !/\.(png|pdf|jpg|md|txt)$/i.test(val)) continue;
+    const _looksLikePath = val.startsWith("/") || val.startsWith("./") || /\.\w{2,5}$/i.test(val);
+    if (!_looksLikePath) continue;
     if (aug[val]) {
       const _ex = String(aug[val]);
       if (/^iVBORw0KGgo|^JVBERi0/.test(_ex)) continue;  // keep real base64
@@ -1717,7 +1725,14 @@ function autoFixtures(spec) {
     if (ext === "png") aug[val] = TINY_PNG_B64;
     else if (ext === "pdf") aug[val] = TINY_PDF_B64;
     else if (ext === "jpg" || ext === "jpeg") aug[val] = TINY_PNG_B64;  // close enough for a probe
-    else aug[val] = Buffer.from("# fixture for " + val + "\n\nhello\n").toString("base64");
+    else if (ext === "csv") aug[val] = "a,b,c\n1,2,3\n";
+    else if (ext === "tsv") aug[val] = "a\tb\tc\n1\t2\t3\n";
+    else if (ext === "json") aug[val] = '{"test":true}\n';
+    else if (ext === "xml") aug[val] = '<root><test>true</test></root>\n';
+    else if (ext === "html") aug[val] = '<html><body>test</body></html>\n';
+    else if (ext === "md") aug[val] = "# Test\n\nHello\n";
+    else if (ext === "txt") aug[val] = "hello world\n";
+    else aug[val] = "test fixture for " + val + "\n";
     added++;
   }
   if (added > 0) {
