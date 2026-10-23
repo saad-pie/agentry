@@ -250,6 +250,40 @@ async function readNpmPackage(candidate, deps) {
         facts.npm_main_entry = pkgJson.main || pkgJson.module || pkgJson.exports ? (pkgJson.main || pkgJson.module || "exports") : null;
       } catch (e) {}
     }
+    // v0.52.14 — inspect the ACTUAL exports of the installed package.
+    // LLMs hallucinate method names from memory (e.g. XLSX.utils.csv_to_sheet
+    // doesn't exist; the real API is XLSX.read + utils.aoa_to_sheet). Dumping
+    // the real export surface as a hard constraint prevents phantom methods.
+    try {
+      const inspectCode = [
+        "const pkgName = process.env.PKG_NAME;",
+        "try {",
+        "  const mod = await import(pkgName);",
+        "  const keyList = (o) => { try { return o ? Object.keys(o).filter(k => !k.startsWith('_')).slice(0, 40) : null; } catch { return null; } };",
+        "  const out = {",
+        "    top: keyList(mod),",
+        "    default: keyList(mod.default),",
+        "    utils: keyList(mod.utils || mod.default?.utils),",
+        "    default_utils: keyList(mod.default?.utils),",
+        "    default_is_function: typeof mod.default === 'function',",
+        "  };",
+        "  console.log(JSON.stringify(out));",
+        "} catch (e) { console.log(JSON.stringify({ error: e.message })); }",
+      ].join("\n");
+      const inspRes = await invoke("agentry.os", {
+        action: "node.run", session, code: inspectCode,
+        env: { PKG_NAME: facts.npm_package_name }, timeout_ms: 15000,
+      }, { tenant: "local", by: "agentry.synthesize" });
+      if (inspRes.ok) {
+        const stdout = String(inspRes.output?.result?.stdout || "").trim();
+        if (stdout) {
+          try {
+            const parsed = JSON.parse(stdout);
+            if (!parsed.error) facts.npm_exports = parsed;
+          } catch {}
+        }
+      }
+    } catch (e) {}
   } catch (e) {
     facts.error = "npm read threw: " + e.message;
   }
@@ -740,7 +774,7 @@ function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("=== PRODUCE THIS JSON ===");
   lines.push("{");
   lines.push("  \"capability\": {");
-  lines.push("    \"id\": \"<exact dotted id from THE GAP above>\",");
+  lines.push("    \"id\": \"<use wanted_id from THE GAP above, NOT gap_id. If THE GAP shows wanted_id: test.csv_to_xlsx and id: gap:test.csv_to_xlsx, use test.csv_to_xlsx. NO 'gap:' prefix.>\",");
   lines.push("    \"kind\": \"<" + (gap.wanted_kind || "unknown") + ">\",");
   lines.push("    \"accepts\": { \"<key>\": \"string\" | { \"type\": \"string|number|boolean\", \"optional\": true } },");
   lines.push("    \"produces\": { \"<output_key>\": \"string|number|boolean\" },");
@@ -892,6 +926,27 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("7. Load with dynamic import — NEVER static import, NEVER require.");
     lines.push("");
   }
+  if (facts.source_kind === "npm" && facts.npm_exports) {
+    const _exp = facts.npm_exports;
+    const _fmt = (arr) => Array.isArray(arr) && arr.length ? arr.join(", ") : "(none)";
+    lines.push("═══ VERIFIED EXPORTS — YOU MAY ONLY CALL THESE ═══");
+    lines.push("These were extracted by importing the package at build time.");
+    lines.push("They are the TRUTH. Anything not in this list does not exist.");
+    lines.push("Calling a method not listed here → trial fails with 'X is not a function'.");
+    lines.push("");
+    if (_exp.top)          lines.push("top-level exports: " + _fmt(_exp.top));
+    if (_exp.default)      lines.push("default export keys: " + _fmt(_exp.default));
+    if (_exp.utils)        lines.push("utils keys: " + _fmt(_exp.utils));
+    if (_exp.default_utils) lines.push("default.utils keys: " + _fmt(_exp.default_utils));
+    if (_exp.default_is_function) lines.push("default is a FUNCTION (callable)");
+    lines.push("");
+    lines.push("Rule: if you need a method that is NOT in the lists above,");
+    lines.push("throw a clear error at the top of the plan:");
+    lines.push("  throw new Error('" + (facts.npm_package_name || "pkg") + ": required method X not in exports');");
+    lines.push("Do NOT invent a method. Do NOT guess. Use ONLY what is listed.");
+    lines.push("");
+  }
+
   if (facts.source_kind === "rust_crate" && facts.crate_name) {
     lines.push("RUST CANDIDATE — this is a Rust crate, not a Node/Python package.");
     lines.push("");
