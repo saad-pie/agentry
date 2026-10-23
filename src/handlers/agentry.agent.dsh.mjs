@@ -152,42 +152,47 @@ function _buildFallbackChain() {
 }
 const DSH_FALLBACK_CHAIN = _buildFallbackChain();
 
+// v0.52.24 — defaultMaxTokens raised from 2048 to 8192. Prior value was
+// DSH's default chat response budget; way too small for agentic reasoning
+// where each turn produces thinking + tool_calls. Symptom: model hits
+// reason:"max-tokens" mid-thought, exits with empty final, chain stalls.
+// 8192 fits reasoning + 2-3 tool calls per turn without truncation.
 const _PROVIDERS_YAML = "      requesty:\n" +
   "        apiKeyEnv: REQUESTYAI_API_KEY\n" +
   "        api: openai-completions\n" +
   "        baseURL: https://router.requesty.ai/v1\n" +
   "        supportsDeveloperRole: false\n" +
-  "        defaultMaxTokens: 2048\n" +
+  "        defaultMaxTokens: 8192\n" +
   "        models:\n" +
   "          - id: nemotron-3-ultra-550b-a55b\n" +
   "            displayName: nemotron-3-ultra-550b-a55b (requesty)\n" +
-  "            maxTokens: 2048\n" +
+  "            maxTokens: 8192\n" +
   "          - id: gemma-4-31b-it\n" +
   "            displayName: gemma-4-31b-it (requesty)\n" +
-  "            maxTokens: 2048\n" +
+  "            maxTokens: 8192\n" +
   "      unorouter:\n" +
   "        apiKeyEnv: ATRIA_API_KEY\n" +
   "        api: openai-completions\n" +
   "        baseURL: https://antigravity-seven-delta.vercel.app/v1\n" +
   "        supportsDeveloperRole: false\n" +
-  "        defaultMaxTokens: 2048\n" +
+  "        defaultMaxTokens: 8192\n" +
   "        models:\n" +
   "          - id: qwen3.8-27b:free\n" +
   "            displayName: qwen3.8-27b:free (unorouter)\n" +
-  "            maxTokens: 2048\n" +
+  "            maxTokens: 8192\n" +
   "      groq:\n" +
   "        apiKeyEnv: GROQ_API_KEY\n" +
   "        api: openai-completions\n" +
   "        baseURL: https://api.groq.com/openai/v1\n" +
   "        supportsDeveloperRole: false\n" +
-  "        defaultMaxTokens: 2048\n" +
+  "        defaultMaxTokens: 8192\n" +
   "        models:\n" +
   "          - id: openai/gpt-oss-120b\n" +
   "            displayName: openai/gpt-oss-120b (groq)\n" +
-  "            maxTokens: 2048\n" +
+  "            maxTokens: 8192\n" +
   "          - id: qwen/qwen3.8-27b\n" +
   "            displayName: qwen/qwen3.8-27b (groq)\n" +
-  "            maxTokens: 2048\n";
+  "            maxTokens: 8192\n";
 
 function _buildHeadlessPatch(provider, model) {
   return "- id: llm-pi-ai\n  config:\n    providers:\n"
@@ -204,13 +209,22 @@ function _buildHeadlessPatch(provider, model) {
     + "    selectedDefault: cordis\n";
 }
 
-function _isFallbackableStderr(stderr) {
+function _isFallbackableStderr(stderr, exit_code = null, final_text = null) {
   const s = String(stderr || "");
-  if (!s) return false;
+  // v0.52.24 — empty stderr + non-zero exit + no final = silent provider
+  // failure (max-tokens cut, timeout, unreachable). Fall back. Prior version
+  // returned false on empty stderr, so a silent unorouter failure stopped
+  // the chain and groq keys were never tried.
+  if (!s) {
+    const _hasFinal = final_text !== null && String(final_text || "").trim().length > 0;
+    if (exit_code !== null && exit_code !== 0 && !_hasFinal) return true;
+    return false;
+  }
   if (/PI_AI_ERROR/.test(s) && /40[0-9]/.test(s)) return true;
   if (/\bbalance\b|\bbilling\b|insufficient|quota|top.?up|depleted/i.test(s)) return true;
   if (/Authentication Fails|invalid.*api key|api key.*invalid/i.test(s)) return true;
   if (/\b402\b|\b403\b|\b429\b/.test(s) && /PI_AI|router|provider/i.test(s)) return true;
+  if (/max.?tokens|context.?length/i.test(s)) return true;
   return false;
 }
 
@@ -445,7 +459,10 @@ export default async function agentryAgentDsh(input, ctx) {
     _final_exit_code = last_snap?.exit_code ?? last_snap?.exitCode ?? null;
     _final_timed_out = _timed_out;
 
-    const _fb = _isFallbackableStderr(acc_err);
+    const _evt_so_far = parseEvents(acc_out);
+    const _final_evt_so_far = _evt_so_far.find(e => e.type === "final");
+    const _final_text_so_far = _final_evt_so_far ? String(_final_evt_so_far.text || "") : null;
+    const _fb = _isFallbackableStderr(acc_err, _final_exit_code, _final_text_so_far);
     events_out.emit("agent.dsh.attempt_completed", {
       attempt: _ai + 1, provider: _att.provider, model: _att.model,
       exit_code: _final_exit_code, fallbackable: _fb,
