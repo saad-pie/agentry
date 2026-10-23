@@ -278,33 +278,77 @@ export default async function agentryAgentDsh(input, ctx) {
   }
 
   // ── 4. Read result ──
-  let read;
-  try {
-    read = await ctx.invoke("agentry.os", {
-      action: "shell.read",
-      session: ksess,
-      pid,
-      wait_ms: timeout,
-    }, { tenant: "local", by: "agentry.agent.dsh" });
-  } catch (e) {
-    events_out.emit("agent.dsh.read_failed", { pid, error: e.message });
-    throw new Error("agentry.agent.dsh: shell.read failed: " + e.message);
-  }
-  if (!read.ok) {
-    throw new Error("agentry.agent.dsh: read not ok: " + (read.error?.message || "unknown"));
+  // v0.52.18 — LOOP shell.read until done, accumulating output.
+  // Prior version did ONE shell.read with wait_ms: timeout (up to 5 min).
+  // But kernel shell.mjs caps wait_ms at 30s internally
+  // (Math.min(wait_ms, 30000)). So DSH sessions taking longer than 30s
+  // returned partial stdout, exit_code:null, done:false — and the wrapper
+  // treated that as the final answer. Compound bug: _snapshot() CONSUMES
+  // the buffer, so the accumulated DSH output after 30s was lost forever.
+  // Symptom: final:none, tool_calls:["web_search"], runtime exactly 30s.
+  // Fix: loop with wait_ms under the 30s kernel cap, accumulate chunks.
+  let accumulated_stdout = "";
+  let accumulated_stderr = "";
+  let last_snapshot = null;
+  let read_loop_timed_out = false;
+  const read_deadline = Date.now() + timeout;
+  while (Date.now() < read_deadline) {
+    let chunk;
+    try {
+      chunk = await ctx.invoke("agentry.os", {
+        action: "shell.read",
+        session: ksess,
+        pid,
+        wait_ms: 25000,  // under kernel's 30s internal cap
+      }, { tenant: "local", by: "agentry.agent.dsh" });
+    } catch (e) {
+      events_out.emit("agent.dsh.read_failed", { pid, error: e.message, iter: accumulated_stdout.length });
+      throw new Error("agentry.agent.dsh: shell.read failed: " + e.message);
+    }
+    if (!chunk.ok) {
+      events_out.emit("agent.dsh.read_not_ok", { pid, error: chunk.error?.message });
+      throw new Error("agentry.agent.dsh: read not ok: " + (chunk.error?.message || "unknown"));
+    }
+    const snap = chunk.output.result || {};
+    accumulated_stdout += String(snap.stdout || "");
+    accumulated_stderr += String(snap.stderr || "");
+    last_snapshot = snap;
+    if (snap.done === true) break;
   }
 
-  const r = read.output.result || {};
-  const stdout = String(r.stdout || "");
-  const stderr = String(r.stderr || "");
-  const exit_code = r.exit_code ?? r.exitCode ?? null;
+  // If we exited the loop without done:true, DSH is still running.
+  // Kill it, but keep whatever stdout we got — DSH may have already
+  // emitted a final event before the deadline.
+  if (!last_snapshot || last_snapshot.done !== true) {
+    read_loop_timed_out = true;
+    events_out.emit("agent.dsh.timeout_no_done", {
+      ksess, pid, ms: Date.now() - started, accumulated_bytes: accumulated_stdout.length,
+    });
+    try {
+      await ctx.invoke("agentry.os", {
+        action: "shell.kill", session: ksess, pid,
+      }, { tenant: "local", by: "agentry.agent.dsh" });
+    } catch (e) {
+      events_out.emit("agent.dsh.kill_after_timeout_failed", { pid, error: e.message });
+    }
+  }
+
+  const stdout = accumulated_stdout;
+  const stderr = accumulated_stderr;
+  const exit_code = last_snapshot?.exit_code ?? last_snapshot?.exitCode ?? null;
 
   // ── 5. Parse + structure ──
   const events = parseEvents(stdout);
   const structured = structure(events);
 
   const elapsed = Date.now() - started;
-  const ok = exit_code === 0 && structured.errors.length === 0 && !structured.errors.some(e => e.code === "parse_error");
+  // v0.52.18 — if we timed out at wrapper level BUT a final event was
+  // captured, treat as success. Prior logic required exit_code === 0,
+  // which is null on timeout, so valid answers were discarded.
+  const has_final = structured.final_text !== null && String(structured.final_text || "").trim().length > 0;
+  const ok = (exit_code === 0 || (read_loop_timed_out && has_final))
+    && structured.errors.length === 0
+    && !structured.errors.some(e => e.code === "parse_error");
 
   events_out.emit("agent.dsh.completed", {
     ksess, ok, exit_code,
@@ -385,6 +429,7 @@ export default async function agentryAgentDsh(input, ctx) {
     output: {
       ok,
       exit_code,
+      timed_out: read_loop_timed_out,
       duration_ms: elapsed,
       discovered_files,
       session_id: structured.session_info.sessionId,
