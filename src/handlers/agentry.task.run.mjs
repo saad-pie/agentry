@@ -442,8 +442,11 @@ export default async function agentryTaskRun(input, ctx) {
       // circuit to 5s so the task fails fast and the caller can retry with a
       // corrected plan.
       const isPlannedNewCap = !!(step.wanted_kind || step.wanted_description);
+      // v0.52.25 — bumped from 30000 to 90000 because agentry.ensure now
+      // tries DSH-driven synthesis (60s) before the polling fallback. Prior
+      // 30s would cut DSH off before it finished installing packages.
       const effectiveEnsureTimeout = isPlannedNewCap
-        ? Math.min(ensureTimeout, 30000)
+        ? Math.min(ensureTimeout, 90000)
         : Math.min(ensureTimeout, 5000);
       let ensureRes;
       const ensureStarted = Date.now();

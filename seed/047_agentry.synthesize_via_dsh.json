@@ -1,0 +1,26 @@
+{
+  "id": "agentry.synthesize_via_dsh",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.synthesize_via_dsh",
+  "accepts": {
+    "capability_id": "string",
+    "intent": { "type": "string", "optional": true },
+    "wanted_kind": { "type": "string", "optional": true },
+    "wanted_description": { "type": "string", "optional": true },
+    "accepts_hint": { "type": "object", "optional": true },
+    "produces_hint": { "type": "object", "optional": true },
+    "timeout_ms": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "verified": "boolean",
+    "capability_id": "string",
+    "handler_path": { "type": "string", "optional": true },
+    "seed_path": { "type": "string", "optional": true },
+    "package_name": { "type": "string", "optional": true },
+    "reason": { "type": "string", "optional": true }
+  },
+  "cost": { "money_usd": 0, "time_ms": 60000 },
+  "source": "seeded:agentry",
+  "notes": "v0.52.25 — DSH-driven synthesis. Fast path for agentry.ensure before the polling loop. Given capability_id+intent, DSH picks package + writes code body + returns JSON spec; this handler renders pipeline template, verifies via real execution, writes graph node."
+}

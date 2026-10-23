@@ -83,6 +83,51 @@ export default async function agentryEnsure(input, ctx) {
     }
   }
 
+  // ── 2.5 v0.52.25 — DSH fast path ──
+  // If caller provided wanted_kind or wanted_description (i.e. reasoner
+  // already diagnosed a real missing capability), try DSH-driven synthesis
+  // BEFORE the polling loop. DSH returns a working handler in 45-90s vs
+  // the mechanical pipeline's ~10min. Falls through to poll loop on any
+  // DSH failure — pipeline remains the safety net.
+  const _hasSynthesisHint = !!(wanted_kind || wanted_description);
+  if (_hasSynthesisHint) {
+    try {
+      const dshSynth = await ctx.invoke("agentry.synthesize_via_dsh", {
+        capability_id,
+        intent: wanted_description || capability_id,
+        wanted_kind: wanted_kind || "tool",
+        wanted_description: wanted_description || null,
+        timeout_ms: Math.min(timeoutMs, 60000),
+      }, { tenant: "local", by: "agentry.ensure", task_id: ctx.task_id });
+      if (dshSynth.ok && dshSynth.output?.verified) {
+        cap = checkAvailable(graph, capability_id);
+        if (cap) {
+          events.emit("ensure.dsh_synthesized", {
+            capability_id, handler_path: dshSynth.output.handler_path,
+            package_name: dshSynth.output.package_name,
+            waited_ms: Date.now() - started,
+          });
+          return {
+            output: {
+              ok: true, available: true, capability_id,
+              kind: cap.kind, handler_file: cap.handler_file || null,
+              gap_id: gapId, waited_ms: Date.now() - started,
+              reason: "dsh_synthesized",
+            },
+            cost: { time_ms: Date.now() - started },
+          };
+        }
+      }
+      events.emit("ensure.dsh_synth_not_verified", {
+        capability_id,
+        reason: dshSynth.output?.reason || "unknown",
+        waited_ms: Date.now() - started,
+      });
+    } catch (e) {
+      events.emit("ensure.dsh_synth_threw", { capability_id, error: e.message });
+    }
+  }
+
   // ── 3. Poll ──
   const pollMs = 2000;
   const timeoutMs = Math.max(2000, Math.min(600000, Number(timeout_ms) || 120000));
