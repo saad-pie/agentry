@@ -83,12 +83,14 @@ export default async function agentryEnsure(input, ctx) {
     }
   }
 
-  // ── 2.5 v0.52.25 — DSH fast path ──
-  // If caller provided wanted_kind or wanted_description (i.e. reasoner
-  // already diagnosed a real missing capability), try DSH-driven synthesis
-  // BEFORE the polling loop. DSH returns a working handler in 45-90s vs
-  // the mechanical pipeline's ~10min. Falls through to poll loop on any
-  // DSH failure — pipeline remains the safety net.
+  // ── 2.5 v0.52.26 — DSH fast path ──
+  // v0.52.26 FIX: prior version referenced `timeoutMs` here, but timeoutMs
+  // is declared in step 3 below. TDZ ReferenceError. Now compute an
+  // independent dshTimeoutMs from the raw input param.
+  const _dshTimeoutMs = Math.min(
+    Math.max(30000, Number(timeout_ms) || 90000),
+    60000
+  );
   const _hasSynthesisHint = !!(wanted_kind || wanted_description);
   if (_hasSynthesisHint) {
     try {
@@ -97,7 +99,7 @@ export default async function agentryEnsure(input, ctx) {
         intent: wanted_description || capability_id,
         wanted_kind: wanted_kind || "tool",
         wanted_description: wanted_description || null,
-        timeout_ms: Math.min(timeoutMs, 60000),
+        timeout_ms: _dshTimeoutMs,
       }, { tenant: "local", by: "agentry.ensure", task_id: ctx.task_id });
       if (dshSynth.ok && dshSynth.output?.verified) {
         cap = checkAvailable(graph, capability_id);
