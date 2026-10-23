@@ -130,6 +130,90 @@ function structure(events) {
   };
 }
 
+// v0.52.23 — fallback chain with per-key groq attempts + profile builder
+function _buildFallbackChain() {
+  const chain = [
+    { provider: "requesty",  model: process.env.DSH_HEADLESS_REQUESTY_MODEL  || "nemotron-3-ultra-550b-a55b" },
+    { provider: "unorouter", model: process.env.DSH_HEADLESS_UNOROUTER_MODEL || "qwen3.8-27b:free" },
+  ];
+  const groqModel = process.env.DSH_HEADLESS_GROQ_MODEL || "openai/gpt-oss-120b";
+  const groqKeys = [
+    process.env.GROQ_API_KEY,
+    process.env.GROQ_API_KEY_1,
+    process.env.GROQ_API_KEY_2,
+    process.env.GROQ_API_KEY_3,
+  ].filter(k => typeof k === "string" && k.length > 0);
+  if (groqKeys.length === 0) {
+    chain.push({ provider: "groq", model: groqModel, groqKey: "" });
+  } else {
+    for (const k of groqKeys) chain.push({ provider: "groq", model: groqModel, groqKey: k });
+  }
+  return chain;
+}
+const DSH_FALLBACK_CHAIN = _buildFallbackChain();
+
+const _PROVIDERS_YAML = "      requesty:\n" +
+  "        apiKeyEnv: REQUESTYAI_API_KEY\n" +
+  "        api: openai-completions\n" +
+  "        baseURL: https://router.requesty.ai/v1\n" +
+  "        supportsDeveloperRole: false\n" +
+  "        defaultMaxTokens: 2048\n" +
+  "        models:\n" +
+  "          - id: nemotron-3-ultra-550b-a55b\n" +
+  "            displayName: nemotron-3-ultra-550b-a55b (requesty)\n" +
+  "            maxTokens: 2048\n" +
+  "          - id: gemma-4-31b-it\n" +
+  "            displayName: gemma-4-31b-it (requesty)\n" +
+  "            maxTokens: 2048\n" +
+  "      unorouter:\n" +
+  "        apiKeyEnv: ATRIA_API_KEY\n" +
+  "        api: openai-completions\n" +
+  "        baseURL: https://antigravity-seven-delta.vercel.app/v1\n" +
+  "        supportsDeveloperRole: false\n" +
+  "        defaultMaxTokens: 2048\n" +
+  "        models:\n" +
+  "          - id: qwen3.8-27b:free\n" +
+  "            displayName: qwen3.8-27b:free (unorouter)\n" +
+  "            maxTokens: 2048\n" +
+  "      groq:\n" +
+  "        apiKeyEnv: GROQ_API_KEY\n" +
+  "        api: openai-completions\n" +
+  "        baseURL: https://api.groq.com/openai/v1\n" +
+  "        supportsDeveloperRole: false\n" +
+  "        defaultMaxTokens: 2048\n" +
+  "        models:\n" +
+  "          - id: openai/gpt-oss-120b\n" +
+  "            displayName: openai/gpt-oss-120b (groq)\n" +
+  "            maxTokens: 2048\n" +
+  "          - id: qwen/qwen3.8-27b\n" +
+  "            displayName: qwen/qwen3.8-27b (groq)\n" +
+  "            maxTokens: 2048\n";
+
+function _buildHeadlessPatch(provider, model) {
+  return "- id: llm-pi-ai\n  config:\n    providers:\n"
+    + _PROVIDERS_YAML
+    + "- id: agent-default-model\n"
+    + "  name: \"@deepseek-ai/dsh-agent-default-model\"\n"
+    + "  config:\n"
+    + "    provider: " + provider + "\n"
+    + "    model: " + model + "\n"
+    + "- id: agent-preset-registry\n"
+    + "  name: \"@deepseek-ai/dsh-agent-preset-registry\"\n"
+    + "  config:\n"
+    + "    default: standard\n"
+    + "    selectedDefault: cordis\n";
+}
+
+function _isFallbackableStderr(stderr) {
+  const s = String(stderr || "");
+  if (!s) return false;
+  if (/PI_AI_ERROR/.test(s) && /40[0-9]/.test(s)) return true;
+  if (/\bbalance\b|\bbilling\b|insufficient|quota|top.?up|depleted/i.test(s)) return true;
+  if (/Authentication Fails|invalid.*api key|api key.*invalid/i.test(s)) return true;
+  if (/\b402\b|\b403\b|\b429\b/.test(s) && /PI_AI|router|provider/i.test(s)) return true;
+  return false;
+}
+
 export default async function agentryAgentDsh(input, ctx) {
   const { prompt, timeout_ms, session_id } = input || {};
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
@@ -188,9 +272,12 @@ export default async function agentryAgentDsh(input, ctx) {
 
   // v0.48.2 — inline env prefix on sh -c to guarantee propagation
   const requestyKey = process.env.REQUESTYAI_API_KEY || "";
-  const envPrefix = "DEEPSEEK_API_KEY='dummy-not-used' ATRIA_API_KEY=" + shq(atriaKey) + " REQUESTYAI_API_KEY=" + shq(requestyKey);
-  const cmdParts = [shq(DSH_BIN), ...args.map(shq)];
-  const cmdStr = envPrefix + " " + cmdParts.join(" ");
+  // v0.52.23 — env base + command tail hoisted; cmdStr assembled per-attempt
+  // inside the fallback loop so each groq attempt uses its own key.
+  const _envBase = "DEEPSEEK_API_KEY='dummy-not-used'"
+    + " ATRIA_API_KEY=" + shq(atriaKey)
+    + " REQUESTYAI_API_KEY=" + shq(requestyKey);
+  const _cmdTail = [shq(DSH_BIN), ...args.map(shq)].join(" ");
   // v0.48.3 — self-healing DSH profile. The headless profile's patch must
   // route agent-default-model to atria (unorouter). If it's been reset to
   // [] or default, DSH falls back to deepseek-official and AUTH fails
@@ -255,87 +342,127 @@ export default async function agentryAgentDsh(input, ctx) {
     events_out.emit("agent.dsh.profile_heal_failed", { error: e.message });
   }
 
-  events_out.emit("agent.dsh.spawn_started", { ksess, prompt_len: prompt.length, cmd_len: cmdStr.length });
-  let spawn;
-  try {
-    spawn = await ctx.invoke("agentry.os", {
-      action: "shell.spawn",
-      session: ksess,
-      cmd: "sh",
-      args: ["-c", cmdStr],
-      timeout_ms: timeout,
-    }, { tenant: "local", by: "agentry.agent.dsh" });
-  } catch (e) {
-    events_out.emit("agent.dsh.spawn_threw", { ksess, error: e.message });
-    throw new Error("agentry.agent.dsh: shell.spawn threw: " + e.message);
-  }
-  if (!spawn.ok) {
-    throw new Error("agentry.agent.dsh: spawn not ok: " + (spawn.error?.message || "unknown"));
-  }
-  const pid = spawn.output.result.pid || spawn.output.result.proc_id;
-  if (!pid) {
-    throw new Error("agentry.agent.dsh: spawn returned no pid/proc_id: " + JSON.stringify(spawn.output.result).slice(0, 300));
-  }
+  // v0.52.23 — fallback loop. Each attempt writes its own profile (per-
+  // provider/model) and its own cmdStr (per-attempt groq key). Only
+  // provider-level failures (402 billing, 401 auth, 429 quota) trigger
+  // fallback — task failures fall through to the final result.
+  let _final_stdout = "";
+  let _final_stderr = "";
+  let _final_exit_code = null;
+  let _final_timed_out = false;
+  let _prev_stderr = "";
 
-  // ── 4. Read result ──
-  // v0.52.18 — LOOP shell.read until done, accumulating output.
-  // Prior version did ONE shell.read with wait_ms: timeout (up to 5 min).
-  // But kernel shell.mjs caps wait_ms at 30s internally
-  // (Math.min(wait_ms, 30000)). So DSH sessions taking longer than 30s
-  // returned partial stdout, exit_code:null, done:false — and the wrapper
-  // treated that as the final answer. Compound bug: _snapshot() CONSUMES
-  // the buffer, so the accumulated DSH output after 30s was lost forever.
-  // Symptom: final:none, tool_calls:["web_search"], runtime exactly 30s.
-  // Fix: loop with wait_ms under the 30s kernel cap, accumulate chunks.
-  let accumulated_stdout = "";
-  let accumulated_stderr = "";
-  let last_snapshot = null;
-  let read_loop_timed_out = false;
-  const read_deadline = Date.now() + timeout;
-  while (Date.now() < read_deadline) {
-    let chunk;
-    try {
-      chunk = await ctx.invoke("agentry.os", {
-        action: "shell.read",
-        session: ksess,
-        pid,
-        wait_ms: 25000,  // under kernel's 30s internal cap
-      }, { tenant: "local", by: "agentry.agent.dsh" });
-    } catch (e) {
-      events_out.emit("agent.dsh.read_failed", { pid, error: e.message, iter: accumulated_stdout.length });
-      throw new Error("agentry.agent.dsh: shell.read failed: " + e.message);
-    }
-    if (!chunk.ok) {
-      events_out.emit("agent.dsh.read_not_ok", { pid, error: chunk.error?.message });
-      throw new Error("agentry.agent.dsh: read not ok: " + (chunk.error?.message || "unknown"));
-    }
-    const snap = chunk.output.result || {};
-    accumulated_stdout += String(snap.stdout || "");
-    accumulated_stderr += String(snap.stderr || "");
-    last_snapshot = snap;
-    if (snap.done === true) break;
-  }
-
-  // If we exited the loop without done:true, DSH is still running.
-  // Kill it, but keep whatever stdout we got — DSH may have already
-  // emitted a final event before the deadline.
-  if (!last_snapshot || last_snapshot.done !== true) {
-    read_loop_timed_out = true;
-    events_out.emit("agent.dsh.timeout_no_done", {
-      ksess, pid, ms: Date.now() - started, accumulated_bytes: accumulated_stdout.length,
+  for (let _ai = 0; _ai < DSH_FALLBACK_CHAIN.length; _ai++) {
+    const _att = DSH_FALLBACK_CHAIN[_ai];
+    events_out.emit("agent.dsh.attempt_started", {
+      attempt: _ai + 1, total: DSH_FALLBACK_CHAIN.length,
+      provider: _att.provider, model: _att.model,
+      previous_error: _prev_stderr.slice(-300),
     });
+
+    // Write per-attempt profile
     try {
-      await ctx.invoke("agentry.os", {
-        action: "shell.kill", session: ksess, pid,
+      const fs = await import("node:fs");
+      fs.mkdirSync("/tmp/home/.dsh/profiles/headless", { recursive: true });
+      fs.writeFileSync(HEADLESS_PATCH_PATH, _buildHeadlessPatch(_att.provider, _att.model));
+    } catch (e) {
+      events_out.emit("agent.dsh.patch_write_failed", { attempt: _ai + 1, error: e.message });
+      _prev_stderr = "patch write failed: " + e.message;
+      continue;
+    }
+
+    // Build per-attempt cmdStr (groq key differs per attempt)
+    const _groqForAttempt = (_att.groqKey !== undefined)
+      ? _att.groqKey
+      : (process.env.GROQ_API_KEY || "");
+    const cmdStr = _envBase + " GROQ_API_KEY=" + shq(_groqForAttempt) + " " + _cmdTail;
+
+    events_out.emit("agent.dsh.spawn_started", {
+      ksess, attempt: _ai + 1, provider: _att.provider, prompt_len: prompt.length, cmd_len: cmdStr.length,
+    });
+
+    let spawn;
+    try {
+      spawn = await ctx.invoke("agentry.os", {
+        action: "shell.spawn", session: ksess, cmd: "sh", args: ["-c", cmdStr], timeout_ms: timeout,
       }, { tenant: "local", by: "agentry.agent.dsh" });
     } catch (e) {
-      events_out.emit("agent.dsh.kill_after_timeout_failed", { pid, error: e.message });
+      events_out.emit("agent.dsh.spawn_threw", { ksess, attempt: _ai + 1, error: e.message });
+      _prev_stderr = "spawn threw: " + e.message;
+      continue;
     }
+    if (!spawn.ok) {
+      _prev_stderr = "spawn not ok: " + (spawn.error?.message || "unknown");
+      continue;
+    }
+    const pid = spawn.output.result.pid || spawn.output.result.proc_id;
+    if (!pid) {
+      _prev_stderr = "spawn no pid";
+      continue;
+    }
+
+    // Read loop
+    let acc_out = "";
+    let acc_err = "";
+    let last_snap = null;
+    const read_deadline = Date.now() + timeout;
+    while (Date.now() < read_deadline) {
+      let chunk;
+      try {
+        chunk = await ctx.invoke("agentry.os", {
+          action: "shell.read", session: ksess, pid, wait_ms: 25000,
+        }, { tenant: "local", by: "agentry.agent.dsh" });
+      } catch (e) {
+        events_out.emit("agent.dsh.read_failed", { pid, attempt: _ai + 1, error: e.message });
+        break;
+      }
+      if (!chunk.ok) {
+        events_out.emit("agent.dsh.read_not_ok", { pid, attempt: _ai + 1, error: chunk.error?.message });
+        break;
+      }
+      const snap = chunk.output.result || {};
+      acc_out += String(snap.stdout || "");
+      acc_err += String(snap.stderr || "");
+      last_snap = snap;
+      if (snap.done === true) break;
+    }
+
+    const _timed_out = !last_snap || last_snap.done !== true;
+    if (_timed_out) {
+      events_out.emit("agent.dsh.timeout_no_done", {
+        ksess, pid, attempt: _ai + 1, ms: Date.now() - started, accumulated_bytes: acc_out.length,
+      });
+      try {
+        await ctx.invoke("agentry.os", { action: "shell.kill", session: ksess, pid },
+          { tenant: "local", by: "agentry.agent.dsh" });
+      } catch (e) {
+        events_out.emit("agent.dsh.kill_after_timeout_failed", { pid, error: e.message });
+      }
+    }
+
+    _final_stdout = acc_out;
+    _final_stderr = acc_err;
+    _final_exit_code = last_snap?.exit_code ?? last_snap?.exitCode ?? null;
+    _final_timed_out = _timed_out;
+
+    const _fb = _isFallbackableStderr(acc_err);
+    events_out.emit("agent.dsh.attempt_completed", {
+      attempt: _ai + 1, provider: _att.provider, model: _att.model,
+      exit_code: _final_exit_code, fallbackable: _fb,
+      stderr_preview: acc_err.slice(-200),
+    });
+
+    if (_fb && _ai + 1 < DSH_FALLBACK_CHAIN.length) {
+      _prev_stderr = acc_err;
+      continue;
+    }
+    break;
   }
 
-  const stdout = accumulated_stdout;
-  const stderr = accumulated_stderr;
-  const exit_code = last_snapshot?.exit_code ?? last_snapshot?.exitCode ?? null;
+  const stdout = _final_stdout;
+  const stderr = _final_stderr;
+  const exit_code = _final_exit_code;
+  const read_loop_timed_out = _final_timed_out;
 
   // ── 5. Parse + structure ──
   const events = parseEvents(stdout);
