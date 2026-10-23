@@ -253,7 +253,19 @@ function isBoilerplateQuery(q) {
  * Return shape:
  *   { gaps, uncovered, watched, created, proposals, adopted }
  */
+let _tickRunning = false;
+
 export async function tick(deps, opts = {}) {
+  // v0.52.17 — mutex. Prior version allowed concurrent ticks because
+  // entrypoint uses setInterval without awaiting the previous tick.
+  // Under LLM latency, 5 concurrent ticks would read the same un-analyzed
+  // watch_result, each create a proposal, and each fire its own adopt call.
+  // Saw 5 duplicate proposals from one watch_result in a 30s window.
+  if (_tickRunning) {
+    return { gaps: 0, uncovered: 0, watched: 0, created: [], proposals: 0, adopted: 0, skipped: "tick_already_running" };
+  }
+  _tickRunning = true;
+  try {
   const { graph, events } = deps;
   const {
     intervalMs = GAP_WATCH_INTERVAL_MS,
@@ -414,11 +426,25 @@ export async function tick(deps, opts = {}) {
           proposal_id: res.output.proposal_id,
         });
       } else {
+        // v0.52.17 — mark analyzed even on failure. Prior version left the
+        // watch_result unmarked so it was retried every tick, producing a
+        // new proposal attempt per tick. Combined with the concurrent-tick
+        // bug this produced 5 duplicate proposals in 30 seconds.
+        // Now: mark terminal with a retry hint. Future v0.53 will honor
+        // retry_at, but at minimum we stop the per-tick storm.
         events.emit("discovery.proposal_failed", {
           watch_result_id: node.id,
           code: res.error.code,
           message: res.error.message,
         });
+        try {
+          graph.putCapability({
+            id: node.id,
+            kind: "watch_result",
+            analyzed_at: Date.now(),
+            analysis_skipped_reason: "proposal_failed:" + (res.error?.code || "unknown"),
+          });
+        } catch {}
       }
     } catch (e) {
       events.emit("discovery.proposal_threw", {
@@ -826,4 +852,7 @@ export async function tick(deps, opts = {}) {
     proposals: proposalsCreated,
     adopted,
   };
+  } finally {
+    _tickRunning = false;
+  }
 }
