@@ -55,14 +55,37 @@ export async function prepareSession(deps, { capId, session, stack = [], require
   // Ensure the session exists before we try to install into it.
   // session.create is idempotent — returns { created: false } if it
   // already exists.
-  const createRes = await invoke(
-    "agentry.os",
-    { action: "session.create", id: session },
-    { tenant: "local", by: "installer" }
-  );
-  if (!createRes.ok) {
+  // v0.52.13 — retry with backoff. Under concurrent trial load, the kernel
+  // can serialize the fs writes and one caller's request hits the 60s
+  // agentry.os timeout. Two retries with 1s/3s backoff clears the transient
+  // case without changing kernel semantics.
+  let createRes = null;
+  const _backoffMs = [0, 1000, 3000];
+  for (let _attempt = 0; _attempt < _backoffMs.length; _attempt++) {
+    if (_attempt > 0) {
+      await new Promise(r => setTimeout(r, _backoffMs[_attempt]));
+      events.emit("installer.session_create_retry", { capId, session, attempt: _attempt + 1 });
+    }
+    try {
+      createRes = await invoke(
+        "agentry.os",
+        { action: "session.create", id: session },
+        { tenant: "local", by: "installer" }
+      );
+    } catch (e) {
+      createRes = { ok: false, error: { code: "invoker_failed", message: e.message } };
+    }
+    if (createRes && createRes.ok) break;
+    // Only retry on transient failures (timeout / fetch failed), not on
+    // INVALID_REQUEST which will always fail the same way.
+    const _code = createRes?.error?.code || "";
+    const _msg = String(createRes?.error?.message || "");
+    const _transient = /timeout|fetch failed|ECONNRESET|ETIMEDOUT|socket/i.test(_msg);
+    if (!_transient) break;
+  }
+  if (!createRes || !createRes.ok) {
     throw new Error(
-      `installer: session.create failed — ${createRes.error.code}: ${createRes.error.message}`
+      `installer: session.create failed — ${createRes?.error?.code || "unknown"}: ${createRes?.error?.message || "unknown"}`
     );
   }
 

@@ -854,17 +854,42 @@ lines.push("MODULE LOADING — READ THIS TWICE. IT IS THE #1 SOURCE OF FAILURES:
     lines.push("- The package is already installed in the synth session at");
     lines.push("  node_modules/" + facts.npm_package_name + ".");
     lines.push("- Your synthesized handler MUST declare requires.npm: [\"" + facts.npm_package_name + "\"].");
-    lines.push("- LOAD the package with dynamic import. The SAFEST pattern that works");
-    lines.push("  for both ESM and CJS packages:");
+    lines.push("");
+    lines.push("CRITICAL — DO NOT INVENT API METHODS. The trial WILL fail with");
+    lines.push("`X is not a function` or `Cannot determine main export` if you guess.");
+    lines.push("Follow these rules IN ORDER:");
+    lines.push("");
+    lines.push("1. Read the README API section above. Note EXACT function names,");
+    lines.push("   method signatures, and export shapes. Copy them verbatim.");
+    lines.push("");
+    lines.push("2. Look at package.json `main`, `module`, `exports` fields above.");
+    lines.push("   If `exports` is present, the package is ESM and you MUST use");
+    lines.push("   named imports matching that shape.");
+    lines.push("");
+    lines.push("3. If the README shows ONLY a class (e.g. `new Foo()`), the");
+    lines.push("   export is the class: `const { Foo } = await import(pkg)`.");
+    lines.push("   Do NOT call `Foo.bar()` as a static method — the README would");
+    lines.push("   show that pattern if it existed.");
+    lines.push("");
+    lines.push("4. If the README shows ONLY functions (e.g. `foo(bar)`), the");
+    lines.push("   export is the function: `const { foo } = await import(pkg)`.");
+    lines.push("   Do NOT wrap it in `.default()` or invent a class around it.");
+    lines.push("");
+    lines.push("5. If the README is empty or unhelpful, use the SAFEST pattern:");
     lines.push("    const mod = await import('" + facts.npm_package_name + "');");
-    lines.push("    const fn = mod.default || mod;   // handles both ESM default and CJS namespace");
-    lines.push("  If the package is known to use named exports, this also works:");
-    lines.push("    const { fn } = await import('" + facts.npm_package_name + "');");
-    lines.push("- Do NOT do (await import('pkg')).default without the || mod fallback.");
-    lines.push("  Many modern packages export names and .default is undefined.");
-    lines.push("- Do NOT use require(). Do NOT use static import. Both will fail at runtime.");
-    lines.push("- Read the README carefully for the API. If the README uses require() or");
-    lines.push("  static import, REWRITE it to use dynamic import as shown above.");
+    lines.push("    const pkg = mod.default || mod;");
+    lines.push("    // Then inspect pkg's keys BEFORE calling anything:");
+    lines.push("    if (typeof pkg !== 'function' && typeof pkg !== 'object')");
+    lines.push("      throw new Error('Unexpected export shape: ' + typeof pkg);");
+    lines.push("    // Now call methods you KNOW exist from the README.");
+    lines.push("");
+    lines.push("6. NEVER write `addTable(...)`, `getOrientation(...)`, or any");
+    lines.push("   method whose name you did not see in the README above.");
+    lines.push("   If unsure of the API, throw a clear error EARLY:");
+    lines.push("     throw new Error('pdf-lib-table: API is <guessed>. Cannot verify.');");
+    lines.push("   Better to fail fast at trial than to invent phantom methods.");
+    lines.push("");
+    lines.push("7. Load with dynamic import — NEVER static import, NEVER require.");
     lines.push("");
   }
   if (facts.source_kind === "rust_crate" && facts.crate_name) {
@@ -1605,6 +1630,20 @@ const TINY_PDF_B64 = "JVBERi0xLjMgCjEgMCBvYmoKPDwKL1BhZ2VzIDIgMCBSCi9UeXBlIC9DYX
 
 function autoFixtures(spec) {
   if (spec.type === "skill_wrapper") return;
+  // v0.52.13 — clamp min_bytes to 0 unless produces declares a binary field.
+  // LLM habitually sets min_bytes: 500 even for text/JSON outputs, which then
+  // fails accept() with "output too small (0 < 500)" when the capability
+  // correctly returns a string (which has no `bytes` field). Only binary
+  // outputs have meaningful `bytes`.
+  {
+    const _produces = (spec.capability && spec.capability.produces) || {};
+    const _hasBinary = Object.keys(_produces).some(k =>
+      /(?:^|_)(?:base64|bytes|blob|pdf_png_buf)$|_png_base64$|_pdf_base64$|^png_|^pdf_/.test(k)
+    );
+    if (!_hasBinary && spec.accept_spec && typeof spec.accept_spec.min_bytes === "number" && spec.accept_spec.min_bytes > 0) {
+      spec.accept_spec = { ...spec.accept_spec, min_bytes: 0, _clamped_from: spec.accept_spec.min_bytes };
+    }
+  }
   const accepts = (spec.capability && spec.capability.accepts) || {};
   const acceptInput = (spec.accept_spec && spec.accept_spec.input) || {};
   const existing = (spec.accept_spec && spec.accept_spec._fixtures) || {};
