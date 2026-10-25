@@ -19,8 +19,10 @@ export function repairJsonControlChars(s) {
 export function extractJson(text) {
   if (!text) return null;
   let s = String(text).trim();
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) s = fence[1].trim();
+  if (!s.startsWith("{")) {
+    const fence = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
+    if (fence) s = fence[1].trim();
+  }
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first === -1 || last <= first) return null;

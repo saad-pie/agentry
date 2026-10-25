@@ -22,6 +22,7 @@
 import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { extractJson } from "./synthesize/validate/json.mjs";
 
 const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR || "/tmp/home/.dsh/agentry-synthesized/handlers";
 const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR || "/tmp/home/.dsh/agentry-synthesized/seeds";
@@ -210,7 +211,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     return { output: { verified: false, capability_id, reason: "dsh_failed: " + (dshRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
   }
   const finalText = String(dshRes.output?.final || "");
-  const spec = parseDshSpec(finalText);
+  const spec = extractJson(finalText);
   if (!spec) {
     // v0.52.27 — log the full DSH result shape so next debug doesn't need
     // a separate probe. Prior version only logged final_preview which was
