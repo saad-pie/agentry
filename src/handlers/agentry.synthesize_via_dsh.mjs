@@ -190,7 +190,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   const started = Date.now();
   const events = ctx.events;
   const graph = ctx.graph;
-  const timeoutMs = Math.max(30000, Math.min(120000, Number(timeout_ms) || 60000));
+  const timeoutMs = Math.max(30000, Math.min(300000, Number(timeout_ms) || 180000));
   const safeId = sanitizeId(capability_id);
 
   events.emit("dsh_synth.started", { capability_id, intent, wanted_kind, timeout_ms: timeoutMs });
@@ -422,6 +422,17 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   };
   try { writeFileSync(seedPath, JSON.stringify(seedContent, null, 2)); } catch {}
   graph.putCapability(seedContent);
+
+  try {
+    const gapKey = "gap:" + capability_id;
+    const gapNode = graph.getCapability(gapKey);
+    if (gapNode && !gapNode.retired_at) {
+      graph.retireCapability(gapKey, "resolved_by_dsh_synthesis");
+      events.emit("dsh_synth.gap_retired", { capability_id, gap_id: gapKey });
+    }
+  } catch (e) {
+    events.emit("dsh_synth.gap_retire_failed", { capability_id, error: e.message });
+  }
 
   events.emit("dsh_synth.completed", {
     capability_id, handler_path: handlerPath, package: spec.package_name,

@@ -48,7 +48,10 @@ const MAX_ERROR_LEN = 400;
 const ARTIFACT_PATH_PATTERN = /(_path$|^path$|artifact_path$|_file$|^save_path$|^dstPath$|^srcPath$|^output_path$|^input_path$)/i;
 const ARTIFACT_B64_PATTERN = /_base64$/i;
 const FILE_EXT_PATTERN = /\.(png|jpg|jpeg|pdf|mp4|mp3|wav|json|txt|md|csv|html|zip|gif|webp)$/i;
-const DEFAULT_ENSURE_TIMEOUT_MS = 120000;
+// v0.53.5 — raised 120s -> 180s. ensure -> synthesize_via_dsh -> DSH
+// timeouts were capped here below the caller's 180s intent, making
+// every DSH run look like a model failure at exactly 90-120s.
+const DEFAULT_ENSURE_TIMEOUT_MS = 180000;
 
 function genTaskId() {
   return "task_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
@@ -446,7 +449,7 @@ export default async function agentryTaskRun(input, ctx) {
       // tries DSH-driven synthesis (60s) before the polling fallback. Prior
       // 30s would cut DSH off before it finished installing packages.
       const effectiveEnsureTimeout = isPlannedNewCap
-        ? Math.min(ensureTimeout, 90000)
+        ? Math.min(ensureTimeout, 180000)
         : Math.min(ensureTimeout, 5000);
       let ensureRes;
       const ensureStarted = Date.now();
