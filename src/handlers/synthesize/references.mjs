@@ -35,6 +35,9 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
     if (!seed.id || !seed.handler_file) continue;
     if (seed.source !== "dsh_synth:verified") continue;
     if (!existsSync(seed.handler_file)) continue;
+    let _src = "";
+    try { _src = readFileSync(seed.handler_file, "utf8"); } catch { continue; }
+    if (_src.includes("globalThis.")) continue;
     candidates.push({
       id: seed.id, kind: seed.kind || "tool",
       accepts: Object.keys(seed.accepts || {}),

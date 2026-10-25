@@ -75,6 +75,12 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push('  "test_output_path": "/tmp/dsh_test_output.<ext>"');
   L.push("}");
   L.push("");
+  L.push("COMPOSITION (PREFERRED when applicable):");
+  L.push("- If a WORKING REFERENCE capability already does most of the work, COMPOSE it instead of adding another package.");
+  L.push("- In your spec: requires.capability: [\"<ref-cap-id>\"] and glue.pre_invoke: { \"<ENV_VAR>\": { capability: \"<ref-cap-id>\", input_map: { \"<inner>\": \"<outer>\" }, extract: \"<dot.path>\" } }.");
+  L.push("- The composed capability runs FIRST. Its extracted output lands in env var. Your code_body reads process.env.<ENV_VAR>.");
+  L.push("- Example: HTML to WebP with reference html_to_png - pre_invoke html_to_png to get a PNG path, then use sharp to convert PNG to WebP. Cleaner than installing a new HTML renderer.");
+  L.push("");
   L.push("RULES:");
   L.push("- CRITICAL: many packages change APIs between major versions. Do NOT assume pipe patterns work. Check the ACTUAL version's README/API. If the current README shows `await pkg(...)` (promise), await it. If it shows `.pipe()` (stream), use pipe. If unsure, wrap in try/catch and log the error so we can see it.");
   L.push("- test_script MUST be a complete working script that takes test_input_path and produces test_output_path. Run the ACTUAL operation. If test_script doesn't create the output file, your code_body won't either. Fix the approach BEFORE returning the spec.");
@@ -91,7 +97,9 @@ function renderHandler(spec, capability_id) {
   const safeId = sanitizeId(capability_id);
   const accepts = spec.accepts || {};
   const produces = spec.produces || {};
-  const requires = { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] };
+  const _composedCaps = Array.isArray(spec.requires && spec.requires.capability) ? spec.requires.capability : [];
+  const requires = { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: _composedCaps };
+  const _preInvoke = (spec.glue && spec.glue.pre_invoke) || {};
   const env_map = {};
   for (const k of Object.keys(accepts)) env_map[k.toUpperCase()] = k;
   const code = String(spec.code_body || "");
@@ -105,6 +113,7 @@ function renderHandler(spec, capability_id) {
   out.push("const PRODUCES = " + JSON.stringify(produces, null, 2) + ";");
   out.push("const REQUIRES = " + JSON.stringify(requires, null, 2) + ";");
   out.push("const ENV_MAP = " + JSON.stringify(env_map, null, 2) + ";");
+  out.push("const PRE_INVOKE = " + JSON.stringify(_preInvoke, null, 2) + ";");
   out.push("const KERNEL_SCRIPT = " + JSON.stringify(code) + ";");
   out.push("const DEFAULT_TIMEOUT_MS = 90000;");
   out.push("");
@@ -127,11 +136,22 @@ function renderHandler(spec, capability_id) {
   out.push("  if (typeof ctx.invoke !== \"function\") throw new Error(CAP_ID + \" requires ctx.invoke\");");
   out.push("  await _prepare(ctx, session);");
   out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session });");
+  out.push("  const pre = {};");
+  out.push("  for (const [preKey, preSpec] of Object.entries(PRE_INVOKE)) {");
+  out.push("    const innerInput = {};");
+  out.push("    for (const [ik, ok] of Object.entries(preSpec.input_map || {})) innerInput[ik] = input[ok];");
+  out.push("    const innerRes = await ctx.invoke(preSpec.capability, innerInput);");
+  out.push("    if (!innerRes.ok) throw new Error(CAP_ID + \": pre_invoke \" + preSpec.capability + \" failed: \" + (innerRes.error && innerRes.error.message));");
+  out.push("    let preVal = innerRes.output;");
+  out.push("    for (const p of String(preSpec.extract || \"\").split(\".\")) preVal = preVal && preVal[p];");
+  out.push("    pre[preKey] = preVal == null ? \"\" : String(preVal);");
+  out.push("  }");
   out.push("  const env = {};");
   out.push("  for (const [envKey, inputKey] of Object.entries(ENV_MAP)) {");
   out.push("    const v = input[inputKey];");
   out.push("    env[envKey] = v === undefined || v === null ? \"\" : String(v);");
   out.push("  }");
+  out.push("  for (const [k, v] of Object.entries(pre)) env[k] = v;");
   out.push("  const timeout_ms = input.timeout_ms || DEFAULT_TIMEOUT_MS;");
   out.push("  const res = await ctx.invoke(\"agentry.os\", {");
   out.push("    action: \"node.run\", session, code: KERNEL_SCRIPT, env, timeout_ms,");
@@ -263,6 +283,40 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   if (!spec.test_script) {
     events.emit("dsh_synth.missing_test_script", { capability_id, package_name: spec.package_name });
     return { output: { verified: false, capability_id, reason: "missing_test_script" }, cost: { time_ms: Date.now() - started } };
+  }
+  const _composed = Array.isArray(spec.requires && spec.requires.capability) ? spec.requires.capability : [];
+  for (const _cap of _composed) {
+    if (!graph.getCapability(_cap)) {
+      events.emit("dsh_synth.composed_cap_missing", { capability_id, missing: _cap });
+      return { output: { verified: false, capability_id, reason: "composed_cap_missing: " + _cap }, cost: { time_ms: Date.now() - started } };
+    }
+  }
+
+  // v0.54.4 — prune packages to those actually imported by test_script or code_body.
+  // DSH sometimes claims 2 packages when the primary already supports the target
+  // via an option (e.g. takumi-js has format:'webp'; sharp unnecessary). The code is
+  // the source of truth — if neither script imports a package, it isn't needed at runtime.
+  {
+    const _importRe = /(?:from\s+['"]|import\s*\(\s*['"]|require\s*\(\s*['"])([^'")\s]+)/g;
+    const _used = new Set();
+    for (const _src of [String(spec.test_script || ""), String(spec.code_body || "")]) {
+      for (const _m of _src.matchAll(_importRe)) {
+        const _p = _m[1];
+        if (!_p || _p.startsWith(".") || _p.startsWith("/") || _p.startsWith("node:")) continue;
+        const _top = _p.startsWith("@") ? _p.split("/").slice(0, 2).join("/") : _p.split("/")[0];
+        _used.add(_top);
+      }
+    }
+    const _pruned = spec.packages.filter(p => _used.has(p));
+    if (_pruned.length > 0 && _pruned.length < spec.packages.length) {
+      events.emit("dsh_synth.packages_pruned", {
+        capability_id,
+        original: spec.packages,
+        kept: _pruned,
+        dropped: spec.packages.filter(p => !_used.has(p)),
+      });
+      spec.packages = _pruned;
+    }
   }
 
   // ── 1.5 v0.52.29 — run test_script FIRST ──
