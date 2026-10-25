@@ -292,30 +292,36 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     }
   }
 
-  // v0.54.4 — prune packages to those actually imported by test_script or code_body.
-  // DSH sometimes claims 2 packages when the primary already supports the target
-  // via an option (e.g. takumi-js has format:'webp'; sharp unnecessary). The code is
-  // the source of truth — if neither script imports a package, it isn't needed at runtime.
+  // v0.54.5 — derive requires.npm from what the code actually imports.
+  // DSH's spec.package_name is unreliable in BOTH directions: it claims packages
+  // the code never imports (prune handles that) AND it omits packages the code
+  // does import (this fix handles that). The code is the only source of truth.
   {
     const _importRe = /(?:from\s+['"]|import\s*\(\s*['"]|require\s*\(\s*['"])([^'")\s]+)/g;
-    const _used = new Set();
+    const _extracted = new Set();
     for (const _src of [String(spec.test_script || ""), String(spec.code_body || "")]) {
       for (const _m of _src.matchAll(_importRe)) {
         const _p = _m[1];
         if (!_p || _p.startsWith(".") || _p.startsWith("/") || _p.startsWith("node:")) continue;
         const _top = _p.startsWith("@") ? _p.split("/").slice(0, 2).join("/") : _p.split("/")[0];
-        _used.add(_top);
+        _extracted.add(_top);
       }
     }
-    const _pruned = spec.packages.filter(p => _used.has(p));
-    if (_pruned.length > 0 && _pruned.length < spec.packages.length) {
-      events.emit("dsh_synth.packages_pruned", {
-        capability_id,
-        original: spec.packages,
-        kept: _pruned,
-        dropped: spec.packages.filter(p => !_used.has(p)),
-      });
-      spec.packages = _pruned;
+    const _truth = [..._extracted];
+    if (_truth.length > 0) {
+      const _claimed = spec.packages || [spec.package_name];
+      const _missing = _truth.filter(p => !_claimed.includes(p));
+      const _extra = _claimed.filter(p => !_truth.includes(p));
+      if (_missing.length > 0 || _extra.length > 0) {
+        events.emit("dsh_synth.packages_reconciled", {
+          capability_id,
+          claimed: _claimed,
+          imported: _truth,
+          missing: _missing,
+          extra: _extra,
+        });
+      }
+      spec.packages = _truth;
     }
   }
 
