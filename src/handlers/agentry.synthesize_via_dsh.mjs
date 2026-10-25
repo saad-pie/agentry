@@ -48,6 +48,8 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push("TASK: Return a JSON SPEC describing a working Node.js implementation.");
   L.push("DO NOT write the full handler file — our code renders the pipeline template around your spec.");
   L.push("");
+  L.push("CRITICAL BUDGET CONSTRAINT: your reasoning must be brief. Do NOT write essays, do NOT plan aloud, do NOT narrate. Do your work, return the JSON. If you exhaust your token budget thinking, you cannot finish the task. Aim for 200 tokens of reasoning max, then act.");
+  L.push("");
   L.push("STEPS:");
   L.push("1. Pick the correct npm package. Must install cleanly in Node, no browser, no external CLI binary, no remote API key.");
   L.push("2. `cd /tmp && npm install <pkg>` to verify it installs. Then `node -e \"import('<pkg>').then(m=>console.log('ok'))\"` to verify it loads.");
@@ -188,7 +190,22 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   const finalText = String(dshRes.output?.final || "");
   const spec = parseDshSpec(finalText);
   if (!spec) {
-    events.emit("dsh_synth.no_spec", { capability_id, final_preview: finalText.slice(0, 300) });
+    // v0.52.27 — log the full DSH result shape so next debug doesn't need
+    // a separate probe. Prior version only logged final_preview which was
+    // empty when DSH timed out with no final event.
+    const _tc = dshRes.output?.tool_calls || [];
+    events.emit("dsh_synth.no_spec", {
+      capability_id,
+      final_preview: finalText.slice(0, 300),
+      final_len: finalText.length,
+      exit_code: dshRes.output?.exit_code ?? null,
+      timed_out: dshRes.output?.timed_out === true,
+      duration_ms: dshRes.output?.duration_ms ?? null,
+      tool_calls_count: _tc.length,
+      tool_calls: _tc.map(t => t.tool).slice(0, 20),
+      messages_count: (dshRes.output?.messages || []).length,
+      stderr_preview: String(dshRes.output?.stderr || "").slice(0, 300),
+    });
     return { output: { verified: false, capability_id, reason: "no_spec_in_dsh_output" }, cost: { time_ms: Date.now() - started } };
   }
   if (spec.error) {

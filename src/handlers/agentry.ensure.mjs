@@ -87,9 +87,14 @@ export default async function agentryEnsure(input, ctx) {
   // v0.52.26 FIX: prior version referenced `timeoutMs` here, but timeoutMs
   // is declared in step 3 below. TDZ ReferenceError. Now compute an
   // independent dshTimeoutMs from the raw input param.
+  // v0.52.27 — cap raised from 60000 to 180000. The 60s cap cut DSH off
+  // mid-work on md_to_pdf (60148ms elapsed, no final emitted, treated as
+  // clean exit). The successful png_to_jpg probe took ~90s with 300s outer.
+  // 180s gives DSH room for install + test + iterate without killing valid
+  // work, while still bounding worst-case latency.
   const _dshTimeoutMs = Math.min(
-    Math.max(30000, Number(timeout_ms) || 90000),
-    60000
+    Math.max(90000, Number(timeout_ms) || 180000),
+    180000
   );
   const _hasSynthesisHint = !!(wanted_kind || wanted_description);
   if (_hasSynthesisHint) {
