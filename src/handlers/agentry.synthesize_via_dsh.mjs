@@ -91,7 +91,7 @@ function renderHandler(spec, capability_id) {
   const safeId = sanitizeId(capability_id);
   const accepts = spec.accepts || {};
   const produces = spec.produces || {};
-  const requires = { npm: [spec.package_name], pip: [], post_install: null, capability: [] };
+  const requires = { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] };
   const env_map = {};
   for (const k of Object.keys(accepts)) env_map[k.toUpperCase()] = k;
   const code = String(spec.code_body || "");
@@ -249,6 +249,14 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     events.emit("dsh_synth.incomplete_spec", { capability_id, has_pkg: !!spec.package_name, has_code: !!spec.code_body });
     return { output: { verified: false, capability_id, reason: "incomplete_spec" }, cost: { time_ms: Date.now() - started } };
   }
+
+  // v0.54.2 — DSH returns "takumi-js sharp" as a single string when a task
+  // needs 2 packages. Spec schema says package_name is singular; DSH improvised.
+  const _pkgs = String(spec.package_name || "").split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  spec.packages = _pkgs.length > 0 ? _pkgs : [spec.package_name];
+  if (spec.packages.length > 1) {
+    events.emit("dsh_synth.multi_package_spec", { capability_id, packages: spec.packages });
+  }
   // v0.52.28 — require test_script. This is what we run BEFORE rendering the
   // handler. If the package's API doesn't work in this environment, test_script
   // fails and we abort early instead of producing a broken handler.
@@ -270,7 +278,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     await ctx.invoke("agentry.os", { action: "session.create", id: preTestSession });
 
     const installRes = await ctx.invoke("agentry.os", {
-      action: "node.install", session: preTestSession, packages: [spec.package_name],
+      action: "node.install", session: preTestSession, packages: spec.packages,
     }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
     if (!installRes.ok) {
       events.emit("dsh_synth.pretest_install_failed", { capability_id, package_name: spec.package_name, error: installRes.error?.message });
@@ -357,7 +365,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     handler_file: handlerPath,
     accepts: spec.accepts || {},
     produces: spec.produces || {},
-    requires: { npm: [spec.package_name], pip: [], post_install: null, capability: [] },
+    requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
     source: "dsh_synth:trial",
     trial: true,
   });
@@ -431,7 +439,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     id: capability_id, kind: "tool", invoked_via: "invoker.in_process_js",
     handler: safeId, handler_file: handlerPath,
     accepts: spec.accepts, produces: spec.produces,
-    requires: { npm: [spec.package_name], pip: [], post_install: null, capability: [] },
+    requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
     source: "dsh_synth:verified",
   };
   try { writeFileSync(seedPath, JSON.stringify(seedContent, null, 2)); } catch {}
