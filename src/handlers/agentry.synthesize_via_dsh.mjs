@@ -52,7 +52,8 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push("CRITICAL BUDGET CONSTRAINT: your reasoning must be brief. Do NOT write essays, do NOT plan aloud, do NOT narrate. Do your work, return the JSON. If you exhaust your token budget thinking, you cannot finish the task. Aim for 200 tokens of reasoning max, then act.");
   L.push("");
   L.push("STEPS:");
-  L.push("1. Pick the correct npm package. Must install cleanly in Node, no browser, no external CLI binary, no remote API key.");
+  L.push("0. BEFORE picking an npm package, run `dsh plugin --profile headless list` to see installed plugins. Then check the community catalog at https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json - grep name and description.en for a match. If a plugin already does this, return a spec that installs it via `dsh plugin add <name>` and uses it. Do NOT reimplement plugin functionality from scratch.");
+  L.push("1. Pick the correct npm package. Must install cleanly in Node, no browser, no external CLI binary, no remote API key. NEVER pick puppeteer, playwright, or node-html-to-image - they download ~200MB Chromium and time out. For HTML to PNG/PDF, prefer takumi-js (pure Rust, no browser), or use an installed dsh-canvas-preview or dsh-moli plugin.");
   L.push("2. `cd /tmp && npm install <pkg>` to verify it installs. Then `node -e \"import('<pkg>').then(m=>console.log('ok'))\"` to verify it loads.");
   L.push("3. Write a small test script that: creates a real fixture, runs the operation, verifies output byte length or magic bytes.");
   L.push("4. Return the JSON below. NO prose. NO markdown fences. Just the JSON.");

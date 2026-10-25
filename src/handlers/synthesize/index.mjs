@@ -129,6 +129,15 @@ export default async function agentrySynthesize(input, ctx) {
     } catch (e) {
       events.emit("synthesize.gomod_read_failed", { proposal_id, candidate_id, error: e.message });
     }
+  } else if (candidate.kind === "dsh_plugin" || String(candidate.id || "").startsWith("dsh_plugin:")) {
+    const _id = String(candidate.id || "");
+    const _pkg = _id.startsWith("dsh_plugin:") ? _id.slice("dsh_plugin:".length) : _id;
+    try {
+      facts = await readNpmPackage({ ...candidate, id: "npm:" + _pkg }, ctx);
+      events.emit("synthesize.dsh_plugin_read", { proposal_id, candidate_id, package_name: _pkg, error: facts.error });
+    } catch (e) {
+      events.emit("synthesize.dsh_plugin_read_failed", { proposal_id, candidate_id, error: e.message });
+    }
   } else if (candidate.kind === "repo" && candidate.url) {
     try {
       facts = await readRepoTerritory(candidate, ctx);

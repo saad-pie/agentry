@@ -36,7 +36,7 @@ export const SYNTHESIS_SUPPORT = {
   "nuget":            { synthesizable: false, runtime: "dotnet_missing" },
   "gomod":            { synthesizable: true,  runtime: "go" },
   "huggingface":      { synthesizable: false, runtime: "model_not_runtime_lib" },
-  "dsh_plugins":      { synthesizable: false, runtime: "plugin_lifecycle" },
+  "dsh_plugins":      { synthesizable: true,  runtime: "node" },
 };
 
 export function supportFor(source) {

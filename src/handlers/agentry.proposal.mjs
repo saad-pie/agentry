@@ -87,6 +87,7 @@ Rules:
 // the LLM blows context (proposal.created with candidates:207, model_used:null
 // because every LLM call failed). Cap to top 15 installable-first.
 const PREFIX_RANK = {
+  "dsh_plugin:": 110,
   "npm:": 100, "pypi:": 95, "agentskills:": 90, "clawhub:": 85,
   "hermes_atlas:": 80, "mcp:": 75, "crates:": 70, "gomod:": 65,
   "maven:": 60, "nuget:": 55, "huggingface:": 50,
