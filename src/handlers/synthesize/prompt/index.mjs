@@ -3,7 +3,7 @@
 // Builds the LLM prompt for capability synthesis. Self-contained (no imports);
 // reads from arguments only.
 
-export function buildPrompt({ gap, candidate, facts, shape }) {
+export function buildPrompt({ gap, candidate, facts, shape, references }) {
   const gapJson = JSON.stringify({
     id: gap.id,
     wanted_id: gap.wanted_id || gap.id.replace(/^gap:/, ""),
@@ -62,6 +62,21 @@ export function buildPrompt({ gap, candidate, facts, shape }) {
   lines.push("=== REPO FACTS ===");
   lines.push(repoFacts);
   lines.push("");
+  if (references && references.length > 0) {
+    lines.push("=== WORKING REFERENCE (verified, real .mjs file) ===");
+    lines.push("This capability already works in production. Study its structure: await import() for modules (NEVER require), process.env.UPPER_CASE for inputs, console.log(JSON.stringify({...})) as the last line. Copy the STRUCTURE, adapt the package.");
+    for (const r of references) {
+      lines.push("");
+      lines.push("Filename: " + r.filename);
+      lines.push("Kind: " + r.kind);
+      lines.push("Accepts: " + r.accepts.join(", "));
+      lines.push("Produces: " + r.produces.join(", "));
+      lines.push("---");
+      lines.push(r.source);
+      lines.push("=== END REFERENCE ===");
+    }
+    lines.push("");
+  }
   lines.push("=== THE SHAPE — fill every slot, do not add or skip steps ===");
   lines.push("Kind: " + (gap.wanted_kind || "unknown"));
   lines.push("Description: " + shape.description);

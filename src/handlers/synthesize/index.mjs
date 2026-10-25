@@ -25,6 +25,7 @@ import { readCrate } from "./readers/crate.mjs";
 import { readGoModule } from "./readers/gomod.mjs";
 import { readAgentSkill } from "./readers/skill.mjs";
 import { buildPrompt } from "./prompt/index.mjs";
+import { pickReferenceHandlers } from "./references.mjs";
 import { renderHandler } from "./render/plan.mjs";
 import { renderSkillHandler } from "./render/skill.mjs";
 import { renderSeed } from "./render/seed.mjs";
@@ -184,7 +185,17 @@ export default async function agentrySynthesize(input, ctx) {
     throw new Error("agentry.synthesize: candidate " + candidate.id + " rejected — " + String(facts.error || facts.rejected_reason).slice(0, 400));
   }
 
-  const prompt = buildPrompt({ gap, candidate, facts, shape });
+  const _hasReadme = facts.readme && facts.readme.length > 500;
+  const _refs = _hasReadme
+    ? []
+    : pickReferenceHandlers(gap.wanted_description || candidate.id, gap.wanted_kind || "tool", 2);
+  events.emit("synthesize.references_picked", {
+    proposal_id, candidate_id,
+    count: _refs.length,
+    ids: _refs.map(r => r.id),
+    skipped_has_readme: _hasReadme,
+  });
+  const prompt = buildPrompt({ gap, candidate, facts, shape, references: _refs });
 
   const messages = [
     { role: "system", content: "You output only JSON. No prose. No fences." },
