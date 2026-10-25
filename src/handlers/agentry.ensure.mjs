@@ -92,10 +92,9 @@ export default async function agentryEnsure(input, ctx) {
   // clean exit). The successful png_to_jpg probe took ~90s with 300s outer.
   // 180s gives DSH room for install + test + iterate without killing valid
   // work, while still bounding worst-case latency.
-  const _dshTimeoutMs = Math.min(
-    Math.max(90000, Number(timeout_ms) || 180000),
-    180000
-  );
+  const _totalMs = Math.max(2000, Math.min(600000, Number(timeout_ms) || 180000));
+  const _ensureDeadline = started + _totalMs;
+  const _dshTimeoutMs = Math.max(30000, Math.min(_totalMs - (Date.now() - started), 180000));
   const _hasSynthesisHint = !!(wanted_kind || wanted_description);
   if (_hasSynthesisHint) {
     try {
@@ -137,8 +136,8 @@ export default async function agentryEnsure(input, ctx) {
 
   // ── 3. Poll ──
   const pollMs = 2000;
-  const timeoutMs = Math.max(2000, Math.min(600000, Number(timeout_ms) || 120000));
-  const deadline = Date.now() + timeoutMs;
+  const timeoutMs = _totalMs;
+  const deadline = _ensureDeadline;
   while (Date.now() < deadline) {
     await sleep(pollMs);
     cap = checkAvailable(graph, capability_id);

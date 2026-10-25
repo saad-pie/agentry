@@ -414,6 +414,11 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     events.emit("dsh_synth.verify_failed", { capability_id, reason });
   }
 
+  try {
+    const _tg = graph.getCapability("gap:" + trialCapId);
+    if (_tg && !_tg.retired_at) graph.retireCapability(_tg.id, "trial_ephemeral_failed");
+  } catch {}
+
   try { graph.retireCapability(trialCapId, "trial verification complete"); } catch {}
 
   if (!verified) {

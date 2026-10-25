@@ -15,8 +15,12 @@ function tokenize(s) {
 function score(c, tokens, kind) {
   let n = 0;
   if (c.kind === kind) n += 5;
-  const hay = tokenize(c.id + " " + c.accepts.join(" "));
-  for (const t of tokens) if (hay.includes(t)) n++;
+  const idToks = tokenize(c.id);
+  const accToks = tokenize(c.accepts.join(" "));
+  for (const t of tokens) {
+    if (idToks.includes(t)) n += 3;
+    else if (accToks.includes(t)) n += 1;
+  }
   return n;
 }
 
@@ -29,6 +33,7 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
     let seed;
     try { seed = JSON.parse(readFileSync(join(SEEDS_DIR, f), "utf8")); } catch { continue; }
     if (!seed.id || !seed.handler_file) continue;
+    if (seed.source !== "dsh_synth:verified") continue;
     if (!existsSync(seed.handler_file)) continue;
     candidates.push({
       id: seed.id, kind: seed.kind || "tool",
