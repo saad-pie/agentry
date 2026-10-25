@@ -227,6 +227,76 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     return { output: { verified: false, capability_id, reason: "missing_test_script" }, cost: { time_ms: Date.now() - started } };
   }
 
+  // ── 1.5 v0.52.29 — run test_script FIRST ──
+  // v0.52.28 asked DSH to provide a test_script field but never ran it.
+  // That made the field a suggestion, not a constraint. This block actually
+  // executes test_script against the real package (installed fresh), verifies
+  // the output file appears with >0 bytes, and only THEN proceeds to render
+  // the handler. If test_script fails, we return early with a specific reason
+  // so the caller knows it's a package/API issue (e.g. markdown-pdf@11 uses
+  // Promise not stream) — not a handler-render issue.
+  const preTestSession = "dsh_synth_preverify_" + safeId + "_" + Date.now().toString(36);
+  try {
+    await ctx.invoke("agentry.os", { action: "session.create", id: preTestSession });
+
+    const installRes = await ctx.invoke("agentry.os", {
+      action: "node.install", session: preTestSession, packages: [spec.package_name],
+    }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+    if (!installRes.ok) {
+      events.emit("dsh_synth.pretest_install_failed", { capability_id, package_name: spec.package_name, error: installRes.error?.message });
+      return { output: { verified: false, capability_id, reason: "pretest_install_failed: " + (installRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
+    }
+
+    const fixtureCmd = String(spec.test_fixture || "");
+    if (fixtureCmd) {
+      const fixRes = await ctx.invoke("agentry.os", { action: "shell.spawn", session: preTestSession, cmd: "sh", args: ["-c", fixtureCmd], timeout_ms: 30000 });
+      const fixPid = fixRes.output?.result?.pid;
+      if (fixPid) {
+        await ctx.invoke("agentry.os", { action: "shell.read", session: preTestSession, pid: fixPid, wait_ms: 30000 });
+      }
+    }
+
+    const testEnv = {
+      INPUT_PATH: spec.test_input_path || "/tmp/dsh_test_input",
+      OUTPUT_PATH: spec.test_output_path || "/tmp/dsh_test_output",
+    };
+    const testRes = await ctx.invoke("agentry.os", {
+      action: "node.run", session: preTestSession, code: String(spec.test_script),
+      env: testEnv, timeout_ms: 45000,
+    }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+    const testStderr = String(testRes.output?.result?.stderr || "");
+    const testExitCode = testRes.output?.result?.exit_code;
+    if (!testRes.ok || (testExitCode !== 0 && testExitCode !== null && testExitCode !== undefined)) {
+      events.emit("dsh_synth.pretest_failed", {
+        capability_id, package_name: spec.package_name,
+        exit_code: testExitCode,
+        stderr: testStderr.slice(0, 500),
+      });
+      return { output: { verified: false, capability_id, reason: "pretest_failed: exit " + testExitCode + " — " + testStderr.slice(0, 200) }, cost: { time_ms: Date.now() - started } };
+    }
+
+    const outCheck = await ctx.invoke("agentry.os", {
+      action: "shell.spawn", session: preTestSession, cmd: "sh",
+      args: ["-c", "test -s '" + testEnv.OUTPUT_PATH + "' && stat -c %s '" + testEnv.OUTPUT_PATH + "'"],
+      timeout_ms: 5000,
+    });
+    const outPid = outCheck.output?.result?.pid;
+    let outBytes = 0;
+    if (outPid) {
+      const outRead = await ctx.invoke("agentry.os", { action: "shell.read", session: preTestSession, pid: outPid, wait_ms: 5000 });
+      outBytes = parseInt(String(outRead.output?.result?.stdout || "0").trim(), 10);
+    }
+    if (!outBytes || outBytes <= 0) {
+      events.emit("dsh_synth.pretest_no_output", { capability_id, package_name: spec.package_name, output_path: testEnv.OUTPUT_PATH });
+      return { output: { verified: false, capability_id, reason: "pretest_no_output: " + testEnv.OUTPUT_PATH }, cost: { time_ms: Date.now() - started } };
+    }
+
+    events.emit("dsh_synth.pretest_passed", { capability_id, package_name: spec.package_name, output_bytes: outBytes });
+  } catch (e) {
+    events.emit("dsh_synth.pretest_threw", { capability_id, error: e.message });
+    return { output: { verified: false, capability_id, reason: "pretest_threw: " + e.message }, cost: { time_ms: Date.now() - started } };
+  }
+
   // ── 2. Render handler ──
   mkdirSync(HANDLERS_DIR, { recursive: true });
   mkdirSync(SEEDS_DIR, { recursive: true });
