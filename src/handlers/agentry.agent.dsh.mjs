@@ -201,12 +201,7 @@ function _buildHeadlessPatch(provider, model) {
     + "  name: \"@deepseek-ai/dsh-agent-default-model\"\n"
     + "  config:\n"
     + "    provider: " + provider + "\n"
-    + "    model: " + model + "\n"
-    + "- id: agent-preset-registry\n"
-    + "  name: \"@deepseek-ai/dsh-agent-preset-registry\"\n"
-    + "  config:\n"
-    + "    default: standard\n"
-    + "    selectedDefault: cordis\n";
+    + "    model: " + model + "\n";
 }
 
 function _isFallbackableStderr(stderr, exit_code = null, final_text = null) {
@@ -328,11 +323,6 @@ export default async function agentryAgentDsh(input, ctx) {
   config:
     provider: requesty
     model: nemotron-3-ultra-550b-a55b
-- id: agent-preset-registry
-  name: "@deepseek-ai/dsh-agent-preset-registry"
-  config:
-    default: standard
-    selectedDefault: cordis
 `;
 
   try {

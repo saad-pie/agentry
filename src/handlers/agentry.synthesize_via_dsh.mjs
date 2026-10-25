@@ -531,7 +531,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     trial_ok: verified,
     elapsed_ms: Date.now() - started,
     error_class: verified ? null : String(reason || "unknown").split(":")[0],
-    used_composition: Object.keys(_preInvoke).length > 0,
+    used_composition: Object.keys((spec.glue && spec.glue.pre_invoke) || {}).length > 0,
   };
   recordOutcome(_outRec);
   writeReference({ ..._outRec, spec_notes: spec.notes ?? null, error: verified ? null : reason });
