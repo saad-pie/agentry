@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { extractJson } from "./synthesize/validate/json.mjs";
 import { pickReferenceHandlers, formatReferences } from "./synthesize/references.mjs";
+import { recordOutcome, writeReference } from "./synthesize/outcomes.mjs";
 
 const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR || "/tmp/home/.dsh/agentry-synthesized/handlers";
 const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR || "/tmp/home/.dsh/agentry-synthesized/seeds";
@@ -72,7 +73,8 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push('  "produces": ' + JSON.stringify(produces) + ",");
   L.push('  "test_fixture": "<bash command creating a real fixture file at test_input_path>",');
   L.push('  "test_input_path": "/tmp/dsh_test_input.<ext>",');
-  L.push('  "test_output_path": "/tmp/dsh_test_output.<ext>"');
+  L.push('  "test_output_path": "/tmp/dsh_test_output.<ext>",');
+  L.push('  "notes": "<free-form: anything a future AI should know about this capability. Gotchas, edge cases, packages tried and discarded, API quirks. No schema — write whatever helps.>"');
   L.push("}");
   L.push("");
   L.push("COMPOSITION (PREFERRED when applicable):");
@@ -515,6 +517,24 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   } catch (e) {
     events.emit("dsh_synth.gap_retire_failed", { capability_id, error: e.message });
   }
+
+  // v0.55.0 — write-only observation. Two files per synthesis:
+  // 1. outcomes.jsonl (structured) — one append per attempt
+  // 2. references/<id>.json (free-form) — DSH-authored notes + trial result
+  // Neither is read yet. Data accumulates for v0.55.1.
+  const _outRec = {
+    capability_id,
+    intent,
+    kind: wanted_kind || "tool",
+    refs_shown: _refs.map(r => r.id),
+    packages: spec.packages || [spec.package_name],
+    trial_ok: verified,
+    elapsed_ms: Date.now() - started,
+    error_class: verified ? null : String(reason || "unknown").split(":")[0],
+    used_composition: Object.keys(_preInvoke).length > 0,
+  };
+  recordOutcome(_outRec);
+  writeReference({ ..._outRec, spec_notes: spec.notes ?? null, error: verified ? null : reason });
 
   events.emit("dsh_synth.completed", {
     capability_id, handler_path: handlerPath, package: spec.package_name,
