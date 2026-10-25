@@ -59,6 +59,7 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push("RETURN THIS JSON SHAPE:");
   L.push("{");
   L.push('  "package_name": "<npm package name>",');
+  L.push('  "test_script": "<JS code that imports the package and runs the ACTUAL operation on test_input_path, writing to test_output_path. This is what we run FIRST to verify the package works in this environment. If this does not create test_output_path with >0 bytes, your approach is wrong.>",');
   L.push('  "code_body": "<JS code that runs in an async kernel function. Read inputs from process.env.UPPERCASE_KEY. Write output file. Last line must be console.log(JSON.stringify({...})).>",');
   L.push('  "accepts": ' + JSON.stringify(accepts) + ",");
   L.push('  "produces": ' + JSON.stringify(produces) + ",");
@@ -68,6 +69,8 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push("}");
   L.push("");
   L.push("RULES:");
+  L.push("- CRITICAL: many packages change APIs between major versions. Do NOT assume pipe patterns work. Check the ACTUAL version's README/API. If the current README shows `await pkg(...)` (promise), await it. If it shows `.pipe()` (stream), use pipe. If unsure, wrap in try/catch and log the error so we can see it.");
+  L.push("- test_script MUST be a complete working script that takes test_input_path and produces test_output_path. Run the ACTUAL operation. If test_script doesn't create the output file, your code_body won't either. Fix the approach BEFORE returning the spec.");
   L.push("- code_body runs INSIDE an async function body. Use `const fs = await import('node:fs')` for imports. NO top-level imports.");
   L.push("- Inputs come from process.env." + env_map + ". NOT function parameters.");
   L.push("- Emit final output with `console.log(JSON.stringify({...}))` as the LAST line.");
@@ -215,6 +218,13 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   if (!spec.package_name || !spec.code_body) {
     events.emit("dsh_synth.incomplete_spec", { capability_id, has_pkg: !!spec.package_name, has_code: !!spec.code_body });
     return { output: { verified: false, capability_id, reason: "incomplete_spec" }, cost: { time_ms: Date.now() - started } };
+  }
+  // v0.52.28 — require test_script. This is what we run BEFORE rendering the
+  // handler. If the package's API doesn't work in this environment, test_script
+  // fails and we abort early instead of producing a broken handler.
+  if (!spec.test_script) {
+    events.emit("dsh_synth.missing_test_script", { capability_id, package_name: spec.package_name });
+    return { output: { verified: false, capability_id, reason: "missing_test_script" }, cost: { time_ms: Date.now() - started } };
   }
 
   // ── 2. Render handler ──
