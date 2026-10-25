@@ -23,6 +23,7 @@ import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { extractJson } from "./synthesize/validate/json.mjs";
+import { pickReferenceHandlers, formatReferences } from "./synthesize/references.mjs";
 
 const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR || "/tmp/home/.dsh/agentry-synthesized/handlers";
 const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR || "/tmp/home/.dsh/agentry-synthesized/seeds";
@@ -36,7 +37,7 @@ function sanitizeId(id) {
   return s.slice(0, 80);
 }
 
-function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint }) {
+function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, references }) {
   const accepts = accepts_hint || { input_path: "string", output_path: "string" };
   const produces = produces_hint || { output_path: "string", bytes: "number" };
   const env_map = Object.keys(accepts).map(k => k.toUpperCase()).join(", ");
@@ -46,6 +47,11 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   if (wanted_kind) L.push("Wanted kind: " + wanted_kind);
   if (wanted_description) L.push("Wanted description: " + wanted_description);
   L.push("");
+  if (references && references.length) {
+    L.push(references);
+    L.push("CRITICAL: study the reference above. Your test_script and code_body MUST use the same patterns: await import() for modules (NEVER require), process.env.UPPER_CASE for inputs, console.log(JSON.stringify({...})) as the last line. Copy the STRUCTURE, adapt the package.");
+    L.push("");
+  }
   L.push("TASK: Return a JSON SPEC describing a working Node.js implementation.");
   L.push("DO NOT write the full handler file — our code renders the pipeline template around your spec.");
   L.push("");
@@ -198,7 +204,9 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   events.emit("dsh_synth.started", { capability_id, intent, wanted_kind, timeout_ms: timeoutMs });
 
   // ── 1. Ask DSH for a spec ──
-  const prompt = buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint });
+  const _refs = pickReferenceHandlers(String(intent || capability_id), wanted_kind || "tool", 2);
+  events.emit("dsh_synth.references_picked", { capability_id, count: _refs.length, ids: _refs.map(r => r.id) });
+  const prompt = buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, references: formatReferences(_refs) });
   let dshRes;
   try {
     dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: timeoutMs },
