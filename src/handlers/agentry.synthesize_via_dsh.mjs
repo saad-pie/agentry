@@ -154,13 +154,32 @@ function renderHandler(spec, capability_id) {
 function parseDshSpec(text) {
   if (!text) return null;
   let s = String(text).trim();
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) s = fence[1].trim();
+  // v0.52.30 — prior version used `/```(?:json)?\s*([\s\S]*?)```/` (lazy).
+  // If DSH's JSON contains ``` inside a code-fence *inside a string value*
+  // (e.g. test_script with ```javascript), the lazy match grabbed the
+  // INNER backticks and truncated the JSON to garbage. That's why v0.52.29
+  // returned no_spec with a valid 1708-char JSON that we mangled.
+  // Fix: only strip fence if it wraps the ENTIRE string. Use anchored
+  // greedy match. If content starts with `{`, treat as raw JSON — never
+  // fence-strip.
+  if (!s.startsWith("{")) {
+    const wholeFence = s.match(/^```(?:json)?\s*\n?([\s\S]*)\n?```\s*$/);
+    if (wholeFence) s = wholeFence[1].trim();
+  }
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first === -1 || last <= first) return null;
   s = s.slice(first, last + 1);
-  try { return JSON.parse(s); } catch { return null; }
+  try { return JSON.parse(s); } catch (e) {
+    // Log detailed parse failure for future debugging
+    if (typeof globalThis !== "undefined") globalThis.__LAST_DSH_PARSE_ERR = {
+      error: e.message,
+      len: s.length,
+      head: s.slice(0, 200),
+      tail: s.slice(-200),
+    };
+    return null;
+  }
 }
 
 export default async function agentrySynthesizeViaDsh(input, ctx) {
@@ -208,7 +227,9 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
       tool_calls: _tc.map(t => t.tool).slice(0, 20),
       messages_count: (dshRes.output?.messages || []).length,
       stderr_preview: String(dshRes.output?.stderr || "").slice(0, 300),
+      parse_error: (typeof globalThis !== "undefined" && globalThis.__LAST_DSH_PARSE_ERR) || null,
     });
+    if (typeof globalThis !== "undefined") delete globalThis.__LAST_DSH_PARSE_ERR;
     return { output: { verified: false, capability_id, reason: "no_spec_in_dsh_output" }, cost: { time_ms: Date.now() - started } };
   }
   if (spec.error) {
