@@ -47,8 +47,12 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
     });
   }
   const tokens = tokenize(intent);
-  const scored = candidates.map(c => ({ c, s: score(c, tokens, kind) }))
-    .filter(x => x.s > 0).sort((a, b) => b.s - a.s);
+  if (tokens.length === 0) return [];
+  const scored = candidates.map(c => ({
+    c, s: score(c, tokens, kind),
+    real: tokens.some(t => tokenize(c.id).includes(t) || tokenize(c.accepts.join(" ")).includes(t)),
+  }))
+    .filter(x => x.real && x.s > 0).sort((a, b) => b.s - a.s);
   const picked = [];
   for (const { c } of scored) {
     if (picked.length >= max) break;
