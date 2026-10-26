@@ -597,11 +597,15 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
       }
       // Build fixture input: use DSH's test_input_path if provided, else /tmp
       const _fvInput = {};
+      // v0.56.11 — check output first. "output_path".endsWith("_path") is
+      // true, so the input branch swallowed output_path. Verification was
+      // reading the input file — silently passing for text formats, wrongly
+      // failing for binary formats where it matters most.
       for (const k of Object.keys(spec.accepts || {})) {
-        if (k === "input_path" || k.endsWith("_path") || k.endsWith("_file")) {
-          _fvInput[k] = spec.test_input_path || "/tmp/hv_in";
-        } else if (k === "output_path") {
+        if (k === "output_path" || k.endsWith("_out") || k.indexOf("output_") === 0) {
           _fvInput[k] = "/tmp/hv_out" + (spec.test_output_path ? ("." + spec.test_output_path.split(".").pop()) : "");
+        } else if (k === "input_path" || k.endsWith("_path") || k.endsWith("_file") || k.endsWith("_in")) {
+          _fvInput[k] = spec.test_input_path || "/tmp/hv_in";
         } else {
           _fvInput[k] = "test";
         }
