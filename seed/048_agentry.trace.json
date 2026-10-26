@@ -1,0 +1,21 @@
+{
+  "id": "agentry.trace",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.trace",
+  "accepts": {
+    "capability_id": { "type": "string", "optional": true },
+    "gap_id": { "type": "string", "optional": true },
+    "limit": { "type": "number", "optional": true }
+  },
+  "produces": {
+    "target": "string",
+    "event_count": "number",
+    "showing": "number",
+    "timeline": "array"
+  },
+  "cost": { "money_usd": 0, "time_ms": 200 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.56.8 — reconstruct the timeline of events for a capability from events.jsonl. Filters by capability_id or gap_id, sorts chronologically, returns structured timeline. Used by the trace MCP tool."
+}
