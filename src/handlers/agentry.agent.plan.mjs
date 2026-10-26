@@ -153,7 +153,22 @@ function buildPlanPrompt({ intent, capabilities, maxSteps }) {
     "   Do NOT use it for one-shot transformations that a direct capability\n" +
     "   can already accomplish — those are 2 steps (produce → consume), not\n" +
     "   wrapped in an agent. The result of a DSH step is in `final`; chain\n" +
-    "   via \"$prev.final\" if a later step needs it.";
+    "   via \"$prev.final\" if a later step needs it.\n" +
+    "\n" +
+    "10. NOVEL TASK DISAMBIGUATION — when no capability fits and you are\n" +
+    "    choosing between INVENT (rule 1c) and DSH (rule 9), the decision\n" +
+    "    hinges on REPEATABILITY, not complexity:\n" +
+    "    - INVENT if the task is a repeatable TRANSFORMATION: convert X to Y,\n" +
+    "      extract Z from W, render N from M, transform any file of type A\n" +
+    "      into type B. The pattern recurs across inputs. Capabilities save\n" +
+    "      the next hundred callers 100+ seconds each.\n" +
+    "    - ROUTE TO DSH if the task is one-off EXPLORATION: research a topic,\n" +
+    "      find the best of N alternatives, debug this specific failure,\n" +
+    "      browse a specific website, or produce a specific answer that will\n" +
+    "      not be asked again. Capabilities here would be permanent overhead\n" +
+    "      for a query that runs once.\n" +
+    "    Default when unsure: INVENT. If the pattern was real, it saves time.\n" +
+    "    If it was not, the capability sits unused and harmless.";
 }
 
 function parseJson(text) {
