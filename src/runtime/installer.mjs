@@ -219,6 +219,34 @@ export async function prepareSession(deps, { capId, session, stack = [], require
     events.emit("installer.post_install_complete", { capId, session });
   }
 
+  // ── dsh_plugin — install DSH plugins via the stable binary ──
+  // v0.56.3 — uses /tmp/home/.dsh-cli/bin/dsh (fixed prefix). Handles
+  // allowBuilds and minimumReleaseAge silent-failure classes explicitly.
+  if (requires.dsh_plugin) {
+    const _raw = requires.dsh_plugin;
+    const _items = Array.isArray(_raw) ? _raw : [_raw];
+    const { installDshPlugin } = await import("./dsh_plugin_installer.mjs");
+    const _defaultProfile = process.env.AGENTRY_DSH_PROFILE || "headless";
+    for (const _item of _items) {
+      const _spec = typeof _item === "string" ? _item : (_item && _item.spec);
+      if (!_spec) continue;
+      const _profile = (typeof _item === "object" && _item.profile) || _defaultProfile;
+      events.emit("installer.dsh_plugin_starting", { capId, session, spec: _spec, profile: _profile });
+      const _r = await installDshPlugin({ profile: _profile, spec: _spec });
+      if (!_r.ok) {
+        events.emit("installer.dsh_plugin_failed", {
+          capId, spec: _spec, profile: _profile,
+          reason: _r.reason, detail: _r.detail, retried: _r.retried,
+        });
+        throw new Error(`installer: dsh_plugin "${_spec}" failed — ${_r.reason}${_r.detail ? ": " + String(_r.detail).slice(0, 300) : ""}`);
+      }
+      steps.push({ step: "dsh_plugin", ok: true, spec: _spec, profile: _profile, reason: _r.reason, retried: _r.retried || false });
+      events.emit("installer.dsh_plugin_complete", {
+        capId, spec: _spec, profile: _profile, reason: _r.reason, retried: _r.retried || false,
+      });
+    }
+  }
+
   await markPrepared(invoke, session, capId);
   events.emit("installer.prepared", { capId, session, steps });
 
