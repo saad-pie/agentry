@@ -520,7 +520,7 @@ export function registerAgentryTools(deps) {
     {
       name: "status",
       description:
-        "Return agentry's current state. Includes: number of capabilities, per-kind counts, a list of every live invokable capability with its accepts/produces schema, recent gaps, and active watches. Call this to know what agentry can do right now and how to invoke it.",
+        "Return agentry's current state. `invokable` = real capabilities (callable now). `metadata` = graph bookkeeping (gaps, watches, edges, watch_results) — not capabilities. `nodes_total` = sum of both. `by_source` breaks invokable into bootstrap (seeds), synthesized (auto-generated), hand_written (declared by dev). Call this to know what agentry can do right now and how to invoke it.",
       inputSchema: {
         type: "object",
         properties: {
@@ -565,8 +565,22 @@ export function registerAgentryTools(deps) {
         }
       }
 
+      let _inv = 0, _bootstrap = 0, _synth = 0, _hand = 0, _meta = 0;
+      for (const c of caps.values()) {
+        if (c.retired_at) continue;
+        if (c.kind === "edge" || c.kind === "capability_gap" || c.kind === "watch_instance" || c.kind === "watch_result" || c.kind === "proposal" || c.kind === "synthesis_attempt") { _meta++; continue; }
+        if (!c.invoked_via) { _meta++; continue; }
+        _inv++;
+        const _src = String(c.source || "");
+        if (_src.startsWith("seed:")) _bootstrap++;
+        else if (_src.startsWith("dsh_synth:") || _src.startsWith("synthesized:")) _synth++;
+        else if (_src.startsWith("hand-written:") || _src.startsWith("adopted:")) _hand++;
+      }
       const out = {
-        capabilities: caps.size,
+        nodes_total: caps.size,
+        invokable: _inv,
+        by_source: { bootstrap: _bootstrap, synthesized: _synth, hand_written: _hand },
+        metadata: _meta,
         by_kind: byKind,
         gaps: gaps.slice(0, 20),
         watches: watches.slice(0, 20),
