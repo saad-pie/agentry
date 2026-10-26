@@ -31,6 +31,7 @@
 import { link, RELATIONS } from "../graph/edges.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { emitTrace, formatTraceEmail } from "./synthesize/outcomes.mjs";
 
 const DEFAULT_NOTIFY = "notify.email.gmail";
 const REASON_SEP = "::";
@@ -458,6 +459,51 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
     new_handler_id,
     repair_reason: repair.reason_for_action ? String(repair.reason_for_action).slice(0, 200) : null,
   });
+  try {
+    const _pkgListR = (synthesis.spec && synthesis.spec.requires && Array.isArray(synthesis.spec.requires.npm)) ? synthesis.spec.requires.npm : [];
+    const _traceR = {
+      trace_id: "trace_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6),
+      source: "mechanical_repaired",
+      capability_id: node.id,
+      intent: proposal.gap_wanted_id || proposal.gap_id || null,
+      wanted_kind: proposal.gap_wanted_kind || "tool",
+      references_shown: [],
+      mechanical_internals: {
+        candidate_id: candidate.id,
+        candidate_kind: candidate.kind,
+        model_used: synthesis.model_used || null,
+        handler_path: repaired_path,
+        trial_session: trial2.session,
+        original_error: String(errMsg || "").slice(0, 200),
+        repair_reason: repair.reason_for_action || null,
+      },
+      spec_summary: {
+        package_name: _pkgListR[0] || null,
+        packages: _pkgListR,
+        accepts_keys: Object.keys((synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.accepts) || {}),
+        produces_keys: Object.keys((synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.produces) || {}),
+      },
+      outcome: { verified: true, via_repair: true },
+      total_ms: Date.now() - started,
+    };
+    emitTrace(ctx.events, _traceR);
+    if (String(process.env.AGENTRY_TRACE_EMAIL || "1") !== "0") {
+      (async () => {
+        try {
+          await ctx.invoke("notify.fallback", {
+            subject: "[agentry] trace (repaired): " + node.id,
+            body_markdown: formatTraceEmail(_traceR),
+            primary: "notify.email.gmail",
+            fallback: "notify.console",
+          }, { tenant: "local", by: "agentry.adopt" });
+        } catch (e) {
+          try { ctx.events.emit("trace_email_failed", { capability_id: node.id, error: String(e.message || "").slice(0, 200) }); } catch {}
+        }
+      })();
+    }
+  } catch (e) {
+    try { ctx.events.emit("trace_emit_failed", { capability_id: node.id, error: String(e.message || "").slice(0, 200) }); } catch {}
+  }
 
   return {
     adopted: {
@@ -840,6 +886,49 @@ export default async function agentryAdopt(input, ctx) {
         handler_path: synthesis.handler_path,
         source: node.source,
       });
+      try {
+        const _pkgList = (synthesis.spec && synthesis.spec.requires && Array.isArray(synthesis.spec.requires.npm)) ? synthesis.spec.requires.npm : [];
+        const _trace = {
+          trace_id: "trace_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6),
+          source: "mechanical",
+          capability_id: node.id,
+          intent: proposal.gap_wanted_id || proposal.gap_id || null,
+          wanted_kind: proposal.gap_wanted_kind || "tool",
+          references_shown: [],
+          mechanical_internals: {
+            candidate_id: candidate.id,
+            candidate_kind: candidate.kind,
+            model_used: synthesis.model_used || null,
+            handler_path: synthesis.handler_path,
+            trial_session: trial.session,
+          },
+          spec_summary: {
+            package_name: _pkgList[0] || null,
+            packages: _pkgList,
+            accepts_keys: Object.keys((synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.accepts) || {}),
+            produces_keys: Object.keys((synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.produces) || {}),
+          },
+          outcome: { verified: true },
+          total_ms: Date.now() - started,
+        };
+        emitTrace(events, _trace);
+        if (String(process.env.AGENTRY_TRACE_EMAIL || "1") !== "0") {
+          (async () => {
+            try {
+              await ctx.invoke("notify.fallback", {
+                subject: "[agentry] trace: " + node.id,
+                body_markdown: formatTraceEmail(_trace),
+                primary: "notify.email.gmail",
+                fallback: "notify.console",
+              }, { tenant: "local", by: "agentry.adopt" });
+            } catch (e) {
+              try { events.emit("trace_email_failed", { capability_id: node.id, error: String(e.message || "").slice(0, 200) }); } catch {}
+            }
+          })();
+        }
+      } catch (e) {
+        try { events.emit("trace_emit_failed", { capability_id: node.id, error: String(e.message || "").slice(0, 200) }); } catch {}
+      }
       // v0.16.0 — typed edges for this adoption.
       try {
         if (proposal.gap_id) {

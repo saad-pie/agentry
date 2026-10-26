@@ -19,7 +19,14 @@ function summarize(e) {
   if (k === "dsh_synth.pretest_failed") return "Pretest failed: " + (e.package_name || "?") + " exit=" + (e.exit_code ?? "?");
   if (k === "dsh_synth.packages_pruned" || k === "dsh_synth.packages_reconciled") return "Packages reconciled: kept=" + JSON.stringify(e.kept || e.imported || []) + " dropped=" + JSON.stringify(e.dropped || e.extra || []);
   if (k === "dsh_synth.gap_retired") return "Gap retired";
-  if (k === "dsh_synth.trace") return "Trace captured: " + ((e.dsh_internals && e.dsh_internals.tool_calls || []).length) + " tool_calls, " + ((e.dsh_internals && e.dsh_internals.thinking || []).length) + " thinking blocks";
+  if (k === "dsh_synth.trace") {
+    if (e.dsh_internals) return "Trace captured (dsh): " + ((e.dsh_internals.tool_calls || []).length) + " tool_calls, " + ((e.dsh_internals.thinking || []).length) + " thinking blocks";
+    return "Trace captured (dsh)";
+  }
+  if (k === "synthesize.trace") {
+    if (e.mechanical_internals) return "Trace captured (mechanical): candidate=" + (e.mechanical_internals.candidate_id || "?") + " model=" + (e.mechanical_internals.model_used || "?") + (e.mechanical_internals.original_error ? " (repaired)" : "");
+    return "Trace captured (mechanical)";
+  }
   if (k === "dsh_synth.completed") return "Completed: " + (e.package || "?") + " (" + (e.ms || 0) + "ms)";
   if (k === "dsh_synth.failed" || k === "dsh_synth.no_spec") return "DSH failed: " + (e.reason || "?");
   if (k === "proposal.created") return "Proposal created: " + (e.recommended_id || "no rec") + " (" + (e.candidates || 0) + " candidates)";
