@@ -146,10 +146,26 @@ export default async function agentryEnsure(input, ctx) {
               // evidence-dev_csv, vb2 returned null for identical candidates).
               // Fall back to top candidate by prefix rank so mechanical gets a chance.
               if (!_recommendedId && _propNode && Array.isArray(_propNode.candidates) && _propNode.candidates.length > 0) {
-                const _ranked = _propNode.candidates.slice().sort((a, b) => {
-                  const _p = (id) => { const s = String(id || ""); if (s.startsWith("npm:")) return 100; if (s.startsWith("pypi:")) return 95; if (s.startsWith("agentskills:")) return 90; if (s.startsWith("clawhub:")) return 85; if (s.startsWith("dsh_plugin:")) return 80; return 10; };
-                  return _p(b.id) - _p(a.id);
-                });
+                // v0.56.17 — token-aware fallback. Prefix-only sorting was
+                // a no-op (all npm get 100, `100-100=0` → stable sort preserves
+                // original order → first candidate wins). csv_to_parquet got
+                // papaparse (CSV reader) instead of parquetjs (parquet writer).
+                // Score by intent tokens in candidate id+name+description.
+                const _intentTokens = (String(capability_id || "") + " " + String(_intent || ""))
+                  .toLowerCase().split(/[^a-z0-9]+/)
+                  .filter(t => t.length >= 3 && !["convert","test","file","make","create","from","into","with"].includes(t));
+                const _scoreFn = (cand) => {
+                  const _hay = (String(cand.id || "") + " " + String(cand.name || "") + " " + String(cand.description || "")).toLowerCase();
+                  let _n = 0;
+                  for (const _t of _intentTokens) if (_hay.includes(_t)) _n += 10;
+                  const _id = String(cand.id || "");
+                  if (_id.startsWith("dsh_plugin:")) _n += 6;
+                  else if (_id.startsWith("npm:")) _n += 5;
+                  else if (_id.startsWith("pypi:")) _n += 4;
+                  else if (_id.startsWith("agentskills:")) _n += 3;
+                  return _n;
+                };
+                const _ranked = _propNode.candidates.slice().sort((a, b) => _scoreFn(b) - _scoreFn(a));
                 _recommendedId = _ranked[0].id;
                 events.emit("ensure.mechanical_fallback_to_top", {
                   capability_id, proposal_id: _prop.output.proposal_id,
