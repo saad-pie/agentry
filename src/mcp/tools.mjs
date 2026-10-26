@@ -533,6 +533,7 @@ export function registerAgentryTools(deps) {
     },
     async (args, _ctx) => {
       const verbose = args?.verbose !== false;
+      if (typeof deps.graph.invalidateCache === "function") deps.graph.invalidateCache();
       const caps = deps.graph.capabilities();
       const byKind = {};
       const invokable = [];
@@ -572,7 +573,7 @@ export function registerAgentryTools(deps) {
         if (!c.invoked_via) { _meta++; continue; }
         _inv++;
         const _src = String(c.source || "");
-        if (_src.startsWith("seed:")) _bootstrap++;
+        if (_src.startsWith("seed:") || _src.startsWith("seeded:")) _bootstrap++;
         else if (_src.startsWith("dsh_synth:") || _src.startsWith("synthesized:")) _synth++;
         else if (_src.startsWith("hand-written:") || _src.startsWith("adopted:")) _hand++;
       }
