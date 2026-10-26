@@ -96,7 +96,11 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
     if (e?.code && e?.message && e.constructor?.name === "AgentryError") {
       result = fail(e);
     } else {
-      result = fail(errors.invokerFailed(cap.invoked_via, e, { capability_id: capabilityId }));
+      const _extraMeta = {};
+      if (e && e.retryable !== undefined) _extraMeta.retryable = e.retryable;
+      if (e && e.retry_after_ms !== undefined) _extraMeta.retry_after_ms = e.retry_after_ms;
+      if (e && e.status !== undefined) _extraMeta.status = e.status;
+      result = fail(errors.invokerFailed(cap.invoked_via, e, { capability_id: capabilityId, ..._extraMeta }));
     }
   }
 

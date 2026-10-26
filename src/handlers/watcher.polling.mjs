@@ -65,6 +65,7 @@ export async function pollWatch(deps, watch) {
   const startedAt = Date.now();
   let candidates = [];
   let errorMsg = null;
+  let errorMeta = null;
 
   try {
     const result = await invoke(deps, watch.source, { query: watch.query, limit: 30 }, {
@@ -86,9 +87,11 @@ export async function pollWatch(deps, watch) {
       candidates = flat;
     } else if (!result.ok) {
       errorMsg = `${result.error.code}: ${result.error.message}`;
+      errorMeta = (result.error && result.error.meta) || null;
     }
   } catch (e) {
     errorMsg = e.message;
+    errorMeta = { retryable: e && e.retryable === true, retry_after_ms: e && e.retry_after_ms };
   }
 
   const seen = new Set(watch.seen_ids || []);
@@ -99,21 +102,52 @@ export async function pollWatch(deps, watch) {
     if (!seen.has(key)) { fresh.push({ key, candidate: c }); seen.add(key); }
   }
 
+  const _consecutive = errorMsg ? Number(watch.consecutive_failures || 0) + 1 : 0;
+  const _now = Date.now();
+  const _retry_after_ms = errorMeta && errorMeta.retry_after_ms ? Number(errorMeta.retry_after_ms) : null;
+  const _shouldDefer = Boolean(errorMsg && (_retry_after_ms !== null || (errorMeta && errorMeta.retryable === true)));
+  const _next_poll_at = _shouldDefer
+    ? _now + (_retry_after_ms !== null ? _retry_after_ms : (Number(watch.interval_ms) || 60000))
+    : _now;
+  const _shouldRetire = _consecutive >= 3;
   const updated = {
     ...watch,
     seen_ids: Array.from(seen).slice(-10000),
-    last_poll_at: Date.now(),
+    last_poll_at: _next_poll_at,
     last_error: errorMsg,
-    updated_at: Date.now(),
+    consecutive_failures: _consecutive,
+    updated_at: _now,
   };
+  if (_shouldDefer) {
+    events.emit("watch.rate_limit_deferred", {
+      watch_id: watch.id, source: watch.source,
+      retry_after_ms: _retry_after_ms,
+      next_poll_in_ms: _next_poll_at - _now,
+      consecutive_failures: _consecutive,
+    });
+  }
   graph.putCapability({
     id: watch.id, kind: "watch_instance",
     seen_ids: updated.seen_ids,
     last_poll_at: updated.last_poll_at,
     last_error: updated.last_error,
+    consecutive_failures: _consecutive,
     updated_at: updated.updated_at,
   });
   watches.set(watch.id, updated);
+  if (_shouldRetire) {
+    try {
+      graph.retireCapability(watch.id, "consecutive_failures_" + _consecutive);
+      watches.delete(watch.id);
+      events.emit("watch.retired_after_failures", {
+        watch_id: watch.id, source: watch.source,
+        consecutive_failures: _consecutive,
+        last_error: String(errorMsg || "").slice(0, 200),
+      });
+    } catch (e) {
+      events.emit("watch.retire_failed", { watch_id: watch.id, error: e.message });
+    }
+  }
 
   events.emit("watch.polled", {
     watch_id: watch.id, source: watch.source,
