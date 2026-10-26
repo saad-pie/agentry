@@ -460,12 +460,15 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
     repair_reason: repair.reason_for_action ? String(repair.reason_for_action).slice(0, 200) : null,
   });
   try {
-    const _pkgListR = (synthesis.spec && synthesis.spec.requires && Array.isArray(synthesis.spec.requires.npm)) ? synthesis.spec.requires.npm : [];
+    // v0.56.19 — same fixes as normal path.
+    const _pkgListR = (synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.requires && Array.isArray(synthesis.spec.capability.requires.npm)) ? synthesis.spec.capability.requires.npm : [];
+    const _gapForTraceR = proposal.gap_id ? graph.getCapability(proposal.gap_id) : null;
+    const _intentForTraceR = (proposal.gap_wanted_description || (_gapForTraceR && _gapForTraceR.wanted_description) || proposal.gap_wanted_id || proposal.gap_id || null);
     const _traceR = {
       trace_id: "trace_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6),
       source: "mechanical_repaired",
       capability_id: node.id,
-      intent: proposal.gap_wanted_id || proposal.gap_id || null,
+      intent: _intentForTraceR,
       wanted_kind: proposal.gap_wanted_kind || "tool",
       references_shown: [],
       mechanical_internals: {
@@ -887,12 +890,16 @@ export default async function agentryAdopt(input, ctx) {
         source: node.source,
       });
       try {
-        const _pkgList = (synthesis.spec && synthesis.spec.requires && Array.isArray(synthesis.spec.requires.npm)) ? synthesis.spec.requires.npm : [];
+        // v0.56.19 — spec shape is {capability: {requires: {npm: [...]}}}, not {requires}. Bug shipped in v0.56.16 read wrong path, always returned null.
+        const _pkgList = (synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.requires && Array.isArray(synthesis.spec.capability.requires.npm)) ? synthesis.spec.capability.requires.npm : [];
+        // v0.56.19 — intent should be the gap's wanted_description, not the capability id.
+        const _gapForTrace = proposal.gap_id ? graph.getCapability(proposal.gap_id) : null;
+        const _intentForTrace = (proposal.gap_wanted_description || (_gapForTrace && _gapForTrace.wanted_description) || proposal.gap_wanted_id || proposal.gap_id || null);
         const _trace = {
           trace_id: "trace_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6),
           source: "mechanical",
           capability_id: node.id,
-          intent: proposal.gap_wanted_id || proposal.gap_id || null,
+          intent: _intentForTrace,
           wanted_kind: proposal.gap_wanted_kind || "tool",
           references_shown: [],
           mechanical_internals: {
