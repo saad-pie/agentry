@@ -22,7 +22,7 @@
 const PROVIDER = process.env.AGENTRY_PLANNER_PROVIDER || "groq";
 const MODEL = process.env.AGENTRY_PLANNER_MODEL || "openai/gpt-oss-120b";
 const DEFAULT_MAX_STEPS = 8;
-const MAX_CAPABILITIES_IN_PROMPT = 60;
+const MAX_CAPABILITIES_IN_PROMPT = 120;
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
 
 const PLANNER_EXCLUDED_IDS = new Set([

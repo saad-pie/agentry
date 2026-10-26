@@ -211,6 +211,53 @@ function parseDshSpec(text) {
   }
 }
 
+function verifyArtifactMagic(buf, expectedExt) {
+  // Minimal magic-byte check. Returns { ok, magic, expected_magic }.
+  if (!buf || buf.length < 8) return { ok: false, magic: null, expected_magic: null, reason: "too_small" };
+  const hex = Buffer.from(buf.slice(0, 16)).toString("hex");
+  const MAGIC = {
+    pdf: "25504446",
+    png: "89504e470d0a1a0a",
+    jpg: "ffd8ff",
+    jpeg: "ffd8ff",
+    gif: "474946",
+    webp: null, // special: RIFF....WEBP, check positions
+    avif: null, // special: ftypavif
+    bmp: "424d",
+    zip: "504b",
+    mp4: null,
+    txt: null,
+    json: null,
+    csv: null,
+    yaml: null,
+    yml: null,
+    toml: null,
+    md: null,
+  };
+  const ext = String(expectedExt || "").toLowerCase().replace(/^\./, "");
+  if (ext === "webp") {
+    const ok = hex.startsWith("52494646") && hex.slice(16, 24) === "57454250";
+    return { ok, magic: hex.slice(0, 16), expected_magic: "52494646...57454250" };
+  }
+  if (ext === "avif") {
+    const ok = hex.slice(8, 20).indexOf("66747970") >= 0 && /61766966|61766973/.test(hex);
+    return { ok, magic: hex.slice(0, 20), expected_magic: "ftypavif" };
+  }
+  const expected = MAGIC[ext];
+  if (expected === null) {
+    // text formats — accept any non-empty content
+    return { ok: true, magic: hex.slice(0, 16), expected_magic: "(text)" };
+  }
+  if (!expected) {
+    return { ok: true, magic: hex.slice(0, 16), expected_magic: "(unknown ext, accepting)" };
+  }
+  return {
+    ok: hex.startsWith(expected),
+    magic: hex.slice(0, 16),
+    expected_magic: expected,
+  };
+}
+
 function formatTraceEmail(t) {
   const L = [];
   L.push("**Trace: " + t.capability_id + "**");
@@ -527,6 +574,96 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     const _tg = graph.getCapability("gap:" + trialCapId);
     if (_tg && !_tg.retired_at) graph.retireCapability(_tg.id, "trial_ephemeral_failed");
   } catch {}
+
+  // v0.56.10 — verify the RENDERED handler, not just DSH's test_script.
+  // DSH's test_script can succeed while code_body uses a different API
+  // and fails on real invocation. This is the "shipped but broken" bug
+  // class (sharp-not-in-requires was one instance). Do one real invoke
+  // with a fixture and check magic bytes on the output artifact.
+  let handlerVerified = false;
+  let handlerVerifyReason = "not_attempted";
+  let handlerVerifyMagic = null;
+  if (verified) {
+    try {
+      const _hvSession = "dsh_synth_handlerv_" + safeId + "_" + Date.now().toString(36);
+      await ctx.invoke("agentry.os", { action: "session.create", id: _hvSession });
+      // Prepare (install packages) for the trial node so the real handler has deps
+      const { prepareSession } = await import("../../runtime/installer.mjs").catch(() => ({ prepareSession: null }));
+      if (prepareSession) {
+        try {
+          await prepareSession({ graph, events, invoke: ctx.invoke },
+            { capId: trialCapId, session: _hvSession });
+        } catch {}
+      }
+      // Build fixture input: use DSH's test_input_path if provided, else /tmp
+      const _fvInput = {};
+      for (const k of Object.keys(spec.accepts || {})) {
+        if (k === "input_path" || k.endsWith("_path") || k.endsWith("_file")) {
+          _fvInput[k] = spec.test_input_path || "/tmp/hv_in";
+        } else if (k === "output_path") {
+          _fvInput[k] = "/tmp/hv_out" + (spec.test_output_path ? ("." + spec.test_output_path.split(".").pop()) : "");
+        } else {
+          _fvInput[k] = "test";
+        }
+      }
+      _fvInput.session = _hvSession;
+      // Write fixture if spec.test_fixture provided
+      const _fixCmd = String(spec.test_fixture || "");
+      if (_fixCmd) {
+        try {
+          const _fx = await ctx.invoke("agentry.os",
+            { action: "shell.spawn", session: _hvSession, cmd: "sh", args: ["-c", _fixCmd], timeout_ms: 20000 });
+          const _fxPid = _fx.output?.result?.pid;
+          if (_fxPid) await ctx.invoke("agentry.os",
+            { action: "shell.read", session: _hvSession, pid: _fxPid, wait_ms: 20000 });
+        } catch {}
+      }
+      // Invoke the real rendered handler
+      const _hvRes = await ctx.invoke(trialCapId, _fvInput, { tenant: "local", by: "agentry.synthesize_via_dsh.verify" });
+      if (!_hvRes.ok) {
+        handlerVerifyReason = "handler_invoke_failed: " + String(_hvRes.error && _hvRes.error.message || "").slice(0, 200);
+      } else {
+        // Check the output file + magic bytes
+        const _outP = _fvInput.output_path;
+        if (_outP) {
+          try {
+            const fs = await import("node:fs");
+            const _st = fs.statSync(_outP);
+            if (_st.isFile() && _st.size > 0) {
+              const _buf = fs.readFileSync(_outP).slice(0, 16);
+              const _mg = verifyArtifactMagic(_buf, _outP.split(".").pop());
+              handlerVerifyMagic = _mg;
+              if (_mg.ok) {
+                handlerVerified = true;
+                handlerVerifyReason = "artifact_verified: " + _outP + " bytes=" + _st.size;
+              } else {
+                handlerVerifyReason = "magic_mismatch: got=" + (_mg.magic || "?") + " expected=" + (_mg.expected_magic || "?");
+              }
+            } else {
+              handlerVerifyReason = "output_file_empty_or_missing: " + _outP;
+            }
+          } catch (e) {
+            handlerVerifyReason = "output_file_check_failed: " + String(e.message || "").slice(0, 200);
+          }
+        } else {
+          handlerVerified = true;
+          handlerVerifyReason = "no_output_path (accepting invoke success)";
+        }
+      }
+    } catch (e) {
+      handlerVerifyReason = "verify_threw: " + String(e.message || "").slice(0, 200);
+    }
+    events.emit("dsh_synth.handler_verified", {
+      capability_id,
+      ok: handlerVerified,
+      reason: handlerVerifyReason,
+      magic: handlerVerifyMagic,
+    });
+    if (!handlerVerified) {
+      verified = false;
+      reason = "handler_not_verified: " + handlerVerifyReason;
+    }
+  }
 
   try { graph.retireCapability(trialCapId, "trial verification complete"); } catch {}
 

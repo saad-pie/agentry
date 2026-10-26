@@ -29,6 +29,15 @@ function summarize(e) {
   if (k === "adoption.capability_added") return "Capability adopted: " + (e.capability_id || "?");
   if (k === "invoke.succeeded") return "Invoke succeeded: " + (e.capability_id || "?") + " (" + (e.ms || 0) + "ms)";
   if (k === "invoke.failed") return "Invoke failed: " + (e.capability_id || "?") + " (" + (e.code || "?") + ")";
+  if (k === "discovery.watch_created") return "watch created: " + (e.watch_id || "?") + " for gap " + (e.gap_id || "?");
+  if (k === "discovery.watch_retired" || k === "adoption.watch_retired") return "watch retired: " + (e.watch_id || "?");
+  if (k === "synthesize.started") return "synthesize starting: candidate=" + (e.candidate_id || "?") + " kind=" + (e.candidate_kind || "?");
+  if (k === "synthesize.completed") return "synthesize done: " + (e.capability_id || "?") + " model=" + (e.model_used || "?");
+  if (k === "proposal.auto_decided") return "proposal auto-decided: " + (e.recommended_id || "no rec");
+  if (k === "capability_gap.recorded") return "gap node written: " + (e.key || "?");
+  if (k === "dsh_synth.handler_verified") return "handler verified: " + (e.ok ? "OK" : "FAIL") + " — " + (e.reason || "?");
+  if (k === "tool" && e.capability_id) return "tool event: " + e.capability_id + (e.ms ? " (" + e.ms + "ms)" : "");
+  if (!k || k === "null") return "(event missing kind field)";
   return k;
 }
 
