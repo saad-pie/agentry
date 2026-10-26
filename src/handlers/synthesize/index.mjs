@@ -35,7 +35,7 @@ import { validatePlan } from "./validate/plan.mjs";
 import { validateSpecConsistency } from "./validate/spec.mjs";
 
 export default async function agentrySynthesize(input, ctx) {
-  const { proposal_id, candidate_id } = input || {};
+  const { proposal_id, candidate_id, id_override } = input || {};
   if (!proposal_id) throw new Error("agentry.synthesize requires proposal_id");
   if (!candidate_id) throw new Error("agentry.synthesize requires candidate_id");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.synthesize requires ctx.invoke");
@@ -285,6 +285,22 @@ export default async function agentrySynthesize(input, ctx) {
     //   npm:topdf      -> npm_topdf
     //   pypi:img2pdf   -> pypi_img2pdf
     //   pdf-lib-table  -> pdf-lib-table  (no source, unchanged)
+    // v0.56.13 — id_override wins. When ensure() calls us via mechanical path,
+    // it passes the caller's wanted_id so the adopted capability can be found
+    // by checkAvailable(). Without this, mechanical produces npm_sharp while
+    // the caller polled for test.png_resize_vb1 — timeout guaranteed.
+    if (id_override && typeof id_override === "string" && id_override.trim()) {
+      const _cleanOverride = id_override.trim().replace(/^gap:/, "").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80);
+      if (_cleanOverride && spec.capability.id !== _cleanOverride) {
+        events.emit("synthesize.capability_id_overridden", {
+          original: spec.capability.id,
+          override: _cleanOverride,
+          candidate_id: candidate.id,
+        });
+        spec.capability.id = _cleanOverride;
+      }
+      // Skip namespacing logic entirely when override is set
+    } else {
     const _candId = String(candidate.id || "");
     const _srcMatch = _candId.match(/^([a-z][a-z0-9_]*):(.*)$/i);
     let _norm;
@@ -304,6 +320,7 @@ export default async function agentrySynthesize(input, ctx) {
       });
       spec.capability.id = _norm;
     }
+    }  // end else (no id_override)
   }
   if (!isSkillWrapper && !spec.glue) {
     throw new Error("agentry.synthesize: plan spec missing glue");

@@ -151,6 +151,7 @@ export default async function agentryEnsure(input, ctx) {
                 });
                 const _adopt = await ctx.invoke("agentry.adopt", {
                   proposal_id: _prop.output.proposal_id,
+                  id_override: capability_id,
                 }, { tenant: "local", by: "agentry.ensure", task_id: ctx.task_id });
                 if (_adopt.ok && _adopt.output && Array.isArray(_adopt.output.adopted) && _adopt.output.adopted.length > 0) {
                   cap = checkAvailable(graph, capability_id);

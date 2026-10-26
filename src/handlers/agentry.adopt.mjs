@@ -477,7 +477,7 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
 }
 
 export default async function agentryAdopt(input, ctx) {
-  const { proposal_id } = input || {};
+  const { proposal_id, id_override } = input || {};
   if (!proposal_id) throw new Error("agentry.adopt requires proposal_id");
   if (typeof ctx.invoke !== "function") {
     throw new Error("agentry.adopt requires ctx.invoke");
@@ -670,10 +670,9 @@ export default async function agentryAdopt(input, ctx) {
     // ── Synthesis path ──
     let synthesis = null;
     try {
-      const synRes = await ctx.invoke("agentry.synthesize", {
-        proposal_id,
-        candidate_id: candidateId,
-      }, { tenant: "local", by: "agentry.adopt" });
+      const _synthInput = { proposal_id, candidate_id: candidateId };
+      if (id_override) _synthInput.id_override = id_override;
+      const synRes = await ctx.invoke("agentry.synthesize", _synthInput, { tenant: "local", by: "agentry.adopt" });
 
       if (!synRes.ok) {
         const errMsg = synRes.error.message;
