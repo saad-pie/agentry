@@ -98,6 +98,28 @@ export class SessionStore {
   }
 
   /**
+   * v0.56.20 — reap idle sessions. Removes from in-memory map but leaves
+   * work/ directory intact (files may still be referenced by artifacts).
+   * Called periodically by server.mjs. Conservative: only reaps sessions
+   * older than maxAgeMs AND idle longer than idleMs. The "default" session
+   * is never reaped.
+   */
+  reap({ maxAgeMs = 24 * 60 * 60 * 1000, idleMs = 60 * 60 * 1000, now = Date.now() } = {}) {
+    const reaped = [];
+    for (const [id, s] of this._cache.entries()) {
+      if (id === "default") continue;
+      const _created = s.created_at || 0;
+      const _lastUsed = s.last_used_at || _created;
+      if (now - _created < maxAgeMs) continue;
+      if (now - _lastUsed < idleMs) continue;
+      this._cache.delete(id);
+      reaped.push({ id, age_ms: now - _created, idle_ms: now - _lastUsed });
+    }
+    if (reaped.length > 0) this._persist();
+    return reaped;
+  }
+
+  /**
    * Resolve a caller-supplied path against the session's cwd, enforcing
    * that the result stays inside the session root. Returns the absolute
    * path or throws with code=NOT_FOUND.

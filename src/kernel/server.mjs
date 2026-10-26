@@ -131,7 +131,15 @@ server.listen(PORT, HOST, () => {
   console.log(`[agentry-kernel] routes: ${Object.keys(ROUTES).length}`);
 });
 
-setInterval(() => shell.reap(), 60_000).unref();
+setInterval(() => {
+  shell.reap();
+  try {
+    const _reaped = sessions.reap();
+    if (_reaped.length > 0) console.log("[kernel] reaped", _reaped.length, "idle sessions");
+  } catch (e) {
+    console.error("[kernel] session reap failed:", e.message);
+  }
+}, 60_000).unref();
 
 process.on("SIGTERM", () => { server.close(() => process.exit(0)); });
 process.on("SIGINT",  () => { server.close(() => process.exit(0)); });

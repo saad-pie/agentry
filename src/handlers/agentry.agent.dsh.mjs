@@ -364,11 +364,24 @@ export default async function agentryAgentDsh(input, ctx) {
       previous_error: _prev_stderr.slice(-300),
     });
 
-    // Write per-attempt profile
+    // v0.56.20 — skip write when unchanged. Saves 200-400ms per synthesis
+    // when the profile already matches the attempt. Fallback chain often
+    // re-writes identical profiles on every call.
     try {
       const fs = await import("node:fs");
       fs.mkdirSync("/tmp/home/.dsh/profiles/headless", { recursive: true });
-      fs.writeFileSync(HEADLESS_PATCH_PATH, _buildHeadlessPatch(_att.provider, _att.model));
+      const _nextPatch = _buildHeadlessPatch(_att.provider, _att.model);
+      let _needsWrite = true;
+      try {
+        const _existing = fs.readFileSync(HEADLESS_PATCH_PATH, "utf8");
+        if (_existing === _nextPatch) _needsWrite = false;
+      } catch {}
+      if (_needsWrite) {
+        fs.writeFileSync(HEADLESS_PATCH_PATH, _nextPatch);
+        events_out.emit("agent.dsh.profile_written", { attempt: _ai + 1, bytes: _nextPatch.length });
+      } else {
+        events_out.emit("agent.dsh.profile_skipped_unchanged", { attempt: _ai + 1 });
+      }
     } catch (e) {
       events_out.emit("agent.dsh.patch_write_failed", { attempt: _ai + 1, error: e.message });
       _prev_stderr = "patch write failed: " + e.message;
