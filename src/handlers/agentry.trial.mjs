@@ -198,6 +198,49 @@ export default async function agentryTrial(input, ctx) {
     };
   }
 
+  // ── 4.5 v0.56.18 — magic-byte verification ──
+  {
+    const _MAGIC = {
+      pdf: "25504446", png: "89504e470d0a1a0a", jpg: "ffd8ff", jpeg: "ffd8ff",
+      gif: "474946", bmp: "424d", zip: "504b", parquet: "50415231",
+      avro: "4f626a01", orc: "4f5243", gz: "1f8b", tar: "75737461",
+    };
+    const _out = (acceptResult && acceptResult.output) || acceptResult || {};
+    const _failures = [];
+    const _checked = [];
+    for (const [key, val] of Object.entries(_out)) {
+      if (typeof val !== "string") continue;
+      if (!/\.(pdf|png|jpg|jpeg|gif|bmp|zip|parquet|avro|orc|gz|tar)$/i.test(val)) continue;
+      const ext = String(val.split(".").pop()).toLowerCase();
+      const expected = _MAGIC[ext];
+      if (!expected) continue;
+      _checked.push({ key, path: val, ext });
+      try {
+        const fsCheck = await import("node:fs");
+        if (!fsCheck.existsSync(val)) { _failures.push(key + ": file_missing"); continue; }
+        const st = fsCheck.statSync(val);
+        if (st.size === 0) { _failures.push(key + ": file_empty"); continue; }
+        const head = fsCheck.readFileSync(val).slice(0, 8).toString("hex");
+        if (!head.startsWith(expected)) {
+          _failures.push(key + ": magic_mismatch ext=" + ext + " got=" + head + " expected=" + expected);
+        }
+      } catch (e) {
+        _failures.push(key + ": check_threw " + e.message);
+      }
+    }
+    if (_failures.length > 0) {
+      events.emit("trial.magic_verify_failed", { capability_id, session: trialSession, failures: _failures });
+      _retire(ctx, capability_id, "trial magic_verify: " + _failures.slice(0, 2).join("; "));
+      return {
+        output: { ok: false, phase: "magic_verify", error: _failures.join("; "), session: trialSession, handler_path },
+        cost: { time_ms: Date.now() - started },
+      };
+    }
+    if (_checked.length > 0) {
+      events.emit("trial.magic_verified", { capability_id, session: trialSession, checked_count: _checked.length });
+    }
+  }
+
   // ── 5. Pass. Clear the trial marker. ──
   try {
     graph.putCapability({
