@@ -93,7 +93,7 @@ export default async function agentryEnsure(input, ctx) {
   // or runs out, DSH gets whatever's left. Total is still timeout_ms.
   {
     const _remainingMs = Math.max(2000, Math.min(600000, Number(timeout_ms) || 180000));
-    const _mechanicalBudgetMs = Math.min(90000, Math.floor(_remainingMs * 0.6));
+    const _mechanicalBudgetMs = Math.min(60000, Math.floor(_remainingMs * 0.4));
     const _mechStart = Date.now();
     const _mechDeadline = _mechStart + _mechanicalBudgetMs;
     const _intent = (wanted_description || capability_id || "").trim();

@@ -731,6 +731,20 @@ export default async function agentryAdopt(input, ctx) {
           error: errMsg, synthesis,
         });
 
+        // v0.56.14 — skip repair when reason.deep recently returned 5xx.
+        // Docx benchmark showed provider 502; retrying burned 30-60s for
+        // a guaranteed failure. Check last 5min of events.
+        let _skipRepair = false;
+        try {
+          const _since = Date.now() - 300000;
+          const _recentFails = events.all().filter(ev => ev.at >= _since && ev.kind === "adoption.repair_failed" && /HTTP 5\d\d|502|503|504/.test(String(ev.message || "")));
+          if (_recentFails.length >= 2) _skipRepair = true;
+        } catch {}
+        if (_skipRepair) {
+          events.emit("adoption.repair_skipped_provider_down", { proposal_id, candidate_id: candidate.id });
+          failed.push({ candidate_id: candidateId, capability_id: synthesis.capability_id, phase: `trial_${phase}`, error: errMsg, handler_path: synthesis.handler_path, repair_attempted: false, repair_note: "skipped: reason.deep provider 5xx" });
+          continue;
+        }
         // v0.32.0 — repair attempt before marking the candidate failed.
         // One attempt per candidate per adopt tick. If repair adopts,
         // the candidate lands in `adopted` (not both lists).
