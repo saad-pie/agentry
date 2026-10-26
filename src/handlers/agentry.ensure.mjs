@@ -140,7 +140,28 @@ export default async function agentryEnsure(input, ctx) {
               _mechReason = "budget_exhausted_after_proposal";
             } else {
               const _propNode = graph.getCapability(_prop.output.proposal_id);
-              const _recommendedId = (_propNode && _propNode.analysis && _propNode.analysis.recommended_id) || null;
+              let _recommendedId = (_propNode && _propNode.analysis && _propNode.analysis.recommended_id) || null;
+              // v0.56.15 — LLM sometimes says "no recommendation" even when a
+              // synthesizable candidate exists (LLM nondeterminism: vb1 picked
+              // evidence-dev_csv, vb2 returned null for identical candidates).
+              // Fall back to top candidate by prefix rank so mechanical gets a chance.
+              if (!_recommendedId && _propNode && Array.isArray(_propNode.candidates) && _propNode.candidates.length > 0) {
+                const _ranked = _propNode.candidates.slice().sort((a, b) => {
+                  const _p = (id) => { const s = String(id || ""); if (s.startsWith("npm:")) return 100; if (s.startsWith("pypi:")) return 95; if (s.startsWith("agentskills:")) return 90; if (s.startsWith("clawhub:")) return 85; if (s.startsWith("dsh_plugin:")) return 80; return 10; };
+                  return _p(b.id) - _p(a.id);
+                });
+                _recommendedId = _ranked[0].id;
+                events.emit("ensure.mechanical_fallback_to_top", {
+                  capability_id, proposal_id: _prop.output.proposal_id,
+                  fallback_id: _recommendedId, candidate_count: _propNode.candidates.length,
+                });
+                // Approve the fallback candidate so adopt will process it
+                try {
+                  const _decisions = Object.assign({}, _propNode.decisions || {});
+                  _decisions[_recommendedId] = { decision: "approved", at: Date.now(), auto: true, source: "ensure_fallback" };
+                  graph.putCapability({ id: _prop.output.proposal_id, kind: "proposal", decisions: _decisions });
+                } catch {}
+              }
               if (!_recommendedId) {
                 _mechReason = "no_recommendation";
               } else {

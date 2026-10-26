@@ -63,6 +63,9 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push("2. `cd /tmp && npm install <pkg>` to verify it installs. Then `node -e \"import('<pkg>').then(m=>console.log('ok'))\"` to verify it loads.");
   L.push("3. Write a small test script that: creates a real fixture, runs the operation, verifies output byte length or magic bytes.");
   L.push("4. Return the JSON below. NO prose. NO markdown fences. Just the JSON.");
+  L.push("   CRITICAL: your FINAL message must be ONE raw JSON object starting with { and ending with }.");
+  L.push("   If you write anything like \"The JSON spec has been returned\" or \"Here is the spec\" or a summary of what you did — you have FAILED.");
+  L.push("   Do not narrate. Do not summarize. Do not explain. Emit the JSON object as your literal final message text.");
   L.push("");
   L.push("RETURN THIS JSON SHAPE:");
   L.push("{");
