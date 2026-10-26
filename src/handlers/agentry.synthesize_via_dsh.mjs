@@ -211,6 +211,46 @@ function parseDshSpec(text) {
   }
 }
 
+function formatTraceEmail(t) {
+  const L = [];
+  L.push("**Trace: " + t.capability_id + "**");
+  L.push("");
+  L.push("- intent: " + (t.intent || "?"));
+  L.push("- kind: " + (t.wanted_kind || "tool"));
+  L.push("- trace_id: " + t.trace_id);
+  L.push("- total_ms: " + t.total_ms);
+  L.push("- outcome: " + (t.outcome && t.outcome.verified ? "verified" : "failed"));
+  L.push("");
+  L.push("**References shown:** " + (t.references_shown && t.references_shown.length ? t.references_shown.join(", ") : "(none)"));
+  L.push("");
+  L.push("**Spec summary:**");
+  L.push("- package_name: " + (t.spec_summary.package_name || "?"));
+  L.push("- packages: " + ((t.spec_summary.packages || []).join(", ") || "?"));
+  L.push("- accepts: " + ((t.spec_summary.accepts_keys || []).join(", ") || "?"));
+  L.push("- produces: " + ((t.spec_summary.produces_keys || []).join(", ") || "?"));
+  L.push("- test_script_len: " + t.spec_summary.test_script_len);
+  L.push("- code_body_len: " + t.spec_summary.code_body_len);
+  L.push("");
+  L.push("**DSH internals:**");
+  L.push("- prompt_len: " + t.dsh_internals.prompt_len);
+  L.push("- tool_calls: " + ((t.dsh_internals.tool_calls || []).length));
+  for (const tc of (t.dsh_internals.tool_calls || []).slice(0, 10)) {
+    L.push("  - " + (tc.tool || "?") + " (" + (tc.status || "?") + "): " + String(tc.input_preview || "").slice(0, 100));
+  }
+  L.push("- thinking_blocks: " + ((t.dsh_internals.thinking || []).length));
+  for (const th of (t.dsh_internals.thinking || []).slice(0, 3)) {
+    L.push("  - " + String(th).slice(0, 300));
+  }
+  L.push("");
+  L.push("**Final output (DSH):**");
+  L.push("```");
+  L.push(String(t.dsh_internals.final_preview || "").slice(0, 800));
+  L.push("```");
+  L.push("");
+  L.push("_Full JSON trace in events.jsonl under kind=dsh_synth.trace, trace_id=" + t.trace_id + "_");
+  return L.join("\n");
+}
+
 export default async function agentrySynthesizeViaDsh(input, ctx) {
   const { capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, timeout_ms } = input || {};
   if (!capability_id) throw new Error("agentry.synthesize_via_dsh requires capability_id");
@@ -535,6 +575,62 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   };
   recordOutcome(_outRec);
   writeReference({ ..._outRec, spec_notes: spec.notes ?? null, error: verified ? null : reason });
+
+  // v0.56.8 — trace capture. Runs in parallel via setImmediate so the
+  // response returns before the trace lands. Set AGENTRY_TRACE_EMAIL=0
+  // to disable the email. Trace JSON always lands in events.jsonl.
+  {
+    const _traceId = "trace_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
+    const _tracePayload = {
+      trace_id: _traceId,
+      capability_id,
+      intent,
+      wanted_kind: wanted_kind || "tool",
+      references_shown: _refs.map(r => r.id),
+      dsh_internals: {
+        prompt_len: prompt.length,
+        prompt_preview: prompt.slice(0, 1500),
+        thinking: (dshRes.output?.messages || []).filter(m => m.role === "thinking").map(m => String(m.text || "").slice(0, 800)),
+        tool_calls: (dshRes.output?.tool_calls || []).map(tc => ({
+          tool: tc.tool, status: tc.status,
+          input_preview: JSON.stringify(tc.input || {}).slice(0, 400),
+        })),
+        usage: dshRes.output?.usage || {},
+        turn_count: dshRes.output?.turn_count || 0,
+        step_count: dshRes.output?.step_count || 0,
+        final_preview: finalText.slice(0, 1000),
+        duration_ms: dshRes.output?.duration_ms || 0,
+      },
+      spec_summary: {
+        package_name: spec.package_name,
+        packages: spec.packages,
+        accepts_keys: Object.keys(spec.accepts || {}),
+        produces_keys: Object.keys(spec.produces || {}),
+        test_script_len: String(spec.test_script || "").length,
+        code_body_len: String(spec.code_body || "").length,
+      },
+      outcome: { verified: true },
+      total_ms: Date.now() - started,
+    };
+    setImmediate(() => {
+      try { events.emit("dsh_synth.trace", _tracePayload); } catch {}
+      if (String(process.env.AGENTRY_TRACE_EMAIL || "1") !== "0") {
+        (async () => {
+          try {
+            const _body = formatTraceEmail(_tracePayload);
+            await ctx.invoke("notify.fallback", {
+              subject: "[agentry] trace: " + capability_id,
+              body_markdown: _body,
+              primary: "notify.email.gmail",
+              fallback: "notify.console",
+            }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+          } catch (e) {
+            try { events.emit("dsh_synth.trace_email_failed", { capability_id, error: String(e.message || "").slice(0, 200) }); } catch {}
+          }
+        })();
+      }
+    });
+  }
 
   events.emit("dsh_synth.completed", {
     capability_id, handler_path: handlerPath, package: spec.package_name,

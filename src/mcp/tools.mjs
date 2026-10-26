@@ -511,6 +511,38 @@ export function registerAgentryTools(deps) {
     }
   );
 
+  // --- agentry.trace ---
+  registerTool(
+    {
+      name: "trace",
+      description:
+        "Reconstruct the full timeline of what happened for a specific capability. Filters events.jsonl to events whose capability_id or gap_id matches, sorts chronologically, returns structured timeline. Use after a synthesis to see: which path was tried (mechanical vs DSH), what candidates were proposed, what the trial result was, DSH internals (thinking, tool_calls, spec), and how long each stage took. Pass capability_id for a completed capability, or gap_id for a still-in-flight gap.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          capability_id: { type: "string", description: "The capability id, e.g. 'test.yaml_to_toml_v0567'." },
+          gap_id: { type: "string", description: "Alternative: the gap id, e.g. 'gap:test.yaml_to_toml_v0567'." },
+          limit: { type: "number", description: "Optional. Max events to return (default 1000)." },
+        },
+      },
+    },
+    async (args, _ctx) => {
+      if (!args.capability_id && !args.gap_id) {
+        return { content: [{ type: "text", text: "trace: capability_id or gap_id required" }], isError: true };
+      }
+      if (typeof deps.graph.invalidateCache === "function") deps.graph.invalidateCache();
+      const res = await deps.invoke("agentry.trace", {
+        capability_id: args.capability_id ? String(args.capability_id) : undefined,
+        gap_id: args.gap_id ? String(args.gap_id) : undefined,
+        limit: Math.min(Number(args.limit) || 1000, 2000),
+      }, { tenant: "mcp", by: "mcp.trace" });
+      if (!res.ok) {
+        return { content: [{ type: "text", text: "trace failed: " + (res.error.code || "?") + ": " + (res.error.message || "?") }], isError: true };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(res.output, null, 2) }] };
+    }
+  );
+
   // --- agentry.status ---
   // v0.16.2 — richer output so a caller can decide what to invoke
   // without a second round-trip. Lists each live invokable capability
