@@ -60,8 +60,16 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
       let src = readFileSync(c.handler_file, "utf8");
       const lines = src.split("\n");
       if (lines.length > 140) src = lines.slice(0, 140).join("\n") + "\n// ... (truncated)";
+      let reqNpm = [];
+      try {
+        const seedPath = join(SEEDS_DIR, c.filename.replace(/\.mjs$/, ".json"));
+        if (existsSync(seedPath)) {
+          const seedData = JSON.parse(readFileSync(seedPath, "utf8"));
+          reqNpm = (seedData.requires && Array.isArray(seedData.requires.npm)) ? seedData.requires.npm : [];
+        }
+      } catch {}
       picked.push({ id: c.id, filename: c.filename, kind: c.kind,
-        accepts: c.accepts, produces: c.produces, source: src });
+        accepts: c.accepts, produces: c.produces, requires_npm: reqNpm, source: src });
     } catch {}
   }
   return picked;
@@ -69,14 +77,25 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
 
 export function formatReferences(refs) {
   if (!refs || !refs.length) return "";
-  return refs.map(r =>
-    "=== WORKING REFERENCE (verified, real .mjs file) ===\n"
-    + "Filename: " + r.filename + "\n"
-    + "Kind: " + r.kind + "\n"
-    + "Accepts: " + r.accepts.join(", ") + "\n"
-    + "Produces: " + r.produces.join(", ") + "\n"
-    + "---\n"
-    + r.source + "\n"
-    + "=== END REFERENCE ===\n"
-  ).join("\n");
+  const blocks = refs.map(r => {
+    const reqLine = (r.requires_npm && r.requires_npm.length)
+      ? ("Requires npm: [" + r.requires_npm.join(", ") + "]  <-- USE THESE PACKAGES, DO NOT EXPLORE ALTERNATIVES\n")
+      : "";
+    return "=== WORKING REFERENCE (verified, real .mjs file) ===\n"
+      + "Filename: " + r.filename + "\n"
+      + "Kind: " + r.kind + "\n"
+      + "Accepts: " + r.accepts.join(", ") + "\n"
+      + "Produces: " + r.produces.join(", ") + "\n"
+      + reqLine
+      + "---\n"
+      + r.source + "\n"
+      + "=== END REFERENCE ===\n";
+  }).join("\n");
+  const anyReq = refs.some(r => r.requires_npm && r.requires_npm.length);
+  const hint = anyReq
+    ? ("\nSTRONG HINT: The reference above already proves which packages work. " +
+       "Use those packages with the same import pattern. Do NOT spend time searching npm for alternatives. " +
+       "Your goal is to adapt the reference pattern to the new intent in under 15 tool_calls.\n")
+    : "";
+  return blocks + hint;
 }
