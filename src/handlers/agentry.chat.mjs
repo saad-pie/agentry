@@ -128,6 +128,55 @@ function getPriorTurns(ctx, conversationId) {
   }
 }
 
+function tryDirectMatch(message, graph) {
+  // v0.56.21 — if the message clearly names an existing capability and we
+  // can build its required inputs from path-like tokens in the message,
+  // invoke directly. Skips the entire planner (LLM call ~2-3s) plus the
+  // agent boot + task wrap (~5s). Falls through to planner on any doubt.
+  const tokens = message.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3);
+  if (tokens.length === 0) return null;
+  const candidates = [];
+  for (const c of graph.capabilities().values()) {
+    if (c.retired_at) continue;
+    if (!c.invoked_via) continue;
+    if (c.kind === "agent" || c.kind === "edge" || c.kind === "capability_gap"
+     || c.kind === "watch_instance" || c.kind === "proposal"
+     || c.kind === "synthesis_attempt" || c.kind === "task" || c.kind === "message") continue;
+    const hay = (String(c.id || "") + " " + String(c.notes || "") + " " + String(c.description || "")).toLowerCase();
+    let score = 0;
+    for (const t of tokens) if (hay.includes(t)) score++;
+    if (score > 0) candidates.push({ cap: c, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  const second = candidates[1];
+  if (best.score < 2) return null;
+  if (second && second.score === best.score) return null;
+  // Extract path-like tokens from message
+  const paths = [...message.matchAll(/\/[\w./-]+\.\w{1,6}/g)].map(m => m[0]);
+  const accepts = Object.keys(best.cap.accepts || {});
+  const input = {};
+  const pathKeys = accepts.filter(k => /path|_file$|_dir$/.test(k));
+  if (pathKeys.length > 0 && paths.length > 0) {
+    const used = new Set();
+    for (const k of pathKeys) {
+      const extM = /_(\w+?)(_path|_file|_dir)$/.exec(k);
+      const hint = extM ? extM[1] : null;
+      const match = (hint && paths.find(p => !used.has(p) && p.toLowerCase().includes("." + hint)))
+                 || paths.find(p => !used.has(p));
+      if (match) { input[k] = match; used.add(match); }
+    }
+  }
+  // Require every non-optional accepts key to be filled
+  for (const k of accepts) {
+    const spec = best.cap.accepts[k];
+    const optional = spec && typeof spec === "object" && spec.optional === true;
+    if (!optional && input[k] === undefined) return null;
+  }
+  return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind };
+}
+
 export default async function agentryChat(input, ctx) {
   const {
     message,
@@ -192,6 +241,56 @@ export default async function agentryChat(input, ctx) {
     agent_id: agentId || null,
     message: String(message).slice(0, 2000),
   });
+
+  // ── 2.5 v0.56.21 — fast path: direct match ──
+  const _direct = tryDirectMatch(String(message), graph);
+  if (_direct) {
+    events.emit("chat.direct_match", {
+      conversation_id: conversationId, agent_id: agentId,
+      capability_id: _direct.capability_id, score: _direct.score, gap: _direct.gap, kind: _direct.kind,
+    });
+    const _directStarted = Date.now();
+    try {
+      const _r = await ctx.invoke(_direct.capability_id, _direct.input, {
+        tenant: "local", by: "agentry.chat.direct", task_id: ctx.task_id,
+      });
+      const _directMs = Date.now() - _directStarted;
+      if (_r.ok) {
+        events.emit("chat.direct_success", {
+          conversation_id: conversationId, capability_id: _direct.capability_id, ms: _directMs,
+        });
+        events.emit("chat.assistant_turn", {
+          conversation_id: conversationId, agent_id: agentId,
+          message: "Executed " + _direct.capability_id + " directly (" + _directMs + "ms)",
+        });
+        return {
+          output: {
+            ok: true, conversation_id: conversationId, agent_id: agentId,
+            message: "Executed " + _direct.capability_id + " directly",
+            plan: [{ capability_id: _direct.capability_id, input: _direct.input, why: "direct_match", score: _direct.score }],
+            task: {
+              task_id: null, state: "done",
+              artifacts: _r.output && _r.output.artifacts ? _r.output.artifacts : [],
+              trace: [{ step: 0, capability_id: _direct.capability_id, ok: true, ms: _directMs }],
+              error: null,
+            },
+            executed: true, error: null, via: "direct_match",
+          },
+          cost: { time_ms: Date.now() - started },
+        };
+      }
+      events.emit("chat.direct_failed", {
+        conversation_id: conversationId, capability_id: _direct.capability_id,
+        ms: _directMs, error: _r.error && _r.error.message,
+      });
+      // Fall through — planner might route differently or fix input shape
+    } catch (e) {
+      events.emit("chat.direct_threw", {
+        conversation_id: conversationId, capability_id: _direct.capability_id, error: e.message,
+      });
+      // Fall through
+    }
+  }
 
   // ── 3. Plan ──
   // Prior turns inform the planner via a prefix in the intent.
