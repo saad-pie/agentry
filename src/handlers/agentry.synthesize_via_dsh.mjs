@@ -523,7 +523,10 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   });
 
   // ── 5. Verify via real execution ──
-  const testSession = "dsh_synth_verify_" + safeId + "_" + Date.now().toString(36);
+  // v0.56.22 — reuse pretest session for verify. Same session, packages
+  // already installed there. Saves 5-10s per synthesis on install-heavy
+  // packages and halves session churn (was 2 sessions per synthesis).
+  const testSession = preTestSession;
   let verified = false;
   let reason = "unknown";
   try {
