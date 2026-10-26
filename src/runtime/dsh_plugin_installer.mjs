@@ -56,7 +56,11 @@ function runAdd(dshBin, profile, spec, timeout_ms) {
 function classify(r) {
   const out = (r.stdout || "") + "\n" + (r.stderr || "");
   if (r.exit_code === 0) {
-    if (/already\b.*\b(present|installed)/i.test(out)) return { class: "already_installed" };
+    // pnpm prints "Lockfile is up to date, resolution step is skipped" when no work was done.
+    // "already present|installed|added|in dependencies" also qualifies.
+    if (/Lockfile is up to date|resolution step is skipped|already\s+(present|installed|added|in\s+dependencies)/i.test(out)) {
+      return { class: "already_installed" };
+    }
     return { class: "installed" };
   }
   // allowBuilds — pnpm prints "Ignored build scripts: <name>" or names the key
@@ -75,7 +79,7 @@ function classify(r) {
     return { class: "engines_mismatch", raw: out.slice(-800) };
   }
   // not found
-  if (/ERR_PNPM_FETCH_404|404 Not Found|not found in registry|package not found/i.test(out)) {
+  if (/ERR_PNPM_(FETCH_404|PACKAGE_MANAGER_ADD_RESOLVE_LATEST|PACKAGE_NOT_FOUND)|HTTP\s+status\s+client\s+error\s*\(404|404[\s\S]{0,40}Not\s*Found|not found in registry|package not found/i.test(out)) {
     return { class: "not_found", raw: out.slice(-800) };
   }
   // network
