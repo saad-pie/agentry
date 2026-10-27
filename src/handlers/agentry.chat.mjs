@@ -159,6 +159,7 @@ function tryDirectMatch(message, graph) {
     return _bT - _aT;
   });
   const best = candidates[0];
+  const second = candidates[1];
   if (best.score < 2) return null;
   // Extract path-like tokens from message
   const paths = [...message.matchAll(/\/[\w./-]+\.\w{1,6}/g)].map(m => m[0]);

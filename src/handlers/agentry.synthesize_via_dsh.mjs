@@ -590,12 +590,29 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   }
 
   // ── 6. Write real graph node + seed ──
+  // v0.56.24 — set trial_passed_at + adopted_from so DSH caps are visible
+  // to chat fast path tie-break. Prior version left these null, so when
+  // multiple caps matched the same intent, DSH-verified ones (the working
+  // ones) lost tie-breaks to mechanical caps with real timestamps.
   const seedContent = {
     id: capability_id, kind: "tool", invoked_via: "invoker.in_process_js",
     handler: safeId, handler_file: handlerPath,
     accepts: spec.accepts, produces: spec.produces,
     requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
     source: "dsh_synth:verified",
+    trial: false,
+    trial_passed_at: Date.now(),
+    trial_session: testSession,
+    adopted_from: {
+      candidate_id: "_dsh_synth_" + safeId,
+      candidate_kind: "dsh_synth",
+      synthesized_at: Date.now(),
+      handler_path: handlerPath,
+      seed_path: seedPath,
+      package_name: spec.package_name,
+      packages: spec.packages || [spec.package_name],
+      trial_session: testSession,
+    },
   };
   try { writeFileSync(seedPath, JSON.stringify(seedContent, null, 2)); } catch {}
   graph.putCapability(seedContent);
