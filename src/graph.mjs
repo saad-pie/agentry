@@ -13,7 +13,7 @@
 //     open-ended — a gap node can carry `hits`, a watch node can carry
 //     `seen_ids`, and the graph doesn't need to know about either.
 
-import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync, copyFileSync, readdirSync, unlinkSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, statSync, copyFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { errors } from "./errors.mjs";
 
