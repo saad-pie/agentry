@@ -299,6 +299,19 @@ function verifyArtifactMagic(buf, expectedExt) {
 function formatTraceEmail(t) {
   const L = [];
   L.push("**Trace: " + t.capability_id + "**");
+  // v0.56.34 — enriched. Prep timeline + handler preview before building body.
+  if (t.event_timeline && t.event_timeline.length > 0) {
+    const _t0 = t.event_timeline[0].at || 0;
+    const _lines = [];
+    for (const _e of t.event_timeline) {
+      const _rel = _e.at ? (_e.at - _t0) : 0;
+      _lines.push("+" + _rel + "ms  " + (_e.kind || "?") + (_e.capability_id ? "  " + _e.capability_id : ""));
+    }
+    t._event_lines = _lines;
+  }
+  if (t.handler_source_preview) {
+    t._handler_preview = String(t.handler_source_preview).slice(0, 2500);
+  }
   L.push("");
   L.push("- intent: " + (t.intent || "?"));
   L.push("- kind: " + (t.wanted_kind || "tool"));
@@ -332,6 +345,20 @@ function formatTraceEmail(t) {
   L.push(String(t.dsh_internals.final_preview || "").slice(0, 800));
   L.push("```");
   L.push("");
+  if (t._handler_preview) {
+    L.push("**Handler source (first 2500 chars):**");
+    L.push("```js");
+    L.push(t._handler_preview);
+    L.push("```");
+    L.push("");
+  }
+  if (t._event_lines && t._event_lines.length > 0) {
+    L.push("**Full event timeline (" + t._event_lines.length + " events):**");
+    L.push("```");
+    for (const _ln of t._event_lines) L.push(_ln);
+    L.push("```");
+    L.push("");
+  }
   L.push("_Full JSON trace in events.jsonl under kind=dsh_synth.trace, trace_id=" + t.trace_id + "_");
   return L.join("\n");
 }
@@ -735,6 +762,20 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
       outcome: { verified: true },
       total_ms: Date.now() - started,
     };
+    // v0.56.34 — attach handler source + event timeline for enriched email
+    try {
+      const _fsTrace = await import("node:fs");
+      if (_fsTrace.existsSync(handlerPath)) {
+        _tracePayload.handler_source_preview = _fsTrace.readFileSync(handlerPath, "utf8");
+      }
+      const _all = events.all();
+      const _tStart = started - 2000;
+      const _tEnd = Date.now() + 5000;
+      _tracePayload.event_timeline = _all.filter(_e =>
+        (_e.capability_id === capability_id || (_e.gap_id && String(_e.gap_id).indexOf(safeId) >= 0)) &&
+        _e.at >= _tStart && _e.at <= _tEnd
+      ).sort((a, b) => (a.at || 0) - (b.at || 0)).map(_e => ({ at: _e.at, kind: _e.kind, capability_id: _e.capability_id || null }));
+    } catch {}
     setImmediate(() => {
       try { events.emit("dsh_synth.trace", _tracePayload); } catch {}
       if (String(process.env.AGENTRY_TRACE_EMAIL || "1") !== "0") {
