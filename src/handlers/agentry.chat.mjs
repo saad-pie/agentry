@@ -148,11 +148,18 @@ function tryDirectMatch(message, graph) {
     if (score > 0) candidates.push({ cap: c, score });
   }
   if (candidates.length === 0) return null;
-  candidates.sort((a, b) => b.score - a.score);
+  // v0.56.23 — sort by score, then by trial_passed_at (newest first)
+  // as tiebreaker. Without this, 4 duplicate csv_to_parquet caps all score 3
+  // and the tie returns null → planner picks arbitrary (often the oldest,
+  // broken one). Newest-trial-passed wins ties cleanly.
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const _aT = Number(a.cap.trial_passed_at || a.cap.adopted_from?.synthesized_at || 0);
+    const _bT = Number(b.cap.trial_passed_at || b.cap.adopted_from?.synthesized_at || 0);
+    return _bT - _aT;
+  });
   const best = candidates[0];
-  const second = candidates[1];
   if (best.score < 2) return null;
-  if (second && second.score === best.score) return null;
   // Extract path-like tokens from message
   const paths = [...message.matchAll(/\/[\w./-]+\.\w{1,6}/g)].map(m => m[0]);
   const accepts = Object.keys(best.cap.accepts || {});
