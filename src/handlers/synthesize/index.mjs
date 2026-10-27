@@ -139,7 +139,7 @@ export default async function agentrySynthesize(input, ctx) {
     } catch (e) {
       events.emit("synthesize.dsh_plugin_read_failed", { proposal_id, candidate_id, error: e.message });
     }
-  } else if (candidate.kind === "repo" && candidate.url) {
+  } else if ((candidate.kind === "repo" || candidate.kind === "hermes_repo") && candidate.url) {
     try {
       facts = await readRepoTerritory(candidate, ctx);
       facts.source_kind = "github";
@@ -496,6 +496,39 @@ export default async function agentrySynthesize(input, ctx) {
   }
 
   writeFileSync(seedPath, JSON.stringify(renderSeed(spec, handlerPath), null, 2));
+
+  // v0.56.33 — native skill write. For skill_wrapper specs, also drop the
+  // SKILL.md into DSH's agents-skills directory. DSH discovers it live (file
+  // watcher, no restart) and users get /skillname in the UI. Same skill, two
+  // invocation paths: agentry via ctx.invoke, or DSH UI via /skillname.
+  if (isSkillWrapper && spec.skill && spec.skill.body) {
+    try {
+      const _agentsDir = process.env.DSH_AGENTS_HOME
+        ? join(process.env.DSH_AGENTS_HOME, "skills")
+        : join(process.env.HOME || "/tmp/home", ".agents", "skills");
+      const _skillDir = join(_agentsDir, String(spec.capability.id).replace(/[^a-zA-Z0-9_.-]/g, "_"));
+      mkdirSync(_skillDir, { recursive: true });
+      const _fm = spec.skill.frontmatter || {};
+      const _frontmatter = [
+        "---",
+        "name: " + String(spec.skill.name || spec.capability.id).replace(/:/g, " "),
+        "description: " + String(_fm.description || ("Agentry-synthesized capability: " + spec.capability.id)).replace(/:/g, " -"),
+        "---",
+        "",
+      ].join("\n");
+      writeFileSync(join(_skillDir, "SKILL.md"), _frontmatter + String(spec.skill.body));
+      events.emit("synthesize.skill_md_written", {
+        capability_id: spec.capability.id,
+        path: join(_skillDir, "SKILL.md"),
+        bytes: Buffer.byteLength(_frontmatter + String(spec.skill.body)),
+      });
+    } catch (e) {
+      events.emit("synthesize.skill_md_write_failed", {
+        capability_id: spec.capability.id,
+        error: String(e.message || "").slice(0, 200),
+      });
+    }
+  }
 
   events.emit("synthesize.completed", {
     proposal_id, candidate_id, gap_id: gap.id,

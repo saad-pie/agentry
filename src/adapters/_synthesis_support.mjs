@@ -28,7 +28,7 @@ export const SYNTHESIS_SUPPORT = {
   // throws skill_body_missing. Re-enable when readAgentSkill learns to
   // handle raw repo URLs. Until then rely on clawhub / agentskills_code /
   // npm / pypi, all of which have working fetchers.
-  "hermes_atlas":     { synthesizable: false,        runtime: "hermes_repo_never_wired" },
+  "hermes_atlas":     { synthesizable: true,         runtime: "repo" },
 
   // Discovery-only — no synthesis path exists
   "crates":           { synthesizable: true,  runtime: "rust" },
