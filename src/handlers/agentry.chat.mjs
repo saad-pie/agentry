@@ -162,7 +162,10 @@ function tryDirectMatch(message, graph) {
   const second = candidates[1];
   if (best.score < 2) return null;
   // Extract path-like tokens from message
-  const paths = [...message.matchAll(/\/[\w./-]+\.\w{1,6}/g)].map(m => m[0]);
+  // v0.56.25 — extension up to 12 chars, not 6. `.parquet` (7), `.markdown` (8),
+  // `.typescript` (10) were being truncated (out.parquet → out.parque). The
+  // handler wrote the file correctly; chat looked for the wrong path.
+  const paths = [...message.matchAll(/\/[\w./-]+\.\w{1,12}/g)].map(m => m[0]);
   const accepts = Object.keys(best.cap.accepts || {});
   const input = {};
   const pathKeys = accepts.filter(k => /path|_file$|_dir$/.test(k));
@@ -264,22 +267,48 @@ export default async function agentryChat(input, ctx) {
       });
       const _directMs = Date.now() - _directStarted;
       if (_r.ok) {
+        // v0.56.25 — build artifacts from produces path fields, verify each
+        // exists. Prior version trusted _r.output.artifacts which handlers
+        // never return (handlers return flat fields like {output_path, bytes}).
+        // Result: ok:true with artifacts:[] even when handler wrote a file.
+        const _artifacts = [];
+        const _produces = best.cap.produces || {};
+        const _outputObj = _r.output || {};
+        let _fsMod = null;
+        try { _fsMod = await import("node:fs"); } catch {}
+        if (_fsMod) {
+          for (const _k of Object.keys(_produces)) {
+            const _v = _outputObj[_k];
+            if (typeof _v !== "string" || !_v) continue;
+            if (!/\.\w{2,12}$/.test(_v) && !_v.startsWith("/")) continue;
+            try {
+              const _st = _fsMod.statSync(_v);
+              if (_st.isFile() && _st.size > 0) {
+                _artifacts.push({ kind: "file", field: _k, path: _v, bytes: _st.size, from_step: 0 });
+              }
+            } catch {}
+          }
+        }
+        const _artifactMissing = (_artifacts.length === 0 && Object.keys(_produces).some(k => /path|_file|_out/.test(k)));
         events.emit("chat.direct_success", {
           conversation_id: conversationId, capability_id: _direct.capability_id, ms: _directMs,
+          artifacts_count: _artifacts.length,
+          artifact_missing: _artifactMissing,
         });
         events.emit("chat.assistant_turn", {
           conversation_id: conversationId, agent_id: agentId,
-          message: "Executed " + _direct.capability_id + " directly (" + _directMs + "ms)",
+          message: "Executed " + _direct.capability_id + " directly (" + _directMs + "ms, " + _artifacts.length + " artifacts)",
         });
         return {
           output: {
             ok: true, conversation_id: conversationId, agent_id: agentId,
-            message: "Executed " + _direct.capability_id + " directly",
+            message: "Executed " + _direct.capability_id + " directly (" + _artifacts.length + " artifacts)" +
+              (_artifactMissing ? " — WARNING: no artifact file produced" : ""),
             plan: [{ capability_id: _direct.capability_id, input: _direct.input, why: "direct_match", score: _direct.score }],
             task: {
               task_id: null, state: "done",
-              artifacts: _r.output && _r.output.artifacts ? _r.output.artifacts : [],
-              trace: [{ step: 0, capability_id: _direct.capability_id, ok: true, ms: _directMs }],
+              artifacts: _artifacts,
+              trace: [{ step: 0, capability_id: _direct.capability_id, ok: true, ms: _directMs, output_keys: Object.keys(_outputObj), artifact_missing: _artifactMissing }],
               error: null,
             },
             executed: true, error: null, via: "direct_match",
