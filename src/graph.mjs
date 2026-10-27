@@ -13,7 +13,7 @@
 //     open-ended — a gap node can carry `hits`, a watch node can carry
 //     `seen_ids`, and the graph doesn't need to know about either.
 
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync, copyFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { errors } from "./errors.mjs";
 
@@ -142,6 +142,57 @@ export class CapabilityGraph {
 
     this._append(this.capsFile, node);
     return node;
+  }
+
+  /**
+   * v0.56.31 — compact capabilities.jsonl by folding to last-line-per-id.
+   * The graph is append-only, so a single capability with 50 lifetime writes
+   * produces 50 lines. Fold-on-read only uses the last line per id, so
+   * compaction to N lines (one per id) is semantically identical.
+   *
+   * Archives the full history to capabilities.pre-compact-<ts>.jsonl first.
+   * Keeps the last `keepArchives` (default 1) archives and deletes older ones
+   * to bound disk usage.
+   *
+   * Returns { compacted, size_mb_before, before_lines, after_lines, parse_errors, archive }.
+   * Safe to call on any size — skips below 10 MB.
+   */
+  compact({ thresholdMb = 10, keepArchives = 1 } = {}) {
+    const st = existsSync(this.capsFile) ? statSync(this.capsFile) : null;
+    if (!st) return { compacted: false, reason: "no_file" };
+    const size_mb = st.size / 1024 / 1024;
+    if (size_mb < thresholdMb) return { compacted: false, reason: "under_threshold", size_mb: Number(size_mb.toFixed(2)) };
+    const archive = join(this.dir, "capabilities.pre-compact-" + Date.now() + ".jsonl");
+    copyFileSync(this.capsFile, archive);
+    const lines = readFileSync(this.capsFile, "utf8").split("\n").filter(Boolean);
+    const byId = new Map();
+    let parse_errors = 0;
+    for (const line of lines) {
+      try {
+        const o = JSON.parse(line);
+        if (o.id) byId.set(o.id, line);
+      } catch { parse_errors++; }
+    }
+    writeFileSync(this.capsFile, Array.from(byId.values()).join("\n") + "\n");
+    this._cache = null;
+    // Bound archive retention
+    try {
+      const all = readdirSync(this.dir)
+        .filter(f => f.startsWith("capabilities.pre-compact-"))
+        .sort();
+      while (all.length > keepArchives) {
+        const oldest = all.shift();
+        try { unlinkSync(join(this.dir, oldest)); } catch {}
+      }
+    } catch {}
+    return {
+      compacted: true,
+      size_mb_before: Number(size_mb.toFixed(2)),
+      before_lines: lines.length,
+      after_lines: byId.size,
+      parse_errors,
+      archive: archive.split("/").pop(),
+    };
   }
 
   /** Retire a capability. Data stays; it just stops being selected. */

@@ -28,6 +28,20 @@ export class Runtime {
   async boot() {
     this.events.emit("runtime.boot.started", { dir: this.config.dir });
 
+    // v0.56.31 — auto-compact capabilities.jsonl if oversized. Fold-on-read
+    // only uses the last line per id, so compacting to one line per id is
+    // semantically identical. Runs before seed/watches load so the faster
+    // file is what everything downstream reads. Idempotent, safe, no-op
+    // below 10 MB.
+    try {
+      const _compact = this.graph.compact();
+      if (_compact.compacted) {
+        this.events.emit("runtime.boot.compacted", _compact);
+      }
+    } catch (e) {
+      this.events.emit("runtime.boot.compact_failed", { error: String(e.message || e).slice(0, 300) });
+    }
+
     const seedResult = loadSeed({
       graph: this.graph,
       events: this.events,
