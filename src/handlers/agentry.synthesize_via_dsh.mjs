@@ -192,7 +192,7 @@ function renderHandler(spec, capability_id) {
   return out.join("\n");
 }
 
-function rewriteCjsToEsm(code) {
+export function rewriteCjsToEsm(code) {
   // v0.56.29 — deterministic ESM enforcement. If DSH writes require() in
   // test_script or code_body despite the prompt, rewrite before pretest.
   // Covers the two patterns that account for ~all DSH output:
