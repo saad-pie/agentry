@@ -3,7 +3,7 @@
 // Separate from the graph because events outlive tasks and capabilities.
 // If you delete every other file, events.jsonl is enough to rebuild the rest.
 
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { errors } from "./errors.mjs";
 
@@ -29,6 +29,47 @@ export class EventLog {
     };
     appendFileSync(this.file, JSON.stringify(evt) + "\n");
     return evt;
+  }
+
+  /**
+   * v0.56.36 — rotate events.jsonl when oversized. Events are append-only
+   * facts, so unlike capabilities we do NOT fold — we archive the oldest
+   * chunk verbatim and keep the most recent N lines live. Full history
+   * preserved in events-YYYYMMDDHHMMSS.archive.jsonl (bounded retention).
+   *
+   * Runs at boot. No-op under thresholdMb (default 20). Safe to call anytime.
+   */
+  rotate({ thresholdMb = 20, keepLines = 50000, keepArchives = 2 } = {}) {
+    if (!existsSync(this.file)) return { rotated: false, reason: "no_file" };
+    const st = statSync(this.file);
+    const size_mb = st.size / 1024 / 1024;
+    if (size_mb < thresholdMb) return { rotated: false, reason: "under_threshold", size_mb: Number(size_mb.toFixed(2)) };
+    const raw = readFileSync(this.file, "utf8");
+    const lines = raw.split("\n").filter(Boolean);
+    if (lines.length <= keepLines) return { rotated: false, reason: "few_lines", lines: lines.length };
+    const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    const archive = join(this.dir, "events-" + ts + ".archive.jsonl");
+    const archived = lines.slice(0, lines.length - keepLines);
+    const kept = lines.slice(-keepLines);
+    writeFileSync(archive, archived.join("\n") + "\n");
+    writeFileSync(this.file, kept.join("\n") + "\n");
+    try {
+      const all = readdirSync(this.dir)
+        .filter(f => /^events-\d+\.archive\.jsonl$/.test(f))
+        .sort();
+      while (all.length > keepArchives) {
+        const oldest = all.shift();
+        try { unlinkSync(join(this.dir, oldest)); } catch {}
+      }
+    } catch {}
+    return {
+      rotated: true,
+      size_mb_before: Number(size_mb.toFixed(2)),
+      before_lines: lines.length,
+      after_lines: kept.length,
+      archived_lines: archived.length,
+      archive: archive.split("/").pop(),
+    };
   }
 
   /** Read all events. Cheap at our scale. */

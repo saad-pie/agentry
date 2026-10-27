@@ -42,6 +42,18 @@ export class Runtime {
       this.events.emit("runtime.boot.compact_failed", { error: String(e.message || e).slice(0, 300) });
     }
 
+    // v0.56.36 — rotate events.jsonl at boot if oversized. Same threshold
+    // concept as graph.compact but different strategy: events are facts, so
+    // archive oldest chunk verbatim rather than fold. Full history preserved.
+    try {
+      const _rot = this.events.rotate();
+      if (_rot.rotated) {
+        this.events.emit("runtime.boot.events_rotated", _rot);
+      }
+    } catch (e) {
+      this.events.emit("runtime.boot.events_rotate_failed", { error: String(e.message || e).slice(0, 300) });
+    }
+
     const seedResult = loadSeed({
       graph: this.graph,
       events: this.events,
