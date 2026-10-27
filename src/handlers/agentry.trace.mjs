@@ -74,9 +74,9 @@ function stripLarge(e, _depth = 0) {
 }
 
 export default async function agentryTrace(input, ctx) {
-  const { capability_id, gap_id, limit } = input || {};
-  const target = capability_id || gap_id;
-  if (!target) throw new Error("agentry.trace requires capability_id or gap_id");
+  const { capability_id, gap_id, conversation_id, limit } = input || {};
+  const target = capability_id || gap_id || conversation_id;
+  if (!target) throw new Error("agentry.trace requires capability_id, gap_id, or conversation_id");
   const max = Math.max(1, Math.min(2000, Number(limit) || 1000));
 
   const all = ctx.events.all();
@@ -86,7 +86,8 @@ export default async function agentryTrace(input, ctx) {
     const match = e.capability_id === target
       || e.gap_id === target
       || e.gap_id === gapKey
-      || e.key === gapKey;
+      || e.key === gapKey
+      || (conversation_id && e.conversation_id === conversation_id);
     if (match) chain.push(e);
   }
   chain.sort((a, b) => (a.at || 0) - (b.at || 0));

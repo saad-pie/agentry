@@ -229,6 +229,84 @@ function tryDirectMatch(message, graph) {
   return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind, produces: best.cap.produces || {} };
 }
 
+async function buildChatTraceEmail(ctx, opts) {
+  const L = [];
+  L.push("**Chat trace: " + opts.capabilityId + "**");
+  L.push("");
+  L.push("- conversation_id: " + opts.conversationId);
+  L.push("- capability_id: " + opts.capabilityId);
+  L.push("- via: " + (opts.via || "direct_match"));
+  L.push("- total_ms: " + opts.totalMs);
+  L.push("- artifacts: " + (opts.artifacts ? opts.artifacts.length : 0));
+  L.push("");
+  if (opts.input && Object.keys(opts.input).length) {
+    L.push("**Extracted input:**");
+    L.push("```json");
+    L.push(JSON.stringify(opts.input, null, 2));
+    L.push("```");
+    L.push("");
+  }
+  if (opts.output && Object.keys(opts.output).length) {
+    L.push("**Handler output:**");
+    L.push("```json");
+    const _os = JSON.stringify(opts.output, null, 2);
+    L.push(_os.slice(0, 3000));
+    if (_os.length > 3000) L.push("// ... [" + (_os.length - 3000) + " more chars]");
+    L.push("```");
+    L.push("");
+  }
+  if (opts.artifacts && opts.artifacts.length) {
+    L.push("**Artifacts (" + opts.artifacts.length + "):**");
+    for (const a of opts.artifacts) {
+      L.push("- " + a.path + " — " + a.bytes + " bytes, field=" + a.field);
+    }
+    L.push("");
+  }
+  let combined = [];
+  try {
+    const all = ctx.events.all();
+    const tStart = opts.startedAt || 0;
+    const tEnd = opts.startedAt ? opts.startedAt + opts.totalMs + 15000 : Date.now();
+    combined = all.filter(e => {
+      if (e.conversation_id === opts.conversationId) return true;
+      if (e.capability_id === opts.capabilityId && e.at >= tStart && e.at <= tEnd) return true;
+      return false;
+    });
+    const seen = new Set();
+    combined = combined.filter(e => {
+      const k = e.kind + "|" + e.at + "|" + (e.capability_id || "");
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    combined.sort((a, b) => (a.at || 0) - (b.at || 0));
+  } catch {}
+  const t0 = combined.length > 0 ? combined[0].at : 0;
+  L.push("**Full event timeline (" + combined.length + " events):**");
+  L.push("");
+  L.push("```");
+  for (const e of combined) {
+    const rel = e.at ? (e.at - t0) : 0;
+    L.push("+" + rel + "ms  " + e.kind + (e.capability_id ? "  " + e.capability_id : "") + (e.code ? "  code=" + e.code : ""));
+  }
+  L.push("```");
+  L.push("");
+  if (opts.handlerPath) {
+    try {
+      const fs = await import("node:fs");
+      if (fs.existsSync(opts.handlerPath)) {
+        const src = fs.readFileSync(opts.handlerPath, "utf8");
+        L.push("**Handler source (first 2500 chars):**");
+        L.push("```js");
+        L.push(src.slice(0, 2500));
+        if (src.length > 2500) L.push("// ... [" + (src.length - 2500) + " more chars]");
+        L.push("```");
+      }
+    } catch {}
+  }
+  return L.join(String.fromCharCode(10));
+}
+
 export default async function agentryChat(input, ctx) {
   const {
     message,
@@ -332,6 +410,28 @@ export default async function agentryChat(input, ctx) {
           artifacts_count: _artifacts.length,
           artifact_missing: _artifactMissing,
         });
+        if (String(process.env.AGENTRY_CHAT_EMAIL || "0") === "1") {
+          (async () => {
+            try {
+              const _capNode = graph.getCapability(_direct.capability_id);
+              const _body = await buildChatTraceEmail(ctx, {
+                conversationId, capabilityId: _direct.capability_id,
+                via: "direct_match", totalMs: _directMs, startedAt: started,
+                input: _direct.input, output: _r.output, artifacts: _artifacts,
+                handlerPath: (_capNode && _capNode.handler_file) || null,
+              });
+              await ctx.invoke("notify.fallback", {
+                subject: "[agentry] chat: " + _direct.capability_id,
+                body_markdown: _body,
+                primary: "notify.email.gmail",
+                fallback: "notify.console",
+              }, { tenant: "local", by: "agentry.chat" });
+              events.emit("chat.trace_email_sent", { conversation_id: conversationId, capability_id: _direct.capability_id, body_len: _body.length });
+            } catch (e) {
+              try { events.emit("chat.trace_email_failed", { conversation_id: conversationId, capability_id: _direct.capability_id, error: String(e.message || "").slice(0, 200) }); } catch {}
+            }
+          })();
+        }
         events.emit("chat.assistant_turn", {
           conversation_id: conversationId, agent_id: agentId,
           message: "Executed " + _direct.capability_id + " directly (" + _directMs + "ms, " + _artifacts.length + " artifacts)",
@@ -491,6 +591,28 @@ export default async function agentryChat(input, ctx) {
     artifacts: (task.artifacts || []).length,
     ms: Date.now() - started,
   });
+  if (String(process.env.AGENTRY_CHAT_EMAIL || "0") === "1") {
+    (async () => {
+      try {
+        const _capIds = plan.map(s => s.capability_id);
+        const _body = await buildChatTraceEmail(ctx, {
+          conversationId, capabilityId: (_capIds[0] || "planner"),
+          via: "planner", totalMs: Date.now() - started, startedAt: started,
+          input: null, output: task, artifacts: task.artifacts || [],
+          handlerPath: null,
+        });
+        await ctx.invoke("notify.fallback", {
+          subject: "[agentry] chat (planner): " + _capIds.join(", "),
+          body_markdown: _body,
+          primary: "notify.email.gmail",
+          fallback: "notify.console",
+        }, { tenant: "local", by: "agentry.chat" });
+        events.emit("chat.trace_email_sent", { conversation_id: conversationId, capability_id: _capIds[0] || null, via: "planner", body_len: _body.length });
+      } catch (e) {
+        try { events.emit("chat.trace_email_failed", { conversation_id: conversationId, error: String(e.message || "").slice(0, 200) }); } catch {}
+      }
+    })();
+  }
 
   return {
     output: {

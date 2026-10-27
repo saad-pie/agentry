@@ -6,6 +6,7 @@
   "accepts": {
     "capability_id": { "type": "string", "optional": true },
     "gap_id": { "type": "string", "optional": true },
+    "conversation_id": { "type": "string", "optional": true },
     "limit": { "type": "number", "optional": true }
   },
   "produces": {
