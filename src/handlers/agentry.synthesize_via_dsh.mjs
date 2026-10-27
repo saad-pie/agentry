@@ -62,6 +62,15 @@ function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description
   L.push("1. Pick the correct npm package. Must install cleanly in Node, no browser, no external CLI binary, no remote API key. NEVER pick puppeteer, playwright, or node-html-to-image - they download ~200MB Chromium and time out. For HTML to PNG/PDF, prefer takumi-js (pure Rust, no browser).");
   L.push("2. `cd /tmp && npm install <pkg>` to verify it installs. Then `node -e \"import('<pkg>').then(m=>console.log('ok'))\"` to verify it loads.");
   L.push("3. Write a small test script that: creates a real fixture, runs the operation, verifies output byte length or magic bytes.");
+  L.push("3.5. ESM ENFORCEMENT — READ THIS BEFORE WRITING ANY CODE:");
+  L.push("     You are writing ES MODULES (.mjs). `require()` is a SyntaxError here.");
+  L.push("     BAD:  const fs = require('fs');              ← SyntaxError: require is not defined");
+  L.push("     BAD:  const markdownpdf = require('markdown-pdf');  ← SyntaxError");
+  L.push("     GOOD: const fs = await import('node:fs');");
+  L.push("     GOOD: const { parse } = await import('@iarna/toml');");
+  L.push("     GOOD: const markdownpdf = (await import('markdown-pdf')).default;");
+  L.push("     CJS modules: use .default after await import. ESM modules: destructure from await import.");
+  L.push("     If you write require() anywhere in test_script or code_body, the spec will be rewritten automatically and may be broken. Write await import() yourself.");
   L.push("4. Return the JSON below. NO prose. NO markdown fences. Just the JSON.");
   L.push("   CRITICAL: your FINAL message must be ONE raw JSON object starting with { and ending with }.");
   L.push("   If you write anything like \"The JSON spec has been returned\" or \"Here is the spec\" or a summary of what you did — you have FAILED.");
@@ -181,6 +190,32 @@ function renderHandler(spec, capability_id) {
   out.push("export default run;");
   out.push("");
   return out.join("\n");
+}
+
+function rewriteCjsToEsm(code) {
+  // v0.56.29 — deterministic ESM enforcement. If DSH writes require() in
+  // test_script or code_body despite the prompt, rewrite before pretest.
+  // Covers the two patterns that account for ~all DSH output:
+  //   const X = require('y')        → const X = (await import('y')).default
+  //   const { a, b } = require('y') → const { a, b } = await import('y')
+  if (typeof code !== "string" || !code) return code;
+  let out = code;
+  // Destructure first (more specific pattern)
+  out = out.replace(
+    /(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    "const {$1} = await import('$2')"
+  );
+  // Simple assignment
+  out = out.replace(
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    "const $1 = (await import('$2')).default"
+  );
+  // Bare require('y') statement — replace with await import noop
+  out = out.replace(
+    /(^|[^\w.])require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    "$1(await import('$2'))"
+  );
+  return out;
 }
 
 function parseDshSpec(text) {
@@ -375,6 +410,24 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   if (!spec.test_script) {
     events.emit("dsh_synth.missing_test_script", { capability_id, package_name: spec.package_name });
     return { output: { verified: false, capability_id, reason: "missing_test_script" }, cost: { time_ms: Date.now() - started } };
+  }
+  // v0.56.29 — deterministic ESM enforcement. Rewrite require() in spec
+  // before pretest, whether or not the prompt was respected.
+  {
+    const _tsBefore = String(spec.test_script || "");
+    const _cbBefore = String(spec.code_body || "");
+    spec.test_script = rewriteCjsToEsm(_tsBefore);
+    spec.code_body = rewriteCjsToEsm(_cbBefore);
+    const _tsChanged = _tsBefore !== spec.test_script;
+    const _cbChanged = _cbBefore !== spec.code_body;
+    if (_tsChanged || _cbChanged) {
+      events.emit("dsh_synth.esm_rewritten", {
+        capability_id,
+        test_script_rewritten: _tsChanged,
+        code_body_rewritten: _cbChanged,
+        require_count_before: (_tsBefore.match(/require\s*\(/g) || []).length + (_cbBefore.match(/require\s*\(/g) || []).length,
+      });
+    }
   }
   const _composed = Array.isArray(spec.requires && spec.requires.capability) ? spec.requires.capability : [];
   for (const _cap of _composed) {
