@@ -48,15 +48,24 @@ function summarize(e) {
   return k;
 }
 
-function stripLarge(e) {
+function stripLarge(e, _depth = 0) {
+  // v0.56.26 — recursive truncation, never parse partial JSON.
+  // Prior version did JSON.parse(JSON.stringify(v).slice(0, 799) + "}")
+  // which throws "Bad escaped character" when the 799th char lands mid-escape
+  // (common with dsh_synth.trace events that store prompt_preview + thinking).
+  if (_depth > 4) return "[depth>4]";
+  if (e === null || e === undefined) return e;
+  if (typeof e !== "object") return e;
+  if (Array.isArray(e)) {
+    return e.slice(0, 12).map(x => typeof x === "object" && x !== null ? stripLarge(x, _depth + 1) : x);
+  }
   const out = {};
   for (const [k, v] of Object.entries(e)) {
     if (k === "kind" || k === "at") continue;
     if (typeof v === "string" && v.length > 400) {
       out[k] = v.slice(0, 400) + "...[" + (v.length - 400) + " more chars]";
     } else if (typeof v === "object" && v !== null) {
-      const s = JSON.stringify(v);
-      out[k] = s.length > 800 ? JSON.parse(s.slice(0, 799) + "}") : v;
+      out[k] = stripLarge(v, _depth + 1);
     } else {
       out[k] = v;
     }
