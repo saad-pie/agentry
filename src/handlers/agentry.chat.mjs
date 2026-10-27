@@ -38,6 +38,8 @@
 // every failure path, so callers (and tests) could not distinguish boot
 // failure from empty plan from execution throw. Every failure now carries
 // phase + message.
+import { statSync } from "node:fs";
+
 function failTask(phase, message) {
   return {
     task_id: null,
@@ -161,22 +163,61 @@ function tryDirectMatch(message, graph) {
   const best = candidates[0];
   const second = candidates[1];
   if (best.score < 2) return null;
-  // Extract path-like tokens from message
-  // v0.56.25 — extension up to 12 chars, not 6. `.parquet` (7), `.markdown` (8),
-  // `.typescript` (10) were being truncated (out.parquet → out.parque). The
-  // handler wrote the file correctly; chat looked for the wrong path.
-  const paths = [...message.matchAll(/\/[\w./-]+\.\w{1,12}/g)].map(m => m[0]);
+  // v0.56.27 — dynamic path extraction. Any fixed cap on extension length has
+  // the same failure mode (parquet was truncated by \w{1,6}, then markdown by
+  // \w{1,12} would break on .webmanifest). Filesystem-based classification:
+  //   1. Match /-prefixed strings, keep only those whose last segment has an
+  //      extension >= 2 chars (any length, no cap)
+  //   2. fs.statSync each: file exists → input, missing → output
+  //   3. Assign to accepts keys by hint (input/output/src/dst) + extension
+  //   4. Fallback: leftover unused paths fill other path-like keys
   const accepts = Object.keys(best.cap.accepts || {});
   const input = {};
   const pathKeys = accepts.filter(k => /path|_file$|_dir$/.test(k));
-  if (pathKeys.length > 0 && paths.length > 0) {
-    const used = new Set();
-    for (const k of pathKeys) {
-      const extM = /_(\w+?)(_path|_file|_dir)$/.exec(k);
-      const hint = extM ? extM[1] : null;
-      const match = (hint && paths.find(p => !used.has(p) && p.toLowerCase().includes("." + hint)))
-                 || paths.find(p => !used.has(p));
-      if (match) { input[k] = match; used.add(match); }
+  if (pathKeys.length > 0) {
+    const _rawPaths = [...message.matchAll(/\/[\w./-]+/g)].map(m => m[0]);
+    const _paths = _rawPaths.filter(p => {
+      const _last = p.split("/").pop() || "";
+      return _last.includes(".") && (_last.split(".").pop() || "").length >= 2;
+    });
+    if (_paths.length > 0) {
+      const _existing = [];
+      const _future = [];
+      for (const p of _paths) {
+        try { const st = statSync(p); if (st.isFile()) _existing.push(p); else _future.push(p); }
+        catch { _future.push(p); }
+      }
+      const _inKeys = pathKeys.filter(k => /input|_in$|^src|source/.test(k));
+      const _outKeys = pathKeys.filter(k => /output|_out$|^dst|dest|target/.test(k));
+      const _otherKeys = pathKeys.filter(k => !_inKeys.includes(k) && !_outKeys.includes(k));
+      const _usedEx = new Set();
+      const _usedFu = new Set();
+      const _tryExt = (pool, key, usedSet) => {
+        const m = key.match(/_(\w+?)(_path|_file|_dir)$/);
+        if (!m) return null;
+        const hint = m[1].toLowerCase();
+        for (const p of pool) {
+          if (usedSet.has(p)) continue;
+          if (p.toLowerCase().endsWith("." + hint)) return p;
+        }
+        return null;
+      };
+      for (const k of _inKeys) {
+        const byExt = _tryExt(_existing, k, _usedEx);
+        if (byExt) { input[k] = byExt; _usedEx.add(byExt); continue; }
+        const p = _existing.find(x => !_usedEx.has(x));
+        if (p) { input[k] = p; _usedEx.add(p); }
+      }
+      for (const k of _outKeys) {
+        const byExt = _tryExt(_future, k, _usedFu);
+        if (byExt) { input[k] = byExt; _usedFu.add(byExt); continue; }
+        const p = _future.find(x => !_usedFu.has(x));
+        if (p) { input[k] = p; _usedFu.add(p); }
+      }
+      for (const k of _otherKeys) {
+        const leftover = [..._existing.filter(p => !_usedEx.has(p)), ..._future.filter(p => !_usedFu.has(p))];
+        if (leftover.length > 0) input[k] = leftover[0];
+      }
     }
   }
   // Require every non-optional accepts key to be filled
@@ -185,7 +226,7 @@ function tryDirectMatch(message, graph) {
     const optional = spec && typeof spec === "object" && spec.optional === true;
     if (!optional && input[k] === undefined) return null;
   }
-  return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind };
+  return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind, produces: best.cap.produces || {} };
 }
 
 export default async function agentryChat(input, ctx) {
@@ -272,22 +313,18 @@ export default async function agentryChat(input, ctx) {
         // never return (handlers return flat fields like {output_path, bytes}).
         // Result: ok:true with artifacts:[] even when handler wrote a file.
         const _artifacts = [];
-        const _produces = best.cap.produces || {};
+        const _produces = _direct.produces || {};
         const _outputObj = _r.output || {};
-        let _fsMod = null;
-        try { _fsMod = await import("node:fs"); } catch {}
-        if (_fsMod) {
-          for (const _k of Object.keys(_produces)) {
-            const _v = _outputObj[_k];
-            if (typeof _v !== "string" || !_v) continue;
-            if (!/\.\w{2,12}$/.test(_v) && !_v.startsWith("/")) continue;
-            try {
-              const _st = _fsMod.statSync(_v);
-              if (_st.isFile() && _st.size > 0) {
-                _artifacts.push({ kind: "file", field: _k, path: _v, bytes: _st.size, from_step: 0 });
-              }
-            } catch {}
-          }
+        for (const _k of Object.keys(_produces)) {
+          const _v = _outputObj[_k];
+          if (typeof _v !== "string" || !_v) continue;
+          if (!/\.\w{2,12}$/.test(_v) && !_v.startsWith("/")) continue;
+          try {
+            const _st = statSync(_v);
+            if (_st.isFile() && _st.size > 0) {
+              _artifacts.push({ kind: "file", field: _k, path: _v, bytes: _st.size, from_step: 0 });
+            }
+          } catch {}
         }
         const _artifactMissing = (_artifacts.length === 0 && Object.keys(_produces).some(k => /path|_file|_out/.test(k)));
         events.emit("chat.direct_success", {
