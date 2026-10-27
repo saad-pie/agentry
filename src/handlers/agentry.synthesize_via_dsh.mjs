@@ -305,7 +305,9 @@ function formatTraceEmail(t) {
     const _lines = [];
     for (const _e of t.event_timeline) {
       const _rel = _e.at ? (_e.at - _t0) : 0;
-      _lines.push("+" + _rel + "ms  " + (_e.kind || "?") + (_e.capability_id ? "  " + _e.capability_id : ""));
+      // v0.56.35 — show the most specific id available (capability_id > capId > session)
+      const _idLabel = _e.capability_id || _e.capId || _e.session || "";
+      _lines.push("+" + _rel + "ms  " + (_e.kind || "?") + (_idLabel ? "  " + _idLabel : ""));
     }
     t._event_lines = _lines;
   }
@@ -771,10 +773,22 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
       const _all = events.all();
       const _tStart = started - 2000;
       const _tEnd = Date.now() + 5000;
+      // v0.56.35 — broaden filter. Prior version matched only capability_id ===
+      // capability_id || gap_id ~ safeId, catching 3 events out of ~20. Installer
+      // events use capId, kernel/session events use session (which contains safeId),
+      // synthesize events use candidate_id. Match all of them.
+      const _matchId = (_v) => typeof _v === "string" && _v.length > 0 && (_v === capability_id || _v.indexOf(safeId) >= 0);
       _tracePayload.event_timeline = _all.filter(_e =>
-        (_e.capability_id === capability_id || (_e.gap_id && String(_e.gap_id).indexOf(safeId) >= 0)) &&
+        (_matchId(_e.capability_id) || _matchId(_e.capId) || _matchId(_e.session) || _matchId(_e.gap_id) || _matchId(_e.candidate_id) || _matchId(_e.ksess)) &&
         _e.at >= _tStart && _e.at <= _tEnd
-      ).sort((a, b) => (a.at || 0) - (b.at || 0)).map(_e => ({ at: _e.at, kind: _e.kind, capability_id: _e.capability_id || null }));
+      ).sort((a, b) => (a.at || 0) - (b.at || 0)).map(_e => ({
+        at: _e.at,
+        kind: _e.kind,
+        capability_id: _e.capability_id || null,
+        capId: _e.capId || null,
+        session: _e.session || null,
+        gap_id: _e.gap_id || null,
+      }));
     } catch {}
     setImmediate(() => {
       try { events.emit("dsh_synth.trace", _tracePayload); } catch {}
