@@ -145,7 +145,8 @@ export default async function agentryEnsure(input, ctx) {
               // synthesizable candidate exists (LLM nondeterminism: vb1 picked
               // evidence-dev_csv, vb2 returned null for identical candidates).
               // Fall back to top candidate by prefix rank so mechanical gets a chance.
-              if (!_recommendedId && _propNode && Array.isArray(_propNode.candidates) && _propNode.candidates.length > 0) {
+              const _llmPick = _recommendedId;
+              if (_propNode && Array.isArray(_propNode.candidates) && _propNode.candidates.length > 0) {
                 // v0.56.17 — token-aware fallback. Prefix-only sorting was
                 // a no-op (all npm get 100, `100-100=0` → stable sort preserves
                 // original order → first candidate wins). csv_to_parquet got
@@ -165,8 +166,43 @@ export default async function agentryEnsure(input, ctx) {
                   else if (_id.startsWith("agentskills:")) _n += 3;
                   return _n;
                 };
-                const _ranked = _propNode.candidates.slice().sort((a, b) => _scoreFn(b) - _scoreFn(a));
-                _recommendedId = _ranked[0].id;
+                const _targetWord = (() => {
+                  const _h = (String(capability_id || "") + " " + String(_intent || "")).toLowerCase();
+                  const _m = _h.match(/(?:to|into|as)\s+([a-z][a-z0-9]{2,15})\b/);
+                  return _m ? _m[1] : null;
+                })();
+                const _scoreWithDirection = (cand) => {
+                  let _n = _scoreFn(cand);
+                  if (_targetWord) {
+                    const _h = (String(cand.id || "") + " " + String(cand.name || "") + " " + String(cand.description || "")).toLowerCase();
+                    if (_h.includes(_targetWord)) _n += 25;
+                  }
+                  return _n;
+                };
+                const _ranked = _propNode.candidates.slice().sort((a, b) => _scoreWithDirection(b) - _scoreWithDirection(a));
+                const _fallbackId = _ranked[0].id;
+                if (!_llmPick) {
+                  _recommendedId = _fallbackId;
+                } else if (_targetWord) {
+                  const _findCand = (id) => _propNode.candidates.find(c => c.id === id);
+                  const _hayOf = (c) => c ? (String(c.id || "") + " " + String(c.name || "") + " " + String(c.description || "")).toLowerCase() : "";
+                  const _llmCand = _findCand(_llmPick);
+                  const _fbCand = _findCand(_fallbackId);
+                  if (_llmCand && _fbCand && !_hayOf(_llmCand).includes(_targetWord) && _hayOf(_fbCand).includes(_targetWord)) {
+                    events.emit("ensure.mechanical_direction_override", {
+                      capability_id, llm_pick: _llmPick, fallback_pick: _fallbackId, target_word: _targetWord,
+                    });
+                    _recommendedId = _fallbackId;
+                    try {
+                      const _decisions = Object.assign({}, _propNode.decisions || {});
+                      if (_llmPick && _decisions[_llmPick]) {
+                        _decisions[_llmPick] = { decision: "rejected", at: Date.now(), auto: true, source: "ensure_direction_supersede" };
+                        graph.putCapability({ id: _prop.output.proposal_id, kind: "proposal", decisions: _decisions });
+                        _propNode.decisions = _decisions;
+                      }
+                    } catch {}
+                  }
+                }
                 events.emit("ensure.mechanical_fallback_to_top", {
                   capability_id, proposal_id: _prop.output.proposal_id,
                   fallback_id: _recommendedId, candidate_count: _propNode.candidates.length,
