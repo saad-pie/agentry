@@ -33,11 +33,13 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
     let seed;
     try { seed = JSON.parse(readFileSync(join(SEEDS_DIR, f), "utf8")); } catch { continue; }
     if (!seed.id || !seed.handler_file) continue;
-    if (seed.source !== "dsh_synth:verified") continue;
+    if (seed.source !== "dsh_synth:verified" && seed.source !== "synthesized:agentry.synthesize") continue;
     if (!existsSync(seed.handler_file)) continue;
     let _src = "";
     try { _src = readFileSync(seed.handler_file, "utf8"); } catch { continue; }
-    if (_src.includes("globalThis.")) continue;
+    // v0.56.38 — kernel-string-aware globalThis check
+    const _bodyNoKernel = _src.replace(/const KERNEL_SCRIPT = "(?:[^"\\]|\\.)*";/g, "");
+    if (_bodyNoKernel.includes("globalThis.")) continue;
     candidates.push({
       id: seed.id, kind: seed.kind || "tool",
       accepts: Object.keys(seed.accepts || {}),

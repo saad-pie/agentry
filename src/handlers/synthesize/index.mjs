@@ -33,6 +33,7 @@ import { autoFixtures } from "./fixtures.mjs";
 import { extractJson } from "./validate/json.mjs";
 import { validatePlan } from "./validate/plan.mjs";
 import { validateSpecConsistency } from "./validate/spec.mjs";
+import { recordOutcome } from "./outcomes.mjs";
 
 export default async function agentrySynthesize(input, ctx) {
   const { proposal_id, candidate_id, id_override } = input || {};
@@ -61,6 +62,7 @@ export default async function agentrySynthesize(input, ctx) {
     shape_verbs: shape.steps.map(s => s.verb),
   });
 
+  try {
   let facts = { cloned: false, session: null, error: null, top_level: [], readme: null, manifest: null, repo_dir: null, source_kind: null };
   if (candidate.kind === "agent_skill") {
     try {
@@ -547,6 +549,18 @@ export default async function agentrySynthesize(input, ctx) {
     ms: Date.now() - started,
   });
 
+  recordOutcome({
+    capability_id: spec.capability.id,
+    intent: gap.wanted_description || candidate.id,
+    kind: gap.wanted_kind || "tool",
+    refs_shown: _refs.map(r => r.id),
+    packages: (spec.capability && spec.capability.requires && Array.isArray(spec.capability.requires.npm)) ? spec.capability.requires.npm : [],
+    trial_ok: true,
+    elapsed_ms: Date.now() - started,
+    error_class: null,
+    used_composition: Object.keys((spec.glue && spec.glue.pre_invoke) || {}).length > 0,
+  });
+
   return {
     output: {
       capability_id: spec.capability.id,
@@ -563,5 +577,20 @@ export default async function agentrySynthesize(input, ctx) {
     },
     cost: { time_ms: Date.now() - started },
   };
+  } catch (_err) {
+    try {
+      recordOutcome({
+        capability_id: candidate_id,
+        intent: gap.wanted_description || candidate_id,
+        kind: gap.wanted_kind || "tool",
+        refs_shown: [], packages: [],
+        trial_ok: false,
+        elapsed_ms: Date.now() - started,
+        error_class: String(_err.message || "unknown").replace(/^agentry\.synthesize:\s*/, "").split(":")[0].slice(0, 80).trim() || "unknown",
+        used_composition: false,
+      });
+    } catch (_re) {}
+    throw _err;
+  }
 }
 

@@ -381,17 +381,33 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   // ── 1. Ask DSH for a spec ──
   const _refs = pickReferenceHandlers(String(intent || capability_id), wanted_kind || "tool", 2);
   events.emit("dsh_synth.references_picked", { capability_id, count: _refs.length, ids: _refs.map(r => r.id) });
+  const _recordFailure = (stage, specMaybe) => {
+    try {
+      recordOutcome({
+        capability_id, intent, kind: wanted_kind || "tool",
+        refs_shown: _refs.map(r => r.id),
+        packages: (specMaybe && specMaybe.packages) || [],
+        trial_ok: false, elapsed_ms: Date.now() - started,
+        error_class: stage, used_composition: false,
+      });
+    } catch {}
+  };
+
   const prompt = buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, references: formatReferences(_refs) });
   let dshRes;
   try {
     dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: timeoutMs },
       { tenant: "local", by: "agentry.synthesize_via_dsh" });
   } catch (e) {
+    _recordFailure("dsh_threw", null);
     events.emit("dsh_synth.dsh_threw", { capability_id, error: e.message });
+    _recordFailure("dsh_threw", spec);
     return { output: { verified: false, capability_id, reason: "dsh_threw: " + e.message }, cost: { time_ms: Date.now() - started } };
   }
   if (!dshRes.ok) {
+    _recordFailure("dsh_failed", null);
     events.emit("dsh_synth.dsh_failed", { capability_id, error: dshRes.error?.message });
+    _recordFailure("dsh_failed", spec);
     return { output: { verified: false, capability_id, reason: "dsh_failed: " + (dshRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
   }
   const finalText = String(dshRes.output?.final || "");
@@ -415,14 +431,17 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
       parse_error: (typeof globalThis !== "undefined" && globalThis.__LAST_DSH_PARSE_ERR) || null,
     });
     if (typeof globalThis !== "undefined") delete globalThis.__LAST_DSH_PARSE_ERR;
+    _recordFailure("no_spec_in_dsh_output", spec);
     return { output: { verified: false, capability_id, reason: "no_spec_in_dsh_output" }, cost: { time_ms: Date.now() - started } };
   }
   if (spec.error) {
     events.emit("dsh_synth.spec_error", { capability_id, error: String(spec.error).slice(0, 200) });
+    _recordFailure("dsh_reported_error", spec);
     return { output: { verified: false, capability_id, reason: "dsh_reported_error: " + String(spec.error).slice(0, 200) }, cost: { time_ms: Date.now() - started } };
   }
   if (!spec.package_name || !spec.code_body) {
     events.emit("dsh_synth.incomplete_spec", { capability_id, has_pkg: !!spec.package_name, has_code: !!spec.code_body });
+    _recordFailure("incomplete_spec", spec);
     return { output: { verified: false, capability_id, reason: "incomplete_spec" }, cost: { time_ms: Date.now() - started } };
   }
 
@@ -438,6 +457,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   // fails and we abort early instead of producing a broken handler.
   if (!spec.test_script) {
     events.emit("dsh_synth.missing_test_script", { capability_id, package_name: spec.package_name });
+    _recordFailure("missing_test_script", spec);
     return { output: { verified: false, capability_id, reason: "missing_test_script" }, cost: { time_ms: Date.now() - started } };
   }
   // v0.56.29 — deterministic ESM enforcement. Rewrite require() in spec
@@ -462,6 +482,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   for (const _cap of _composed) {
     if (!graph.getCapability(_cap)) {
       events.emit("dsh_synth.composed_cap_missing", { capability_id, missing: _cap });
+      _recordFailure("composed_cap_missing", spec);
       return { output: { verified: false, capability_id, reason: "composed_cap_missing: " + _cap }, cost: { time_ms: Date.now() - started } };
     }
   }
@@ -516,6 +537,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
     if (!installRes.ok) {
       events.emit("dsh_synth.pretest_install_failed", { capability_id, package_name: spec.package_name, error: installRes.error?.message });
+      _recordFailure("pretest_install_failed", spec);
       return { output: { verified: false, capability_id, reason: "pretest_install_failed: " + (installRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
     }
 
@@ -544,6 +566,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
         exit_code: testExitCode,
         stderr: testStderr.slice(0, 500),
       });
+      _recordFailure("pretest_failed", spec);
       return { output: { verified: false, capability_id, reason: "pretest_failed: exit " + testExitCode + " — " + testStderr.slice(0, 200) }, cost: { time_ms: Date.now() - started } };
     }
 
@@ -560,12 +583,14 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     }
     if (!outBytes || outBytes <= 0) {
       events.emit("dsh_synth.pretest_no_output", { capability_id, package_name: spec.package_name, output_path: testEnv.OUTPUT_PATH });
+      _recordFailure("pretest_no_output", spec);
       return { output: { verified: false, capability_id, reason: "pretest_no_output: " + testEnv.OUTPUT_PATH }, cost: { time_ms: Date.now() - started } };
     }
 
     events.emit("dsh_synth.pretest_passed", { capability_id, package_name: spec.package_name, output_bytes: outBytes });
   } catch (e) {
     events.emit("dsh_synth.pretest_threw", { capability_id, error: e.message });
+    _recordFailure("pretest_threw", spec);
     return { output: { verified: false, capability_id, reason: "pretest_threw: " + e.message }, cost: { time_ms: Date.now() - started } };
   }
 
@@ -579,6 +604,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     writeFileSync(handlerPath, renderHandler(spec, capability_id));
   } catch (e) {
     events.emit("dsh_synth.render_failed", { capability_id, error: e.message });
+    _recordFailure("render_failed", spec);
     return { output: { verified: false, capability_id, reason: "render_failed: " + e.message }, cost: { time_ms: Date.now() - started } };
   }
 
@@ -587,6 +613,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   if (check.status !== 0) {
     events.emit("dsh_synth.syntax_error", { capability_id, stderr: String(check.stderr || "").slice(0, 400) });
     try { unlinkSync(handlerPath); } catch {}
+    _recordFailure("syntax_error", spec);
     return { output: { verified: false, capability_id, reason: "syntax_error: " + String(check.stderr || "").slice(0, 200) }, cost: { time_ms: Date.now() - started } };
   }
 
@@ -668,6 +695,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   if (!verified) {
     try { unlinkSync(handlerPath); } catch {}
     events.emit("dsh_synth.failed", { capability_id, reason, ms: Date.now() - started });
+    _recordFailure("verify_failed", spec);
     return { output: { verified: false, capability_id, reason }, cost: { time_ms: Date.now() - started } };
   }
 
