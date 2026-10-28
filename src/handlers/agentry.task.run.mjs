@@ -481,6 +481,79 @@ export default async function agentryTaskRun(input, ctx) {
       });
 
       if (ensureOut.available === true) {
+        // v0.56.40 — remap step input to match newly-adopted capability accepts.
+        // The planner invents input keys before the capability exists; the
+        // synthesizer picks its own from the shape. When they disagree, the
+        // invoker accepts-gate rejects with "missing required input: X".
+        try {
+          const _newCap = ctx.graph.getCapability(step.capability_id);
+          if (_newCap && _newCap.accepts && typeof _newCap.accepts === "object") {
+            const _missing = Object.keys(_newCap.accepts).filter(k => {
+              const _s = _newCap.accepts[k];
+              const _opt = _s && typeof _s === "object" && _s.optional === true;
+              return !_opt && stepInput[k] === undefined;
+            });
+            if (_missing.length > 0) {
+              const _fs = await import("node:fs");
+              const _remapped = { ...stepInput };
+              for (const _missKey of _missing) {
+                if (!/_path$|_file$/.test(_missKey)) continue;
+                const _isInput = /input|_in$|^src|source/i.test(_missKey);
+                const _isOutput = /output|_out$|^dst|dest|target/i.test(_missKey);
+                const _extMatch = _missKey.match(/_([a-z0-9]+)(?:_path|_file)$/i);
+                if (_extMatch) {
+                  const _hintExt = _extMatch[1].toLowerCase();
+                  for (const [_k, _v] of Object.entries(stepInput)) {
+                    if (typeof _v === "string" && _v.toLowerCase().endsWith("." + _hintExt)) {
+                      _remapped[_missKey] = _v;
+                      break;
+                    }
+                  }
+                }
+                if (_remapped[_missKey] === undefined && _isInput !== _isOutput) {
+                  const _usedVals = new Set(Object.values(_remapped).filter(v => typeof v === "string"));
+                  for (const [_k, _v] of Object.entries(stepInput)) {
+                    if (typeof _v !== "string" || !_v.startsWith("/") || _usedVals.has(_v)) continue;
+                    let _exists = false;
+                    try { _exists = _fs.statSync(_v).isFile(); } catch {}
+                    if (_isInput && _exists) { _remapped[_missKey] = _v; break; }
+                    if (_isOutput && !_exists) { _remapped[_missKey] = _v; break; }
+                  }
+                }
+                if (_remapped[_missKey] === undefined && task.intent) {
+                  const _paths = [...String(task.intent).matchAll(/\/[\w./-]+/g)].map(m => m[0])
+                    .filter(p => (p.split("/").pop() || "").includes("."));
+                  const _usedVals = new Set(Object.values(_remapped).filter(v => typeof v === "string"));
+                  for (const _p of _paths) {
+                    if (_usedVals.has(_p)) continue;
+                    let _exists = false;
+                    try { _exists = _fs.statSync(_p).isFile(); } catch {}
+                    if (_isInput && _exists) { _remapped[_missKey] = _p; break; }
+                    if (_isOutput && !_exists) { _remapped[_missKey] = _p; break; }
+                  }
+                }
+              }
+              if (_missing.every(k => _remapped[k] !== undefined)) {
+                events.emit("task.retry.input_remapped", {
+                  task_id: task.id, step: i, capability_id: step.capability_id,
+                  missing_keys: _missing,
+                  mapped: Object.fromEntries(_missing.map(k => [k, _remapped[k]])),
+                  original_keys: Object.keys(stepInput),
+                });
+                stepInput = _remapped;
+              } else {
+                events.emit("task.retry.remap_incomplete", {
+                  task_id: task.id, step: i, capability_id: step.capability_id,
+                  missing_keys: _missing,
+                  still_missing: _missing.filter(k => _remapped[k] === undefined),
+                  original_keys: Object.keys(stepInput),
+                });
+              }
+            }
+          }
+        } catch (e) {
+          events.emit("task.retry.remap_threw", { task_id: task.id, error: e.message });
+        }
         const retryStarted = Date.now();
         try {
           stepRes = await ctx.invoke(step.capability_id, stepInput, {
