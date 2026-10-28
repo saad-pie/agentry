@@ -511,7 +511,7 @@ export default async function agentryTaskRun(input, ctx) {
                   }
                 }
                 if (_remapped[_missKey] === undefined && _isInput !== _isOutput) {
-                  const _usedVals = new Set(Object.values(_remapped).filter(v => typeof v === "string"));
+                  const _usedVals = new Set(_missing.map(_mk => _remapped[_mk]).filter(_v => typeof _v === "string"));
                   for (const [_k, _v] of Object.entries(stepInput)) {
                     if (typeof _v !== "string" || !_v.startsWith("/") || _usedVals.has(_v)) continue;
                     let _exists = false;
@@ -523,7 +523,7 @@ export default async function agentryTaskRun(input, ctx) {
                 if (_remapped[_missKey] === undefined && task.intent) {
                   const _paths = [...String(task.intent).matchAll(/\/[\w./-]+/g)].map(m => m[0])
                     .filter(p => (p.split("/").pop() || "").includes("."));
-                  const _usedVals = new Set(Object.values(_remapped).filter(v => typeof v === "string"));
+                  const _usedVals = new Set(_missing.map(_mk => _remapped[_mk]).filter(_v => typeof _v === "string"));
                   for (const _p of _paths) {
                     if (_usedVals.has(_p)) continue;
                     let _exists = false;
