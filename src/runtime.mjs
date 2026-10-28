@@ -54,6 +54,22 @@ export class Runtime {
       this.events.emit("runtime.boot.events_rotate_failed", { error: String(e.message || e).slice(0, 300) });
     }
 
+    // v0.56.42 — retire legacy agent.dsh + agent.dsh_poll if still live.
+    // They used the DeepSeek Harness business API, which silently returns
+    // "done" without producing real artifacts. Superseded by agentry.agent.dsh
+    // (headless, returns final/messages/tool_calls synchronously).
+    for (const _legacyId of ["agent.dsh", "agent.dsh_poll"]) {
+      try {
+        const _cap = this.graph.getCapability(_legacyId);
+        if (_cap && !_cap.retired_at) {
+          this.graph.retireCapability(_legacyId, "v0.56.42: superseded by agentry.agent.dsh; silent success without artifact");
+          this.events.emit("runtime.boot.legacy_retired", { capability_id: _legacyId });
+        }
+      } catch (_e) {
+        this.events.emit("runtime.boot.legacy_retire_failed", { capability_id: _legacyId, error: String(_e.message || _e).slice(0, 200) });
+      }
+    }
+
     const seedResult = loadSeed({
       graph: this.graph,
       events: this.events,

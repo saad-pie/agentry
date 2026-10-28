@@ -103,57 +103,34 @@ export default async function agentryReasonHarness(input, ctx) {
 
   const started = Date.now();
 
-  // 1. Submit the reasoning task to the harness.
+  // v0.56.42 — replaced legacy agent.dsh + agent.dsh_poll with a
+  // direct synchronous call to agentry.agent.dsh (headless). Legacy path
+  // silently returned "done" with no real output. Headless returns
+  // final/messages/tool_calls synchronously.
   const prompt = buildTaskPrompt(input);
-  const submit = await ctx.invoke("agent.dsh", {
+  const result = await ctx.invoke("agentry.agent.dsh", {
     prompt,
-    workspace: DEFAULT_WORKSPACE_NAME,
-    provider: DEFAULT_PROVIDER,
-    model: DEFAULT_MODEL,
+    timeout_ms: MAX_WAIT_MS,
   }, { tenant: "local", by: "agentry.reason.harness" });
 
-  if (!submit.ok) {
+  if (!result.ok) {
     throw new Error(
-      `agentry.reason.harness: submit failed — ${submit.error.code}: ${submit.error.message}`
+      `agentry.reason.harness: headless call failed — ${result.error.code}: ${result.error.message}`
     );
   }
 
-  const taskId = submit.output.task_id;
+  const taskId = result.output.session_id || ("harness_" + Date.now().toString(36));
+
   ctx.events.emit("agentry.reason.harness.submitted", {
-    task_id: taskId,
-    workspace: submit.output.workspace_id || null,
-    provider: DEFAULT_PROVIDER,
-    model: DEFAULT_MODEL,
+    ksess: result.output.session_id || null,
     workspace_id: workspace_id || null,
     session_id: session_id || null,
   });
 
-  // 2. Poll until done, then read the output.
-  const poll = await ctx.invoke("agent.dsh_poll", {
-    task_id: taskId,
-    max_wait_ms: MAX_WAIT_MS,
-    poll_interval_ms: POLL_INTERVAL_MS,
-  }, { tenant: "local", by: "agentry.reason.harness" });
-
-  if (!poll.ok) {
-    throw new Error(
-      `agentry.reason.harness: poll failed — ${poll.error.code}: ${poll.error.message}`
-    );
-  }
-  if (poll.output.status !== "done") {
-    throw new Error(
-      `agentry.reason.harness: harness task did not complete (status=${poll.output.status})`
-    );
-  }
-
-  // 3. Parse the harness response. agent.dsh_poll normalizes the answer
-  // into `output` (string). If empty, fall back to the last assistant
-  // message in `messages`, which is where the harness actually puts its
-  // final answer when it used tools.
-  let rawOutput = poll.output.output;
-  if ((!rawOutput || typeof rawOutput !== "string" || rawOutput.trim() === "") && Array.isArray(poll.output.messages)) {
-    for (let i = poll.output.messages.length - 1; i >= 0; i--) {
-      const m = poll.output.messages[i];
+  let rawOutput = String(result.output.final || "");
+  if ((!rawOutput || rawOutput.trim() === "") && Array.isArray(result.output.messages)) {
+    for (let i = result.output.messages.length - 1; i >= 0; i--) {
+      const m = result.output.messages[i];
       if (m?.role === "assistant" && typeof m.text === "string" && m.text.trim()) {
         rawOutput = m.text;
         break;
@@ -163,8 +140,8 @@ export default async function agentryReasonHarness(input, ctx) {
 
   if (!rawOutput || typeof rawOutput !== "string" || rawOutput.trim() === "") {
     ctx.events.emit("agentry.reason.harness.empty_output", {
-      task_id: taskId,
-      messages_count: Array.isArray(poll.output.messages) ? poll.output.messages.length : 0,
+      ksess: result.output.session_id || null,
+      messages_count: Array.isArray(result.output.messages) ? result.output.messages.length : 0,
     });
     throw new Error("agentry.reason.harness: harness returned empty output");
   }

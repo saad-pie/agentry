@@ -47,6 +47,8 @@ const PLANNER_EXCLUDED_IDS = new Set([
   "agentry.message.read",
   "agentry.ensure",
   "agentry.checkpoint",
+  "agent.dsh",
+  "agent.dsh_poll",
 ]);
 
 function enumerateCapabilities(graph, skillsFilter) {
