@@ -106,7 +106,7 @@ export default async function agentryEnsure(input, ctx) {
         });
         const _disc = await ctx.invoke("agentry.discover", {
           query: _intent,
-          sources: ["npm", "pypi", "agentskills_code", "clawhub"],
+          sources: ["npm", "pypi", "crates", "gomod", "agentskills_code", "clawhub", "github", "dsh_plugins"],
           limit: 10,
         }, { tenant: "local", by: "agentry.ensure", task_id: ctx.task_id });
         const _candidates = [];
