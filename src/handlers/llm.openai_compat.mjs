@@ -179,7 +179,16 @@ export default async function llmOpenAICompat(input, ctx) {
       throw err;
     }
 
-    const content = choice.message?.content ?? "";
+    // v0.56.48 — reasoning models (Hy4, DeepSeek-R, o-series) put the
+    // response in reasoning_content and leave content:null. Reading content
+    // alone returned "" and callers parsed it as "LLM declined".
+    let content = choice.message?.content ?? "";
+    if ((!content || String(content).trim() === "") && typeof choice.message?.reasoning_content === "string") {
+      content = choice.message.reasoning_content;
+    }
+    if ((!content || String(content).trim() === "") && typeof choice.message?.reasoning === "string") {
+      content = choice.message.reasoning;
+    }
     const finish_reason = choice.finish_reason ?? null;
     const tool_calls = Array.isArray(choice.message?.tool_calls) ? choice.message.tool_calls : [];
     const usage = data?.usage || {};

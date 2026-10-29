@@ -19,8 +19,21 @@
 //          Canonicalization stays as a safety net but is expected to be
 //          silent. If it fires, the prompt is still under-performing.
 
-const PROVIDER = process.env.AGENTRY_PLANNER_PROVIDER || "orcarouter";
-const MODEL = process.env.AGENTRY_PLANNER_MODEL || "deepseek/deepseek-v4-flash-free";
+// v0.56.48 — planner gets fallback chain. Prior version was single-model;
+// any 429 killed the whole task at step 0 with no chance to try another.
+const PLANNER_CHAIN = (() => {
+  const env = process.env.AGENTRY_PLANNER_PROVIDER;
+  const envModel = process.env.AGENTRY_PLANNER_MODEL;
+  if (env && envModel) return [{ provider: env, model: envModel }];
+  return [
+    { provider: "orcarouter", model: "tencent/hy4-preview-free" },
+    { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
+    { provider: "groq", model: "openai/gpt-oss-120b" },
+    { provider: "google", model: "gemini-2.5-flash" },
+  ];
+})();
+const PROVIDER = PLANNER_CHAIN[0].provider;
+const MODEL = PLANNER_CHAIN[0].model;
 const DEFAULT_MAX_STEPS = 8;
 const MAX_CAPABILITIES_IN_PROMPT = 120;
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
@@ -299,25 +312,36 @@ export default async function agentryAgentPlan(input, ctx) {
     { role: "user", content: buildPlanPrompt({ intent: String(intent), capabilities, maxSteps }) },
   ];
 
-  let llmRes;
-  try {
-    llmRes = await ctx.invoke("llm.openai_compat", {
-      provider: PROVIDER,
-      model: MODEL,
-      messages,
-      temperature: 0.1,
-      max_tokens: 2000,
-      timeout_ms: 30000,
-    }, { tenant: "local", by: "agentry.agent.plan" });
-  } catch (e) {
-    events.emit("agent.plan.llm_threw", { error: e.message });
-    throw new Error("agentry.agent.plan: llm threw: " + e.message);
+  let llmRes = null;
+  const _attempts = [];
+  for (const _pm of PLANNER_CHAIN) {
+    try {
+      const _r = await ctx.invoke("llm.openai_compat", {
+        provider: _pm.provider,
+        model: _pm.model,
+        messages,
+        temperature: 0.1,
+        max_tokens: 2500,
+        timeout_ms: 45000,
+      }, { tenant: "local", by: "agentry.agent.plan" });
+      if (_r.ok) {
+        const _peek = parseJson(_r.output.content);
+        if (_peek && Array.isArray(_peek.steps) && _peek.steps.length > 0) {
+          llmRes = _r;
+          _attempts.push({ provider: _pm.provider, model: _pm.model, ok: true });
+          break;
+        }
+        _attempts.push({ provider: _pm.provider, model: _pm.model, ok: false, reason: "no_usable_json" });
+      } else {
+        _attempts.push({ provider: _pm.provider, model: _pm.model, ok: false, code: _r.error?.code });
+      }
+    } catch (e) {
+      _attempts.push({ provider: _pm.provider, model: _pm.model, ok: false, threw: e.message });
+    }
   }
-  if (!llmRes.ok) {
-    events.emit("agent.plan.llm_failed", {
-      code: llmRes.error?.code, message: String(llmRes.error?.message || "").slice(0, 300),
-    });
-    throw new Error("agentry.agent.plan: llm failed: " + (llmRes.error?.message || "unknown"));
+  if (!llmRes) {
+    events.emit("agent.plan.all_models_failed", { attempts: _attempts });
+    throw new Error("agentry.agent.plan: all planner models failed. attempts=" + JSON.stringify(_attempts).slice(0, 500));
   }
 
   const parsed = parseJson(llmRes.output.content);

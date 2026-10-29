@@ -124,12 +124,12 @@ export function loadConfig(overrides = {}) {
         orcarouter: {
           baseUrl: env("ORCAROUTER_BASE_URL", "https://api.orcarouter.ai/v1"),
           apiKey: env("ORCAROUTER_API_KEY", null),
+          // v0.56.48 — only keys whose workspaces are free-eligible.
+          // _2/_3/_4 return "Free models are not available to this workspace"
+          // (eligibility gate, not quota). Filtering them out prevents burning
+          // rotation cycles on guaranteed-429 keys.
           keys: [
-            env("ORCAROUTER_API_KEY", null),
             env("ORCAROUTER_API_KEY_1", null),
-            env("ORCAROUTER_API_KEY_2", null),
-            env("ORCAROUTER_API_KEY_3", null),
-            env("ORCAROUTER_API_KEY_4", null),
             env("ORCAROUTER_API_KEY_5", null),
           ].filter(Boolean),
         },
