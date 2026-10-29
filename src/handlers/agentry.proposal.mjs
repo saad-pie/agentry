@@ -93,10 +93,18 @@ const PREFIX_RANK = {
   "maven:": 60, "nuget:": 55, "huggingface:": 50,
 };
 
-function rankCandidates(candidates) {
+function rankCandidates(candidates, intent) {
   // v0.24.3 — skip type-only packages before scoring.
   // v0.52.11 — also skip browser-only packages (-wasm, worker). Those need
   // Worker/WebAssembly globals Node doesn't provide; trial always fails.
+  // v0.56.44 — direction-aware ranking
+  const _targetWord = (() => {
+    const _h = String(intent || "").toLowerCase();
+    const _m = _h.match(/(?:to|into|as)\s+([a-z][a-z0-9]{2,15})\b/);
+    return _m ? _m[1] : null;
+  })();
+  const _READER_ONLY = /\b(?:reader|read|parse|decode|load|inspect)\b/i;
+  const _WRITER_WORD = /\b(?:write|writer|create|encode|save|convert|generate|output|produce|compose|export)\b/i;
   const filtered = candidates.filter(c =>
     !isTypeOnlyPackage(c && c.id) && !isBrowserOnlyPackage(c && c.id)
   );
@@ -111,10 +119,19 @@ function rankCandidates(candidates) {
     // v0.29.1 — synthesizable candidates rank above unsynthesizable at every
     // prefix level. A crates candidate with 1000 stars still loses to any
     // synthesizable candidate. Prevents stall on unbuildable sources.
-    return { c, rank, stars, idx, synth: _synth ? 1 : 0 };
+    let _bonus = 0;
+    const _hay = (id + " " + String(c.name || "") + " " + String(c.description || "")).toLowerCase();
+    if (_targetWord) {
+      if (id.toLowerCase().includes(":" + _targetWord)) _bonus += 25;
+      else if (_hay.includes(_targetWord)) _bonus += 10;
+    }
+    const _desc = String(c.description || "");
+    if (_desc && _READER_ONLY.test(_desc) && !_WRITER_WORD.test(_desc)) _bonus -= 30;
+    return { c, rank, stars, idx, synth: _synth ? 1 : 0, bonus: _bonus };
   });
   scored.sort((a, b) => {
     if (b.synth !== a.synth) return b.synth - a.synth;
+    if ((b.bonus || 0) !== (a.bonus || 0)) return (b.bonus || 0) - (a.bonus || 0);
     if (b.rank !== a.rank) return b.rank - a.rank;
     if (b.stars !== a.stars) return b.stars - a.stars;
     return a.idx - b.idx;
@@ -191,7 +208,7 @@ function parseProposalJSON(text) {
 }
 
 function fallbackProposal(gap, candidates) {
-  const ranked = rankCandidates(candidates);
+  const ranked = rankCandidates(candidates, gap.wanted_description || gap.wanted_id || "");
   // v0.52.11 — filter by isSynthesizable before auto-pick. Prior version chose
   // via PREFIX_RANK alone, which still qualified hermes_atlas (rank 80) even
   // after isSynthesizable was marked false. Result: fallback picked a skill
@@ -220,7 +237,7 @@ function fallbackProposal(gap, candidates) {
 }
 
 async function analyze(deps, gap, candidates) {
-  const ranked = rankCandidates(candidates).slice(0, MAX_LLM_CANDIDATES);
+  const ranked = rankCandidates(candidates, gap.wanted_description || gap.wanted_id || "").slice(0, MAX_LLM_CANDIDATES);
   const messages = [
     { role: "system", content: systemPrompt() },
     { role: "user",   content: userPrompt(gap, ranked) },

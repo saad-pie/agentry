@@ -187,6 +187,22 @@ export default async function agentrySynthesize(input, ctx) {
     throw new Error("agentry.synthesize: candidate " + candidate.id + " rejected — " + String(facts.error || facts.rejected_reason).slice(0, 400));
   }
 
+  // v0.56.44 — single-file langs (rust, go) use 1-step shape
+  const _isSingleFileSource = candidate.source === "gomod" || candidate.source === "crates"
+    || (facts && facts.source_kind === "go_module")
+    || (facts && facts.source_kind === "rust_crate");
+  const _effectiveShape = _isSingleFileSource
+    ? {
+        description: "Single-file program. One step: full program, prepare+run+emit combined.",
+        steps: [{
+          verb: "execute",
+          why: "Full program: file I/O, core logic, and JSON output in one file. This one step IS the entire script.",
+          fails_if: "compilation error, missing import, or runtime failure",
+          produces: "stdout JSON with the promised fields",
+        }],
+      }
+    : shape;
+
   const _hasReadme = facts.readme && facts.readme.length > 500;
   const _refs = _hasReadme
     ? []
@@ -197,7 +213,7 @@ export default async function agentrySynthesize(input, ctx) {
     ids: _refs.map(r => r.id),
     skipped_has_readme: _hasReadme,
   });
-  const prompt = buildPrompt({ gap, candidate, facts, shape, references: _refs });
+  const prompt = buildPrompt({ gap, candidate, facts, shape: _effectiveShape, references: _refs });
 
   const messages = [
     { role: "system", content: "You output only JSON. No prose. No fences." },
@@ -361,7 +377,7 @@ export default async function agentrySynthesize(input, ctx) {
 
   if (!isSkillWrapper) {
     try {
-      validatePlan(spec.plan, shape, spec.capability.id);
+      validatePlan(spec.plan, _effectiveShape, spec.capability.id);
     } catch (e) {
       events.emit("synthesize.plan_invalid", {
         proposal_id, candidate_id,
@@ -538,7 +554,7 @@ export default async function agentrySynthesize(input, ctx) {
     kind: spec.capability.kind,
     spec_type: spec.type || "plan",
     wanted_kind: gap.wanted_kind || null,
-    shape_steps: shape.steps.length,
+    shape_steps: _effectiveShape.steps.length,
     plan_steps: spec.plan ? spec.plan.length : 0,
     handler_path: handlerPath,
     seed_path: seedPath,

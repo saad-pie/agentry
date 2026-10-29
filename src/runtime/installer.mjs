@@ -200,12 +200,30 @@ export async function prepareSession(deps, { capId, session, stack = [], require
       );
     }
     const pid = res.output.result.pid;
-    const read = await invoke(
-      "agentry.os",
-      { action: "shell.read", session, pid, wait_ms: _postInstallTimeout },
-      { tenant: "local", by: "installer" }
-    );
-    const out = read.output.result;
+    // v0.56.44 — poll until exit. shell.read caps wait_ms at 30s internally,
+    // so long installs (cargo install, apt-get) returned exit_code:null after
+    // 30s and got treated as killed. Poll in a loop until done or timeout.
+    const _pollStart = Date.now();
+    let out = null;
+    let _accOut = "";
+    let _accErr = "";
+    while (Date.now() - _pollStart < _postInstallTimeout) {
+      const read = await invoke(
+        "agentry.os",
+        { action: "shell.read", session, pid, wait_ms: 25000 },
+        { tenant: "local", by: "installer" }
+      );
+      const snap = (read.output && read.output.result) || {};
+      _accOut += String(snap.stdout || "");
+      _accErr += String(snap.stderr || "");
+      if (snap.done === true || (snap.exit_code !== null && snap.exit_code !== undefined)) {
+        out = { ...snap, stdout: _accOut, stderr: _accErr };
+        break;
+      }
+    }
+    if (!out) {
+      throw new Error("installer: post_install timed out after " + _postInstallTimeout + "ms — " + String(_accErr || _accOut).slice(-400));
+    }
     if (out.exit_code !== 0) {
       const _sig = out.signal ? (" signal=" + out.signal) : "";
       const _exitLabel = (out.exit_code === null || out.exit_code === undefined)

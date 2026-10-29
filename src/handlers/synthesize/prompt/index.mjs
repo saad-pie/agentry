@@ -25,7 +25,7 @@ export function buildPrompt({ gap, candidate, facts, shape, references }) {
       + "Source URL: " + (facts.skill_source_url || "(unknown)") + "\n"
       + "Frontmatter:\n" + JSON.stringify(facts.skill_frontmatter || {}, null, 2) + "\n\n"
       + "Body (this becomes your system prompt for the wrapped capability):\n"
-      + "<<<\n" + (facts.skill_body || "(empty)").slice(0, 6000) + "\n>>>\n";
+      + "<<<\n" + (facts.skill_body || "(empty)").slice(0, 3000) + "\n>>>\n";
   } else if (facts.source_kind === "npm") {
     repoFacts = "NPM PACKAGE: " + (facts.npm_package_name || "(unknown name)") + "\n"
       + "Install path (relative to session): " + (facts.repo_dir || "(unknown)") + "\n"
@@ -83,6 +83,14 @@ export function buildPrompt({ gap, candidate, facts, shape, references }) {
   lines.push("=== REPO FACTS ===");
   lines.push(repoFacts);
   lines.push("");
+  // v0.56.44 — repo is already cloned; do not re-fetch or use auth tokens
+  if (facts.cloned && (facts.repo_dir || candidate.kind === "repo")) {
+    lines.push("=== REPO ALREADY CLONED — DO NOT RE-FETCH ===");
+    lines.push("Files are in the session at `" + (facts.repo_dir || "repo") + "/`. Read with fs.readFileSync using RELATIVE paths from that dir.");
+    lines.push("Do NOT reference process.env.GITHUB_TOKEN, GITHUB_PAT, GH_TOKEN, or any auth token in plan code. Files are present; no auth needed.");
+    lines.push("Do NOT call `git clone` inside plan code. The clone already happened during candidate reading.");
+    lines.push("");
+  }
   if (references && references.length > 0) {
     lines.push("=== WORKING REFERENCE (verified, real .mjs file) ===");
     lines.push("This capability already works in production. Study its structure: await import() for modules (NEVER require), process.env.UPPER_CASE for inputs, console.log(JSON.stringify({...})) as the last line. Copy the STRUCTURE, adapt the package.");
