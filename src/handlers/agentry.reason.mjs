@@ -25,9 +25,9 @@ function buildModelChain(input) {
   }
   // v0.56.45 — AnyRouter primary (3 models), groq/google fallback
   chain.push(
-    { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b", source: "primary" },
-    { provider: "anyrouter", model: "minimax/minimax-m3.1-flash", source: "primary" },
-    { provider: "anyrouter", model: "deepseek/deepseek-v4-flash", source: "primary" },
+    { provider: "orcarouter", model: "tencent/hy4-preview-free", source: "primary" },
+    { provider: "orcarouter", model: "deepseek/deepseek-v4.1-flash-free", source: "primary" },
+    { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free", source: "primary" },
     { provider: "groq", model: "qwen/qwen3.8-27b", source: "fallback" },
     { provider: "google", model: "gemini-2.5-flash", source: "fallback" },
     { provider: "groq", model: "openai/gpt-oss-120b", source: "fallback" },

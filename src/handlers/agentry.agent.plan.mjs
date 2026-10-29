@@ -19,8 +19,8 @@
 //          Canonicalization stays as a safety net but is expected to be
 //          silent. If it fires, the prompt is still under-performing.
 
-const PROVIDER = process.env.AGENTRY_PLANNER_PROVIDER || "groq";
-const MODEL = process.env.AGENTRY_PLANNER_MODEL || "openai/gpt-oss-120b";
+const PROVIDER = process.env.AGENTRY_PLANNER_PROVIDER || "orcarouter";
+const MODEL = process.env.AGENTRY_PLANNER_MODEL || "deepseek/deepseek-v4-flash-free";
 const DEFAULT_MAX_STEPS = 8;
 const MAX_CAPABILITIES_IN_PROMPT = 120;
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);

@@ -17,9 +17,9 @@ export const SKILL_RUNNER_PATH = join(HERE, "..", "..", "runtime", "skill_runner
 
 // v0.56.45 — AnyRouter primary (1M ctx). Free models, 532 tok/s.
 export const MODEL_CHAIN = [
-  { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b" },
-  { provider: "anyrouter", model: "minimax/minimax-m3.1-flash" },
-  { provider: "anyrouter", model: "deepseek/deepseek-v4-flash" },
+  { provider: "orcarouter", model: "tencent/hy4-preview-free" },
+  { provider: "orcarouter", model: "deepseek/deepseek-v4.1-flash-free" },
+  { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
   { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },

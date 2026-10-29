@@ -23,8 +23,8 @@ const INSTALLER_PATH = join(HERE, "..", "runtime", "installer.mjs").replace(/\\/
 
 // v0.56.45 — AnyRouter primary
 const MODEL_CHAIN = [
-  { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b" },
-  { provider: "anyrouter", model: "minimax/minimax-m3.1-flash" },
+  { provider: "orcarouter", model: "tencent/hy4-preview-free" },
+  { provider: "orcarouter", model: "deepseek/deepseek-v4.1-flash-free" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
   { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },

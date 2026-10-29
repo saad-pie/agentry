@@ -213,8 +213,10 @@ function buildChain(provider, model) {
   // Fallback order: gemini via the atria proxy, then back to groq
   // with a smaller model. Skip duplicates.
   const extra = [
-    { provider: "google", model: "gemini-2.5-flash" },
+    { provider: "orcarouter", model: "tencent/hy4-preview-free" },
+    { provider: "orcarouter", model: "deepseek/deepseek-v4.1-flash-free" },
     { provider: "groq", model: "openai/gpt-oss-20b" },
+    { provider: "google", model: "gemini-2.5-flash" },
   ];
   for (const e of extra) {
     if (chain.some(c => c.provider === e.provider && c.model === e.model)) continue;

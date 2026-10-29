@@ -121,6 +121,18 @@ export function loadConfig(overrides = {}) {
           baseUrl: env("ANYROUTER_BASE_URL", "https://anyrouter.dev/api/v1"),
           apiKey: env("ANYROUTER_API_KEY", null),
         },
+        orcarouter: {
+          baseUrl: env("ORCAROUTER_BASE_URL", "https://api.orcarouter.ai/v1"),
+          apiKey: env("ORCAROUTER_API_KEY", null),
+          keys: [
+            env("ORCAROUTER_API_KEY", null),
+            env("ORCAROUTER_API_KEY_1", null),
+            env("ORCAROUTER_API_KEY_2", null),
+            env("ORCAROUTER_API_KEY_3", null),
+            env("ORCAROUTER_API_KEY_4", null),
+            env("ORCAROUTER_API_KEY_5", null),
+          ].filter(Boolean),
+        },
       },
     },
 
