@@ -96,7 +96,7 @@ const PREFIX_RANK = {
   "maven:": 60, "nuget:": 55, "huggingface:": 50,
 };
 
-function rankCandidates(candidates, intent) {
+export function rankCandidates(candidates, intent) {
   // v0.24.3 — skip type-only packages before scoring.
   // v0.52.11 — also skip browser-only packages (-wasm, worker). Those need
   // Worker/WebAssembly globals Node doesn't provide; trial always fails.

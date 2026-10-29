@@ -488,7 +488,15 @@ export default async function agentrySynthesize(input, ctx) {
   // reach trial, where the error surfaced 60s later as "kernel exited 1".
   {
     const lang = spec.kernel_language === "python" ? "python" : "node";
-    const _src = String(renderedHandler);
+    // v0.56.47 — extract ONLY the KERNEL_SCRIPT string. Every rendered .mjs
+    // contains "await import(...)" and "const CAP_ID = ..." boilerplate, so
+    // running the language-mismatch regexes on the whole file rejected 100%
+    // of Python capabilities. Extract just the plan code.
+    const _ksMatch = String(renderedHandler).match(/const KERNEL_SCRIPT = "((?:[^"\\]|\\.)*)"/);
+    let _src = "";
+    if (_ksMatch) {
+      try { _src = JSON.parse('"' + _ksMatch[1] + '"'); } catch (e) { _src = _ksMatch[1]; }
+    }
     // Language sanity: if node, reject obvious python; if python, reject obvious node
     const _isSkill = spec.type === "skill_wrapper";
     if (!_isSkill) {
