@@ -28,9 +28,12 @@ import { randomBytes } from "node:crypto";
 import { link, RELATIONS } from "../graph/edges.mjs";
 import { isSynthesizable, supportFor } from "../adapters/_synthesis_support.mjs";
 
+// v0.56.45 — AnyRouter primary
 const MODEL_CHAIN = [
+  { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b" },
+  { provider: "anyrouter", model: "minimax/minimax-m3.1-flash" },
+  { provider: "anyrouter", model: "deepseek/deepseek-v4-flash" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
-  { provider: "groq", model: "openai/gpt-oss-20b" },
   { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
@@ -139,7 +142,10 @@ function rankCandidates(candidates, intent) {
   return scored.map(x => x.c);
 }
 
-const MAX_LLM_CANDIDATES = 15;
+// v0.56.45 — raise 15 -> 30. 15-cap silently pruned crates/gomod/maven/nuget.
+// 30 candidates x ~200 tokens = 6K input, still safe under groq's 8K TPM if
+// fallback triggers. AnyRouter's 1M context handles it trivially.
+const MAX_LLM_CANDIDATES = 30;
 
 // v0.24.3 — filter type-only packages (@types/*, types-*) before ranking.
 // They have no runtime code, only .d.ts files, so synthesis produces a

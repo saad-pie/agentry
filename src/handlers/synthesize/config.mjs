@@ -15,9 +15,12 @@ export const MAX_MANIFEST_CHARS = 4000;
 export const INSTALLER_PATH = join(HERE, "..", "..", "runtime", "installer.mjs").replace(/\\/g, "/");
 export const SKILL_RUNNER_PATH = join(HERE, "..", "..", "runtime", "skill_runner.mjs").replace(/\\/g, "/");
 
+// v0.56.45 — AnyRouter primary (1M ctx). Free models, 532 tok/s.
 export const MODEL_CHAIN = [
+  { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b" },
+  { provider: "anyrouter", model: "minimax/minimax-m3.1-flash" },
+  { provider: "anyrouter", model: "deepseek/deepseek-v4-flash" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
-  { provider: "groq", model: "openai/gpt-oss-20b" },
   { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];

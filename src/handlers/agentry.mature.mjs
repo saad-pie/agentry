@@ -21,9 +21,11 @@ const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR || "/tmp/home/.dsh/agentry
 const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR || "/tmp/home/.dsh/agentry-synthesized/seeds";
 const INSTALLER_PATH = join(HERE, "..", "runtime", "installer.mjs").replace(/\\/g, "/");
 
+// v0.56.45 — AnyRouter primary
 const MODEL_CHAIN = [
+  { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b" },
+  { provider: "anyrouter", model: "minimax/minimax-m3.1-flash" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
-  { provider: "groq", model: "openai/gpt-oss-20b" },
   { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];

@@ -36,10 +36,11 @@
 import { recordGap } from "./agentry.capability_gap.mjs";
 import { supportFor, synthesizableSources, unsynthesizableSources } from "../adapters/_synthesis_support.mjs";
 
-const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "groq";
-const MODEL = process.env.AGENTRY_DEEP_MODEL || "qwen/qwen3.8-27b";
-const FALLBACK_PROVIDER = process.env.AGENTRY_DEEP_FALLBACK_PROVIDER || "google";
-const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "gemini-2.5-flash";
+// v0.56.45 — AnyRouter primary (large ctx, free). Groq fallback.
+const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "anyrouter";
+const MODEL = process.env.AGENTRY_DEEP_MODEL || "nvidia/nemotron-3-ultra-550b-a55b";
+const FALLBACK_PROVIDER = process.env.AGENTRY_DEEP_FALLBACK_PROVIDER || "groq";
+const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "qwen/qwen3.8-27b";
 const MAX_TURNS = Number(process.env.AGENTRY_DEEP_MAX_TURNS || "5");
 const MAX_TOOL_CALLS_PER_TURN = 4;
 

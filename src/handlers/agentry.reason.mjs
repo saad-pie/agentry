@@ -23,11 +23,14 @@ function buildModelChain(input) {
   if (input?.model && typeof input.model === "string" && input.model.length > 0) {
     chain.push({ provider: null, model: input.model, source: "harness" });
   }
+  // v0.56.45 — AnyRouter primary (3 models), groq/google fallback
   chain.push(
-    { provider: "groq", model: "qwen/qwen3.8-27b", source: "primary" },
+    { provider: "anyrouter", model: process.env.AGENTRY_PRIMARY_MODEL || "nvidia/nemotron-3-ultra-550b-a55b", source: "primary" },
+    { provider: "anyrouter", model: "minimax/minimax-m3.1-flash", source: "primary" },
+    { provider: "anyrouter", model: "deepseek/deepseek-v4-flash", source: "primary" },
+    { provider: "groq", model: "qwen/qwen3.8-27b", source: "fallback" },
     { provider: "google", model: "gemini-2.5-flash", source: "fallback" },
     { provider: "groq", model: "openai/gpt-oss-120b", source: "fallback" },
-    { provider: "groq", model: "openai/gpt-oss-20b", source: "fallback" },
   );
   const seen = new Set();
   return chain.filter(c => {

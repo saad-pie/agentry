@@ -117,6 +117,10 @@ export function loadConfig(overrides = {}) {
           baseUrl: env("REQUESTY_BASE_URL", "https://router.requesty.ai/v1"),
           apiKey: env("REQUESTYAI_API_KEY", null),
         },
+        anyrouter: {
+          baseUrl: env("ANYROUTER_BASE_URL", "https://anyrouter.dev/api/v1"),
+          apiKey: env("ANYROUTER_API_KEY", null),
+        },
       },
     },
 
