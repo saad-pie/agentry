@@ -75,6 +75,18 @@ export default async function agentryBuild(input, ctx) {
 
   if (!adopted) {
     events.emit("build.failed", { gap_id: gapId, capability_id: capId, ms: Date.now() - started });
+    const _originConvF = gap.origin_conversation_id || null;
+    if (_originConvF) {
+      try {
+        events.emit("chat.assistant_turn", {
+          conversation_id: _originConvF,
+          agent_id: null,
+          message: "[agentry] build failed: " + capId + " — could not adopt. Gap stays open; next discovery cycle will retry.",
+          task_id: null,
+          state: "failed",
+        });
+      } catch (e) {}
+    }
     return { output: { ok: false, reason: "adopt_failed", gap_id: gapId, capability_id: capId }, cost: { time_ms: Date.now() - started } };
   }
 
@@ -84,6 +96,23 @@ export default async function agentryBuild(input, ctx) {
     handler_path: adopted.handler_path,
     ms: Date.now() - started,
   });
+
+  // v0.56.54 — notify the origin conversation (chat thread that requested the gap)
+  const _originConv = gap.origin_conversation_id || null;
+  if (_originConv) {
+    try {
+      events.emit("chat.assistant_turn", {
+        conversation_id: _originConv,
+        agent_id: null,
+        message: "[agentry] build succeeded: " + (adopted.capability_id || capId) + " — retry your request now.",
+        task_id: null,
+        state: "ready",
+      });
+      events.emit("build.notified", { gap_id: gapId, conversation_id: _originConv });
+    } catch (e) {
+      events.emit("build.notify_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) });
+    }
+  }
 
   return {
     output: {

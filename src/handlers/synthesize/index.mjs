@@ -479,6 +479,27 @@ export default async function agentrySynthesize(input, ctx) {
   const handlerPath = join(HANDLERS_DIR, spec.capability.id + ".mjs");
   const seedPath = join(SEEDS_DIR, spec.capability.id + ".json");
 
+  // v0.56.54 — fast-fail if accept_spec.input is missing required accepts keys.
+  // Without this, trial runs with empty env vars → "Missing INPUT_PATH" after
+  // 30s of synthesis. Better to fail in 1s and try the next candidate.
+  if (!isSkillWrapper) {
+    const _accepts = spec.capability.accepts || {};
+    const _accIn = (spec.accept_spec && spec.accept_spec.input) || {};
+    const _missingIn = Object.keys(_accepts).filter(k => {
+      const _s = _accepts[k];
+      const _opt = _s && typeof _s === "object" && _s.optional === true;
+      return !_opt && _accIn[k] === undefined;
+    });
+    if (_missingIn.length > 0) {
+      events.emit("synthesize.accept_spec_empty", {
+        proposal_id, candidate_id,
+        capability_id: spec.capability.id,
+        missing_input_keys: _missingIn,
+      });
+      throw new Error("agentry.synthesize: accept_spec.input missing required keys: " + _missingIn.join(", ") + " — trial would fail");
+    }
+  }
+
   autoFixtures(spec);
   const renderedHandler = isSkillWrapper ? renderSkillHandler(spec) : renderHandler(spec);
   writeFileSync(handlerPath, renderedHandler);

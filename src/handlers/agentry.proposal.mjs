@@ -130,6 +130,13 @@ export function rankCandidates(candidates, intent) {
     }
     const _desc = String(c.description || "");
     if (_desc && _READER_ONLY.test(_desc) && !_WRITER_WORD.test(_desc)) _bonus -= 30;
+    // v0.56.54 — SKILL.md is natural-language instructions, not concrete code.
+    // Penalize for converter intents so packages win.
+    const _idLower = id.toLowerCase();
+    const _intentLower = String(intent || "").toLowerCase();
+    if (_idLower.includes("/skill.md") || _idLower.includes(".claude/skills") || _idLower.includes(":skills/")) {
+      if (!_intentLower.includes("skill") && !_intentLower.includes("agent")) _bonus -= 40;
+    }
     return { c, rank, stars, idx, synth: _synth ? 1 : 0, bonus: _bonus };
   });
   scored.sort((a, b) => {

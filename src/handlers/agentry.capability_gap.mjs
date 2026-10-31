@@ -99,6 +99,7 @@ export function recordGap(deps, gap) {
         : (prevDesc != null ? prevDesc : _fallbackDesc),
     reason: gap.reason != null ? gap.reason : prevReason,
     example_task_id: gap.example_task_id || null,
+    origin_conversation_id: gap.origin_conversation_id || (existing && existing.origin_conversation_id) || null,
     hits: (existing?.hits || 0) + 1,
     first_seen_at: existing?.first_seen_at || now,
     last_seen_at: now,
