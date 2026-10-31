@@ -316,20 +316,42 @@ function approvalTemplates() {
 // notification for "nothing found" gaps, only for actual attempts.
 function buildDecisions(analysis) {
   if (!analysis || !analysis.recommended_id) return { recommended: null, decisions: {} };
-  const rec = (analysis.candidates || []).find(c => c.id === analysis.recommended_id);
+  const candidates = analysis.candidates || [];
+  const rec = candidates.find(c => c.id === analysis.recommended_id);
   if (!rec) return { recommended: null, decisions: {} };
-  return {
-    recommended: rec,
-    decisions: {
-      [rec.id]: {
-        decision: "approved",
-        at: Date.now(),
-        auto: true,
-        confidence: rec.confidence,
-        fit: rec.fit,
-      },
+
+  // v0.56.56 — approve top N, not just top 1. Adopt iterates only over approved
+  // candidates. Approving 1 candidate means if it fails trial, adopt gives up.
+  // The trace showed "82 candidates considered, 1 adopted attempt, fail" — because
+  // decisions only had 1 entry. This makes adopt try up to 5 candidates before
+  // giving up.
+  const decisions = {
+    [rec.id]: {
+      decision: "approved",
+      at: Date.now(),
+      auto: true,
+      confidence: rec.confidence,
+      fit: rec.fit,
+      source: "recommended",
     },
   };
+  // Approve up to 4 alternates by fit score. Skip clearly rejected (< 0.15).
+  const alternates = candidates
+    .filter(c => c.id !== rec.id)
+    .filter(c => c.fit == null || Number(c.fit) >= 0.15)
+    .sort((a, b) => (Number(b.fit) || 0) - (Number(a.fit) || 0))
+    .slice(0, 4);
+  for (const alt of alternates) {
+    decisions[alt.id] = {
+      decision: "approved",
+      at: Date.now(),
+      auto: true,
+      confidence: alt.confidence,
+      fit: alt.fit,
+      source: "alternate",
+    };
+  }
+  return { recommended: rec, decisions };
 }
 
 function renderEmail({ gap, analysis, perCandidateTokens, approveBase }) {

@@ -414,6 +414,10 @@ lines.push("- The kernel session starts EMPTY. Any file your code reads must hav
     lines.push("");
     lines.push("PYTHON RULES (READ TWICE):");
     lines.push("- The kernel runs PYTHON 3.11. NOT JavaScript. No const/let/await import/console.log/process.env.");
+    lines.push("- ALWAYS import stdlib modules at the top of any step that uses them.");
+    lines.push("  If you call json.dumps(), you MUST have 'import json' on the first line of that step.");
+    lines.push("  Same for os, sys, io, base64, pathlib, tempfile, subprocess, datetime, re, csv, shutil, hashlib.");
+    lines.push("  Missing imports are the #1 python trial failure. Do not assume any module is pre-imported.");
     lines.push("- Load the package at the top of the step that needs it:");
     lines.push("    import " + facts.pypi_module_name);
     lines.push("  or for a specific function:");

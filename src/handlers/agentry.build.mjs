@@ -74,7 +74,29 @@ export default async function agentryBuild(input, ctx) {
   }
 
   if (!adopted) {
-    events.emit("build.failed", { gap_id: gapId, capability_id: capId, ms: Date.now() - started });
+    // v0.56.56 — grab the last adoption failure reason so debug doesn't require
+    // grepping adoption.trial_failed separately.
+    let _lastErr = null;
+    let _lastPhase = null;
+    let _triedCandidates = 0;
+    try {
+      const _recent = events.recent ? events.recent(200) : events.all().slice(-200);
+      for (let _i = _recent.length - 1; _i >= 0; _i--) {
+        const _e = _recent[_i];
+        if (_e && _e.proposal_id === proposalId && (_e.kind === "adoption.trial_failed" || _e.kind === "adoption.synthesize_failed")) {
+          if (!_lastErr) { _lastErr = String(_e.error || "").slice(0, 300); _lastPhase = _e.phase || null; }
+          _triedCandidates++;
+        }
+        if (_triedCandidates >= 8) break;
+      }
+    } catch (_) {}
+    events.emit("build.failed", {
+      gap_id: gapId, capability_id: capId, ms: Date.now() - started,
+      reason: "no_candidate_adopted",
+      tried_candidates: _triedCandidates,
+      last_error: _lastErr,
+      last_phase: _lastPhase,
+    });
     const _originConvF = gap.origin_conversation_id || null;
     if (_originConvF) {
       try {
