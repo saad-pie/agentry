@@ -599,9 +599,9 @@ export default async function agentryChat(input, ctx) {
       const _desc = _missingCaps.length === 1
         ? (_missingCaps[0].wanted_description || _missingCaps[0].why || _missingCaps[0].capability_id)
         : _missingCaps.map(m => m.capability_id).join(", ");
-      const _msg = "You're waiting on " + _missingCaps.length + " capability that don't exist yet: " + _missingCaps.map(m => m.capability_id).join(", ") + ". " +
-        "Strategic movement: (1) searching npm/pypi/crates/github for the right package, (2) ranking candidates, (3) synthesizing handler, (4) trial-verifying it produces real artifacts. " +
-        "ETA ~90s. Retry, or I'll notify you when ready.";
+      const _msg = "Building " + _missingCaps.length + " capability: " + _missingCaps.map(m => m.capability_id).join(", ") + ". " +
+        "What agentry is doing now: (1) discovering packages, (2) ranking candidates, (3) synthesizing the handler, (4) trial-verifying it produces real artifacts. " +
+        "ETA ~90s. Retry after that, or wait for notification.";
       for (const step of _missingCaps) {
         const gapId = "gap:" + step.capability_id;
         try {
@@ -629,12 +629,6 @@ export default async function agentryChat(input, ctx) {
           capability_building: _missingCaps.map(m => m.capability_id),
           gap_ids: _gapIds,
           eta_s: 90,
-          strategic_movement: {
-            phase: "build",
-            steps: ["discover", "rank", "synthesize", "trial", "adopt"],
-            current_gap: _missingCaps[0].capability_id,
-            description: _desc,
-          },
           error: null,
         },
         cost: { time_ms: Date.now() - started },

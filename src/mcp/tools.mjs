@@ -504,6 +504,11 @@ export function registerAgentryTools(deps) {
               error: o.task.error || null,
             } : null,
             error: o.error || null,
+            // v0.56.53 — forward cold-path status fields
+            ...(o.state ? { state: o.state } : {}),
+            ...(Array.isArray(o.capability_building) && o.capability_building.length ? { capability_building: o.capability_building } : {}),
+            ...(Array.isArray(o.gap_ids) && o.gap_ids.length ? { gap_ids: o.gap_ids } : {}),
+            ...(typeof o.eta_s === "number" ? { eta_s: o.eta_s } : {}),
             ms,
           }, null, 2),
         }],
