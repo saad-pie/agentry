@@ -326,6 +326,13 @@ export default async function agentryChat(input, ctx) {
   const events = ctx.events;
   const started = Date.now();
 
+  // v0.56.57 — invalidate cache. agentry.build (in the MCP process) writes new
+  // capability nodes to disk async while this chat handler holds a stale
+  // in-memory cache from boot. Without this, getCapability() returns null for
+  // capabilities built after boot, causing chat to re-queue instead of firing
+  // the hot path.
+  if (typeof graph.invalidateCache === "function") graph.invalidateCache();
+
   const conversationId = conversation_id || genConversationId();
   const execute = execute_default !== false;
   const maxSteps = Math.max(1, Math.min(20, Number(max_steps) || DEFAULT_MAX_STEPS));
@@ -534,6 +541,9 @@ export default async function agentryChat(input, ctx) {
 
   // ── 4.5 v0.56.52 — non-blocking cold path ──
   if (execute) {
+    // v0.56.57 — invalidate before scan. Planner LLM call can take 3-8s, during
+    // which a background build might have just finished. Re-read the graph.
+    if (typeof graph.invalidateCache === "function") graph.invalidateCache();
     const _missingCaps = [];
     for (const step of plan) {
       if (!graph.getCapability(step.capability_id)) _missingCaps.push(step);
