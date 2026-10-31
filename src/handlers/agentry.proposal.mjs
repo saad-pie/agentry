@@ -30,8 +30,8 @@ import { isSynthesizable, supportFor } from "../adapters/_synthesis_support.mjs"
 
 // v0.56.45 — AnyRouter primary
 const MODEL_CHAIN = [
+  { provider: "ollama", model: "beam:cloud" },
   { provider: "orcarouter", model: "tencent/hy4-preview-free" },
-  { provider: "orcarouter", model: "deepseek/deepseek-v4.1-flash-free" },
   { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
   { provider: "groq", model: "qwen/qwen3.8-27b" },

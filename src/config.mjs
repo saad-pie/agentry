@@ -121,6 +121,10 @@ export function loadConfig(overrides = {}) {
           baseUrl: env("ANYROUTER_BASE_URL", "https://anyrouter.dev/api/v1"),
           apiKey: env("ANYROUTER_API_KEY", null),
         },
+        ollama: {
+          baseUrl: env("OLLAMA_BASE_URL", "https://ollama.com/v1"),
+          apiKey: env("OLLAMA_API_KEY", null),
+        },
         orcarouter: {
           baseUrl: env("ORCAROUTER_BASE_URL", "https://api.orcarouter.ai/v1"),
           apiKey: env("ORCAROUTER_API_KEY", null),

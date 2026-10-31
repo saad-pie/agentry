@@ -25,13 +25,13 @@ function buildModelChain(input) {
   }
   // v0.56.45 — AnyRouter primary (3 models), groq/google fallback
   chain.push(
+    { provider: "ollama", model: "beam:cloud", source: "primary" },
     { provider: "orcarouter", model: "tencent/hy4-preview-free", source: "primary" },
-    { provider: "orcarouter", model: "deepseek/deepseek-v4.1-flash-free", source: "primary" },
     { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free", source: "primary" },
     { provider: "groq", model: "qwen/qwen3.8-27b", source: "fallback" },
     { provider: "google", model: "gemini-2.5-flash", source: "fallback" },
     { provider: "groq", model: "openai/gpt-oss-120b", source: "fallback" },
-  );
+  )
   const seen = new Set();
   return chain.filter(c => {
     if (seen.has(c.model)) return false;
