@@ -16,7 +16,7 @@ export const INSTALLER_PATH = join(HERE, "..", "..", "runtime", "installer.mjs")
 export const SKILL_RUNNER_PATH = join(HERE, "..", "..", "runtime", "skill_runner.mjs").replace(/\\/g, "/");
 
 // v0.56.45 — AnyRouter primary (1M ctx). Free models, 532 tok/s.
-const MODEL_CHAIN = [
+export const MODEL_CHAIN = [
   { provider: "ollama", model: "beam:cloud" },
   { provider: "orcarouter", model: "tencent/hy4-preview-free" },
   { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
