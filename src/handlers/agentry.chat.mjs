@@ -587,6 +587,61 @@ export default async function agentryChat(input, ctx) {
     }
   }
 
+  // ── 4.5 v0.56.52 — non-blocking cold path ──
+  if (execute) {
+    const _missingCaps = [];
+    for (const step of plan) {
+      if (!graph.getCapability(step.capability_id)) _missingCaps.push(step);
+    }
+    if (_missingCaps.length > 0) {
+      const { recordGap } = await import("./agentry.capability_gap.mjs");
+      const _gapIds = [];
+      const _desc = _missingCaps.length === 1
+        ? (_missingCaps[0].wanted_description || _missingCaps[0].why || _missingCaps[0].capability_id)
+        : _missingCaps.map(m => m.capability_id).join(", ");
+      const _msg = "You're waiting on " + _missingCaps.length + " capability that don't exist yet: " + _missingCaps.map(m => m.capability_id).join(", ") + ". " +
+        "Strategic movement: (1) searching npm/pypi/crates/github for the right package, (2) ranking candidates, (3) synthesizing handler, (4) trial-verifying it produces real artifacts. " +
+        "ETA ~90s. Retry, or I'll notify you when ready.";
+      for (const step of _missingCaps) {
+        const gapId = "gap:" + step.capability_id;
+        try {
+          recordGap({ graph, events }, {
+            key: gapId,
+            wanted_kind: step.wanted_kind || "tool",
+            wanted_id: step.capability_id,
+            wanted_description: step.wanted_description || step.why || step.capability_id,
+            reason: "chat.queued: plan needed cap",
+          });
+          _gapIds.push(gapId);
+          ctx.invoke("agentry.build", { gap_id: gapId }, { tenant: "local", by: "chat.build" })
+            .catch(e => events.emit("chat.build_async_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) }));
+        } catch (e) {
+          events.emit("chat.record_gap_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) });
+        }
+      }
+      events.emit("chat.queued", { conversation_id: conversationId, agent_id: agentId, capability_building: _missingCaps.map(m => m.capability_id), gap_ids: _gapIds });
+      events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: _msg });
+      return {
+        output: {
+          ok: true, conversation_id: conversationId, agent_id: agentId,
+          message: _msg, plan, task: null, executed: false,
+          state: "queued",
+          capability_building: _missingCaps.map(m => m.capability_id),
+          gap_ids: _gapIds,
+          eta_s: 90,
+          strategic_movement: {
+            phase: "build",
+            steps: ["discover", "rank", "synthesize", "trial", "adopt"],
+            current_gap: _missingCaps[0].capability_id,
+            description: _desc,
+          },
+          error: null,
+        },
+        cost: { time_ms: Date.now() - started },
+      };
+    }
+  }
+
   // ── 5. Execute via agent.task ──
   if (!agentId) {
     const bootReason = (function() {

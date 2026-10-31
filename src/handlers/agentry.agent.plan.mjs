@@ -21,17 +21,20 @@
 
 // v0.56.48 — planner gets fallback chain. Prior version was single-model;
 // any 429 killed the whole task at step 0 with no chance to try another.
-const PLANNER_CHAIN = (() => {
-  const env = process.env.AGENTRY_PLANNER_PROVIDER;
-  const envModel = process.env.AGENTRY_PLANNER_MODEL;
-  if (env && envModel) return [{ provider: env, model: envModel }];
-  return [
-    { provider: "orcarouter", model: "tencent/hy4-preview-free" },
-    { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
-    { provider: "groq", model: "openai/gpt-oss-120b" },
-    { provider: "google", model: "gemini-2.5-flash" },
-  ];
-})();
+// v0.56.52 — planner uses FAST model first. Reasoner-class models (hy4 770B,
+    // beam 551B) take 15-30s just to think about a plan. groq/gpt-oss-120b is
+    // ~3s and produces equally good plans for picking capability IDs.
+    const PLANNER_CHAIN = (() => {
+      const env = process.env.AGENTRY_PLANNER_PROVIDER;
+      const envModel = process.env.AGENTRY_PLANNER_MODEL;
+      if (env && envModel) return [{ provider: env, model: envModel }];
+      return [
+        { provider: "groq", model: "openai/gpt-oss-120b" },
+        { provider: "orcarouter", model: "tencent/hy4-preview-free" },
+        { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
+        { provider: "google", model: "gemini-2.5-flash" },
+      ];
+    })();
 const PROVIDER = PLANNER_CHAIN[0].provider;
 const MODEL = PLANNER_CHAIN[0].model;
 const DEFAULT_MAX_STEPS = 8;
@@ -322,7 +325,7 @@ export default async function agentryAgentPlan(input, ctx) {
         messages,
         temperature: 0.1,
         max_tokens: 2500,
-        timeout_ms: 45000,
+        timeout_ms: 12000,
       }, { tenant: "local", by: "agentry.agent.plan" });
       if (_r.ok) {
         const _peek = parseJson(_r.output.content);
