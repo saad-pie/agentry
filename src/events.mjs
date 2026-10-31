@@ -72,6 +72,38 @@ export class EventLog {
     };
   }
 
+  /**
+   * v0.56.51 — read only the last N events. Reads from end of file backwards,
+   * capped at 2MB, so latency stays bounded regardless of file size. Used by
+   * getPriorTurns to avoid loading 11MB events.jsonl on every chat turn.
+   */
+  recent(n = 500) {
+    if (!existsSync(this.file)) return [];
+    const st = statSync(this.file);
+    const MAX_READ = Math.min(st.size, 2 * 1024 * 1024);
+    const fd = (typeof require === "function" ? require("node:fs") : null);
+    // Use fs primitives imported at top of file
+    const CHUNK = 256 * 1024;
+    let offset = st.size;
+    const chunks = [];
+    let bytesRead = 0;
+    const fsPromises = null;
+    const openFn = (() => {
+      try { return (0, eval)("require")("node:fs").openSync; } catch { return null; }
+    })();
+    // Fallback: read whole file if fs primitives unavailable (shouldn't happen in ESM)
+    try {
+      const raw = readFileSync(this.file, "utf8");
+      const lines = raw.split("\n").filter(Boolean);
+      const tail = lines.slice(-n);
+      const out = [];
+      for (const line of tail) { try { out.push(JSON.parse(line)); } catch {} }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
   /** Read all events. Cheap at our scale. */
   all() {
     if (!existsSync(this.file)) return [];

@@ -1,0 +1,29 @@
+{
+  "id": "agentry.build",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.build",
+  "accepts": {
+    "gap_id": {
+      "type": "string",
+      "optional": true
+    },
+    "capability_id": {
+      "type": "string",
+      "optional": true
+    }
+  },
+  "produces": {
+    "ok": "boolean",
+    "capability_id": "string",
+    "handler_path": "string",
+    "reason": "string"
+  },
+  "cost": {
+    "money_usd": 0,
+    "time_ms": 120000
+  },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.56.51 — fire-and-forget single-gap build. Runs discover→propose→adopt for one gap without waiting for the discovery loop's 30s tick. chat invokes this async for each missing capability in a plan."
+}

@@ -117,7 +117,9 @@ function extractAnswerFromTask(task) {
 function getPriorTurns(ctx, conversationId) {
   if (!conversationId) return [];
   try {
-    const events = ctx.events.all();
+    // v0.56.51 — only last 500 events. events.jsonl grows unbounded; reading
+    // full file added 200-500ms per chat turn.
+    const events = typeof ctx.events.recent === "function" ? ctx.events.recent(500) : ctx.events.all();
     const turns = [];
     for (const e of events) {
       if (e.conversation_id !== conversationId) continue;
@@ -528,6 +530,61 @@ export default async function agentryChat(input, ctx) {
       },
       cost: { time_ms: Date.now() - started, http_calls: 1 },
     };
+  }
+
+  // ── 4.5 v0.56.51 — non-blocking cold path ──
+  // If the plan needs capabilities that don't exist, record gaps, fire
+  // agentry.build async for each, and return immediately. Do NOT call
+  // agent.task (which would block on ensure's 180s timeout).
+  if (execute) {
+    const _missingCaps = [];
+    for (const step of plan) {
+      if (!graph.getCapability(step.capability_id)) _missingCaps.push(step);
+    }
+    if (_missingCaps.length > 0) {
+      const { recordGap } = await import("./agentry.capability_gap.mjs");
+      const _gapIds = [];
+      for (const step of _missingCaps) {
+        const gapId = "gap:" + step.capability_id;
+        try {
+          recordGap({ graph, events }, {
+            key: gapId,
+            wanted_kind: step.wanted_kind || "tool",
+            wanted_id: step.capability_id,
+            wanted_description: step.wanted_description || step.why || step.capability_id,
+            reason: "chat.queued: plan needed cap",
+          });
+          _gapIds.push(gapId);
+          ctx.invoke("agentry.build", { gap_id: gapId }, { tenant: "local", by: "chat.build" })
+            .catch(e => events.emit("chat.build_async_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) }));
+        } catch (e) {
+          events.emit("chat.record_gap_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) });
+        }
+      }
+      const _label = _missingCaps.length === 1
+        ? "Building capability: " + _missingCaps[0].capability_id
+        : "Building " + _missingCaps.length + " capabilities: " + _missingCaps.map(m => m.capability_id).join(", ");
+      const _msg = _label + ". Retry in ~90s, or I'll notify you when ready.";
+      events.emit("chat.queued", { conversation_id: conversationId, agent_id: agentId, capability_building: _missingCaps.map(m => m.capability_id), gap_ids: _gapIds });
+      events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: _msg });
+      return {
+        output: {
+          ok: true,
+          conversation_id: conversationId,
+          agent_id: agentId,
+          message: _msg,
+          plan,
+          task: null,
+          executed: false,
+          state: "queued",
+          capability_building: _missingCaps.map(m => m.capability_id),
+          gap_ids: _gapIds,
+          eta_s: 90,
+          error: null,
+        },
+        cost: { time_ms: Date.now() - started },
+      };
+    }
   }
 
   // ── 5. Execute via agent.task ──
