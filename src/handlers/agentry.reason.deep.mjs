@@ -37,8 +37,8 @@ import { recordGap } from "./agentry.capability_gap.mjs";
 import { supportFor, synthesizableSources, unsynthesizableSources } from "../adapters/_synthesis_support.mjs";
 
 // v0.56.45 — AnyRouter primary (large ctx, free). Groq fallback.
-const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "ollama";
-const MODEL = process.env.AGENTRY_DEEP_MODEL || "beam:cloud";
+const PROVIDER = process.env.AGENTRY_DEEP_PROVIDER || "groq";
+const MODEL = process.env.AGENTRY_DEEP_MODEL || "openai/gpt-oss-120b";
 const FALLBACK_PROVIDER = process.env.AGENTRY_DEEP_FALLBACK_PROVIDER || "groq";
 const FALLBACK_MODEL = process.env.AGENTRY_DEEP_FALLBACK_MODEL || "qwen/qwen3.8-27b";
 const MAX_TURNS = Number(process.env.AGENTRY_DEEP_MAX_TURNS || "5");
