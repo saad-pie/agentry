@@ -11,35 +11,6 @@ export default async function agentryBuildFromCandidate(input, ctx) {
 
   events.emit("build_from_candidate.started", { gap_id, candidate_id: candidate.id });
 
-  // v0.58.4 — pre-check. If the capability already exists with a passed trial
-  // and a live handler, do NOT rebuild. A previous race caused working caps to
-  // be overwritten by subsequent synth attempts with a different spec, then
-  // retired when the new spec failed trial. This check makes build idempotent:
-  // once it works, calling build again returns the existing cap.
-  {
-    const _preTarget = gap.wanted_id || gap_id.replace(/^gap:/, "");
-    const _preCap = graph.getCapability(_preTarget);
-    if (_preCap && !_preCap.retired_at && _preCap.trial_passed_at && _preCap.handler_file) {
-      events.emit("build_from_candidate.already_exists", {
-        gap_id, capability_id: _preTarget, handler_path: _preCap.handler_file,
-      });
-      // retire gap if still open
-      try {
-        if (!gap.retired_at) graph.retireCapability(gap_id, "build_from_candidate: already adopted");
-      } catch (e) { events.emit("build.retire_gap_failed", { gap_id, error: String(e.message || "").slice(0, 200) }); }
-      return {
-        output: {
-          ok: true,
-          gap_id,
-          capability_id: _preTarget,
-          handler_path: _preCap.handler_file,
-          already_existed: true,
-          hint: "Capability already exists and passed trial. Call invoke() now.",
-        },
-        cost: { time_ms: Date.now() - started },
-      };
-    }
-  }
 
   // 1. Verify gap exists; create if missing
   let gap = graph.getCapability(gap_id);
@@ -60,6 +31,33 @@ export default async function agentryBuildFromCandidate(input, ctx) {
   }
   if (!gap) return { output: { ok: false, reason: "gap_not_found" }, cost: { time_ms: Date.now() - started } };
   if (gap.retired_at) return { output: { ok: false, reason: "gap_retired" }, cost: { time_ms: Date.now() - started } };
+
+  // v0.58.4b — pre-check after gap lookup (gap is now defined). If the
+  // capability already exists with a passed trial and a live handler, do
+  // NOT rebuild. Makes build idempotent.
+  {
+    const _preTarget = gap.wanted_id || gap_id.replace(/^gap:/, "");
+    const _preCap = graph.getCapability(_preTarget);
+    if (_preCap && !_preCap.retired_at && _preCap.trial_passed_at && _preCap.handler_file) {
+      events.emit("build_from_candidate.already_exists", {
+        gap_id, capability_id: _preTarget, handler_path: _preCap.handler_file,
+      });
+      try {
+        if (!gap.retired_at) graph.retireCapability(gap_id, "build_from_candidate: already adopted");
+      } catch (e) { events.emit("build.retire_gap_failed", { gap_id, error: String(e.message || "").slice(0, 200) }); }
+      return {
+        output: {
+          ok: true,
+          gap_id,
+          capability_id: _preTarget,
+          handler_path: _preCap.handler_file,
+          already_existed: true,
+          hint: "Capability already exists and passed trial. Call invoke() now.",
+        },
+        cost: { time_ms: Date.now() - started },
+      };
+    }
+  }
 
   // 2. Single-candidate proposal, pre-approved
   const proposalId = "proposal_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
