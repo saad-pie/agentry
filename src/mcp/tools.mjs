@@ -98,6 +98,39 @@ export function registerAgentryTools(deps) {
     return { content: [{ type: "text", text: JSON.stringify(r.output, null, 2) }] };
   });
 
+  // ───────── build_from_plan ─────────
+  registerTool({
+    name: "build_from_plan",
+    description: "v0.58.6 — STRONG-MODEL fast path. YOU write the plan (prepare/execute/emit code blocks). Agentry renders the handler, trials it, and adopts on pass. 15-30s vs 45-75s for build(). Use this when you can read the package README and write working code yourself. Use build() only for background/weak-model synthesis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        gap_id: { type: "string", description: "Gap id from check(). Optional if capability_id provided." },
+        capability_id: { type: "string", description: "Desired capability id. Optional if gap_id provided." },
+        candidate: { type: "object", description: "Candidate object from search(). Used for kind/source hints." },
+        plan_spec: {
+          type: "object",
+          description: "The plan. Shape: { accepts, produces, requires, plan:[{verb, code}], accept_spec }",
+          properties: {
+            accepts: { type: "object" },
+            produces: { type: "object" },
+            requires: { type: "object" },
+            kernel_language: { type: "string" },
+            plan: { type: "array", items: { type: "object", properties: { verb: { type: "string" }, code: { type: "string" } }, required: ["code"] } },
+            accept_spec: { type: "object" },
+          },
+          required: ["accepts", "produces", "plan"],
+        },
+      },
+      required: ["plan_spec"],
+    },
+  }, async (args, _ctx) => {
+    if (typeof deps.graph.invalidateCache === "function") deps.graph.invalidateCache();
+    const r = await deps.invoke("agentry.build_from_plan", args, { tenant: "mcp", by: "mcp.build_from_plan" });
+    if (!r.ok) return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: { code: r.error?.code, message: r.error?.message } }, null, 2) }], isError: true };
+    return { content: [{ type: "text", text: JSON.stringify(r.output, null, 2) }], isError: r.output?.ok === false };
+  });
+
   // ───────── invoke ─────────
   registerTool({
     name: "invoke",
