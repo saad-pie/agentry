@@ -236,7 +236,7 @@ function tryDirectMatch(message, graph) {
     const optional = spec && typeof spec === "object" && spec.optional === true;
     if (!optional && input[k] === undefined) return null;
   }
-  return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind, produces: best.cap.produces || {} };
+  return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind, produces: best.cap.produces || {}, existing_paths: _existing.slice(), future_paths: _future.slice() };
 }
 
 async function buildChatTraceEmail(ctx, opts) {
@@ -421,12 +421,14 @@ export default async function agentryChat(input, ctx) {
             }
           } catch {}
         }
-        // v0.56.58 — artifact cannot equal input. If handler wrote output to an
-        // input path (or didn't write at all and we found the input), that's a
-        // silent success lie. Fail honestly.
+        // v0.56.58 — artifact cannot equal a pre-existing input file. If handler
+        // wrote output back into the input file, that's a silent lie. v0.56.59
+        // fix: only check against paths that PRE-EXISTED at extraction time.
+        // Output paths (files that didn't exist yet) are legit targets — the
+        // user literally asked the handler to write there.
         {
-          const _inputVals = new Set(Object.values(_direct.input || {}).filter(v => typeof v === "string"));
-          const _liars = _artifacts.filter(a => _inputVals.has(a.path));
+          const _preExisting = new Set((_direct.existing_paths || []).filter(p => typeof p === "string"));
+          const _liars = _artifacts.filter(a => _preExisting.has(a.path));
           if (_liars.length > 0) {
             events.emit("chat.direct_artifact_equals_input", {
               conversation_id: conversationId,
