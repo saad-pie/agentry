@@ -191,6 +191,26 @@ export default async function agentryBuildFromPlan(input, ctx) {
     };
   }
 
+  // v0.58.6d — write seed BEFORE trial. Trial reads `requires` from the seed
+  // file via seed_path. Prior version wrote it AFTER trial, so trial saw
+  // empty requires, installed nothing, kernel failed with "Cannot find
+  // package 'cbor-x'". This order fix makes install work correctly.
+  try {
+    writeFileSync(seedPath, JSON.stringify({
+      id: capId,
+      kind: spec.capability.kind,
+      invoked_via: "invoker.in_process_js",
+      handler: safeId,
+      handler_file: handlerPath,
+      accepts: spec.capability.accepts,
+      produces: spec.capability.produces,
+      requires: spec.capability.requires,
+      source: "dsh_plan:pending_trial",
+    }, null, 2));
+  } catch (e) {
+    return { output: { ok: false, reason: "seed_write_failed: " + e.message, phase: "seed" }, cost: { time_ms: Date.now() - started } };
+  }
+
   events.emit("build_from_plan.trial_started", { capability_id: capId, handler_path: handlerPath });
   let trialResult;
   try {
@@ -221,7 +241,8 @@ export default async function agentryBuildFromPlan(input, ctx) {
     };
   }
 
-  const seedContent = {
+  // v0.58.6d — seed already written before trial; just add graph node
+  graph.putCapability({
     id: capId,
     kind: spec.capability.kind,
     invoked_via: "invoker.in_process_js",
@@ -233,9 +254,7 @@ export default async function agentryBuildFromPlan(input, ctx) {
     source: "dsh_plan:verified",
     trial_passed_at: Date.now(),
     trial_session: trialResult.output.session,
-  };
-  try { writeFileSync(seedPath, JSON.stringify(seedContent, null, 2)); } catch {}
-  graph.putCapability(seedContent);
+  });
 
   if (gap_id) {
     try {
