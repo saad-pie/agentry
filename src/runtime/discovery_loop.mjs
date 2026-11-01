@@ -547,6 +547,12 @@ export async function tick(deps, opts = {}) {
   const _allLiveGaps = liveGaps(graph);
   const _rejected = [];
   const gaps = _allLiveGaps.filter(g => {
+    // v0.58.5c — skip gaps that have a build already in progress. Prevents
+    // discovery tick from racing with an in-flight build_from_candidate call.
+    if (g.build_in_progress_at && (Date.now() - g.build_in_progress_at) < 300000) {
+      _rejected.push({ gap: g.id, reason: "build_in_progress" });
+      return false;
+    }
     if (g.wanted_kind && AUTO_DECIDE_BLOCKED_KINDS.has(g.wanted_kind)) {
       _rejected.push({ gap: g.id, reason: "kind_not_allowed", kind: g.wanted_kind });
       return false;

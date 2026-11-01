@@ -59,6 +59,14 @@ export default async function agentryBuildFromCandidate(input, ctx) {
     }
   }
 
+  // v0.58.5c — lock the gap. Discovery loop was racing: user's build succeeded
+  // in 87s, gap hadn't retired yet, discovery tick fired SECOND build on same
+  // gap, added 80s more, total 200s+ timeout. Lock prevents the second build.
+  try {
+    graph.putCapability({ id: gap_id, kind: "capability_gap", build_in_progress_at: Date.now() });
+    events.emit("build.gap_locked", { gap_id });
+  } catch (e) { events.emit("build.gap_lock_failed", { gap_id, error: String(e.message || "").slice(0, 200) }); }
+
   // 2. Single-candidate proposal, pre-approved
   const proposalId = "proposal_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
   const gapKind = gap.wanted_kind || wanted_kind || "tool";

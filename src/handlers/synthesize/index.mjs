@@ -544,6 +544,23 @@ export default async function agentrySynthesize(input, ctx) {
 
   writeFileSync(seedPath, JSON.stringify(renderSeed(spec, handlerPath), null, 2));
 
+  // v0.58.5b — mark the synth session as prepared for this capId so trial's
+  // prepareSession skips reinstall. Prior version saved ~0s because the
+  // PREPARE_KEY was never set; trial reinstalled the same package every time.
+  try {
+    const _synthSession = facts.session || facts.repo_session;
+    if (_synthSession) {
+      await ctx.invoke("agentry.os", {
+        action: "session.env",
+        session: _synthSession,
+        key: "prepared:" + spec.capability.id,
+        value: String(Date.now()),
+      }, { tenant: "local", by: "agentry.synthesize" });
+    }
+  } catch (e) {
+    events.emit("synthesize.prepare_mark_failed", { capability_id: spec.capability.id, error: String(e.message || "").slice(0, 200) });
+  }
+
   // v0.56.33 — native skill write. For skill_wrapper specs, also drop the
   // SKILL.md into DSH's agents-skills directory. DSH discovers it live (file
   // watcher, no restart) and users get /skillname in the UI. Same skill, two
