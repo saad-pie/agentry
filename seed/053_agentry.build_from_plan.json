@@ -1,0 +1,45 @@
+{
+  "id": "agentry.build_from_plan",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.build_from_plan",
+  "accepts": {
+    "gap_id": {
+      "type": "string",
+      "optional": true
+    },
+    "capability_id": {
+      "type": "string",
+      "optional": true
+    },
+    "candidate": {
+      "type": "object",
+      "optional": true
+    },
+    "plan_spec": "object"
+  },
+  "produces": {
+    "ok": "boolean",
+    "capability_id": "string",
+    "handler_path": "string",
+    "reason": {
+      "type": "string",
+      "optional": true
+    },
+    "phase": {
+      "type": "string",
+      "optional": true
+    },
+    "error": {
+      "type": "string",
+      "optional": true
+    }
+  },
+  "cost": {
+    "money_usd": 0,
+    "time_ms": 30000
+  },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.58.6 — strong-model fast path. DSH writes plan_spec (accepts/produces/requires/plan/accept_spec), agentry renders handler, trials it, adopts on pass. No LLM synthesis step."
+}
