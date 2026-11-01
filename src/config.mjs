@@ -121,6 +121,16 @@ export function loadConfig(overrides = {}) {
           baseUrl: env("ANYROUTER_BASE_URL", "https://anyrouter.dev/api/v1"),
           apiKey: env("ANYROUTER_API_KEY", null),
         },
+
+        // v0.58.8 — HF Inference Providers. Multi-backend router.
+        // One HF_TOKEN → Groq, Together, Cerebras, Fireworks, Nebius, etc.
+        // OpenAI-compatible chat completions. Model IDs follow HF's
+        // "<org>/<model>" format (e.g. "meta-llama/Llama-3.3-70B-Instruct").
+        // Optional provider suffix: "<model>:<provider>" or "<model>:fastest".
+        huggingface: {
+          baseUrl: env("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1"),
+          apiKey: env("HF_TOKEN", env("HUGGINGFACE_API_KEY", null)),
+        },
         ollama: {
           baseUrl: env("OLLAMA_BASE_URL", "https://ollama.com/v1"),
           apiKey: env("OLLAMA_API_KEY", null),
