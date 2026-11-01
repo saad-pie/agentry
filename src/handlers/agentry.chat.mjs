@@ -1,731 +1,125 @@
 // agentry/src/handlers/agentry.chat.mjs
-// v0.48.1 — surface boot failures instead of silent NO_TASK.
+// v0.58.0 — LOOKUP ONLY. No planning. No task wrapping. No agent boot.
 //
-// v0.43.0 — the user-facing parent loop.
+// DSH is the brain. This is a capability index. It answers one question:
+// "given this intent, what capabilities in the graph are relevant?"
 //
-// One capability, one job: take a natural-language message and turn it
-// into a completed task. Plans via agent.plan, executes via agent.task,
-// returns a human-readable summary + the structured trace for clients
-// that want it.
+// Returns ONE of four states:
+//   { state: "candidates", candidates: [{id, kind, accepts, produces, why, score}] }
+//   { state: "queued", capability_building, gap_id, eta_s }
+//   { state: "no_match", hint }
 //
-// Design:
-//   - message (required): the user's natural-language request
-//   - agent_id (optional): use this agent. If absent, one is booted on
-//     the fly (or reused if conversation_id matches a prior agent)
-//   - conversation_id (optional): thread continuity. Prior turns are
-//     passed to the planner so follow-ups have context.
-//   - max_steps (default 8): passed to agent.plan
-//   - execute_default (default true): false = plan-only, returns plan
-//     without side effects. Useful for "what would you do" preflight.
-//
-// Return shape:
-//   {
-//     ok, conversation_id, agent_id,
-//     message,              — human-readable summary (the "answer")
-//     plan,                 — the steps executed (or planned)
-//     task,                 — full task trace if executed (else null)
-//     executed,             — bool
-//     error                 — null or { phase, message } on failure
-//   }
-//
-// This capability is the primary MCP tool. When a client wants to talk
-// to agentry, it calls chat. Everything below (agent.plan, agent.task,
-// task.run, ensure, agentry.agent.dsh) is now internal machinery.
+// DSH decides: invoke one of the candidates, call ensure_capability to
+// build what's missing, or use its own tools directly. Agentry never invokes
+// from chat. Agentry never plans from chat.
 
-// v0.49.1 — boot error captured + fallback to task.run on boot failure.
-//
-// v0.49.0 — structured failure task. Prior version returned task:null on
-// every failure path, so callers (and tests) could not distinguish boot
-// failure from empty plan from execution throw. Every failure now carries
-// phase + message.
-import { statSync } from "node:fs";
-import { pick as routingPick } from "../routing/index.mjs";
+const SKIP_KINDS = new Set(["agent","edge","capability_gap","watch_instance","proposal","synthesis_attempt","task","message"]);
 
-function failTask(phase, message) {
-  return {
-    task_id: null,
-    state: "failed",
-    owner_agent: null,
-    trace: [],
-    artifacts: [],
-    error: { phase: String(phase), message: String(message || "unknown") },
-  };
+function deriveDescription(message) {
+  const m = String(message).match(/\b(?:convert|change|transform|turn)\s+(?:the\s+)?([a-zA-Z0-9]+)\s+(?:file\s+)?(?:to|into)\s+([a-zA-Z0-9]+)\b/i);
+  if (m) return "convert " + m[1].toLowerCase() + " to " + m[2].toLowerCase();
+  return String(message).slice(0, 120).trim();
 }
 
-const DEFAULT_MAX_STEPS = 8;
-const CONVERSATION_MEMORY_CAP = 10; // last N turns kept per thread
-
-function genConversationId() {
-  return "conv_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
-}
-
-function genEphemeralAgentName(conversationId) {
-  return "chat_" + conversationId.replace(/[^a-z0-9]/gi, "_").slice(-20);
-}
-
-// Summarise a task trace into a human-readable message. Distinct
-// messages for done/failed/handoff so the caller can act on the state.
-function summariseTask(task) {
-  if (!task) return "(no task)";
-  // v0.43.1 — task.run's older failure returns omit state; use error as
-  // a fallback signal so we name the failure instead of "unknown".
-  const state = task.state || (task.error ? "failed" : "unknown");
-  const steps = task.trace || [];
-  const artifacts = task.artifacts || [];
-  const ok_steps = steps.filter(s => s.ok).length;
-  const fail_step = steps.find(s => !s.ok);
-
-  if (state === "done") {
-    const last = steps[steps.length - 1];
-    const final = last?.output_keys?.length
-      ? "Returned: " + last.output_keys.join(", ")
-      : "(no output fields)";
-    const art = artifacts.length
-      ? " Produced " + artifacts.length + " artifact(s): " + artifacts.map(a => a.path || a.field).join(", ")
-      : "";
-    return "Completed " + ok_steps + "/" + steps.length + " step(s). " + final + "." + art;
-  }
-  if (state === "failed") {
-    return "Failed at step " + ((fail_step?.step ?? -1) + 1) + " (" + (fail_step?.capability_id || "?") + "): " + (fail_step?.error?.message || task.error?.message || "unknown");
-  }
-  if (state === "handoff") {
-    return "Ran out of budget at step " + (task.step_index + 1) + ". Remaining: " + JSON.stringify(task.remaining || {});
-  }
-  return "Task ended in state: " + state;
-}
-
-// Walk prior conversation messages for this thread. Retrieved from the
-// events log, filtered by conversation_id. Cheap and correct.
-function getPriorTurns(ctx, conversationId) {
-  if (!conversationId) return [];
-  try {
-    // v0.56.51 — only last 500 events. events.jsonl grows unbounded; reading
-    // full file added 200-500ms per chat turn.
-    const events = typeof ctx.events.recent === "function" ? ctx.events.recent(500) : ctx.events.all();
-    const turns = [];
-    for (const e of events) {
-      if (e.conversation_id !== conversationId) continue;
-      if (e.kind === "chat.user_turn") turns.push({ role: "user", text: e.message || "" });
-      if (e.kind === "chat.assistant_turn") turns.push({ role: "assistant", text: e.message || "" });
-    }
-    return turns.slice(-CONVERSATION_MEMORY_CAP * 2);
-  } catch {
-    return [];
-  }
-}
-
-async function tryDirectMatch(message, graph, ctx) {
-  // v0.56.21 — if the message clearly names an existing capability and we
-  // can build its required inputs from path-like tokens in the message,
-  // invoke directly. Skips the entire planner (LLM call ~2-3s) plus the
-  // agent boot + task wrap (~5s). Falls through to planner on any doubt.
-  const tokens = message.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3);
-  if (tokens.length === 0) return null;
-  const candidates = [];
-  for (const c of graph.capabilities().values()) {
-    if (c.retired_at) continue;
-    if (!c.invoked_via) continue;
-    if (c.kind === "agent" || c.kind === "edge" || c.kind === "capability_gap"
-     || c.kind === "watch_instance" || c.kind === "proposal"
-     || c.kind === "synthesis_attempt" || c.kind === "task" || c.kind === "message") continue;
-    const hay = (String(c.id || "") + " " + String(c.notes || "") + " " + String(c.description || "")).toLowerCase();
-    let score = 0;
-    for (const t of tokens) if (hay.includes(t)) score++;
-    if (score > 0) candidates.push({ cap: c, score });
-  }
-  if (candidates.length === 0) return null;
-  // v0.56.23 — sort by score, then by trial_passed_at (newest first)
-  // as tiebreaker. Without this, 4 duplicate csv_to_parquet caps all score 3
-  // and the tie returns null → planner picks arbitrary (often the oldest,
-  // broken one). Newest-trial-passed wins ties cleanly.
-  candidates.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    const _aT = Number(a.cap.trial_passed_at || a.cap.adopted_from?.synthesized_at || 0);
-    const _bT = Number(b.cap.trial_passed_at || b.cap.adopted_from?.synthesized_at || 0);
-    return _bT - _aT;
-  });
-  let best = candidates[0];
-  const second = candidates[1];
-  if (best.score < 2) return null;
-  // v0.57.1 — LLM tiebreak. No regex for semantics. When top-2 scores are
-  // within 1 point, ask routing.pick which capability serves the intent.
-  if (second && second.score >= best.score - 1 && ctx) {
-    try {
-      const _top = candidates.filter(c => c.score >= best.score - 1).slice(0, 5);
-      const _picked = await routingPick(String(message), _top.map(x => x.cap), ctx);
-      if (_picked) {
-        const _found = _top.find(c => c.cap.id === _picked.id);
-        if (_found) best = _found;
-      }
-    } catch (e) {}
-  }
-  // v0.56.27 — dynamic path extraction. Any fixed cap on extension length has
-  // the same failure mode (parquet was truncated by \w{1,6}, then markdown by
-  // \w{1,12} would break on .webmanifest). Filesystem-based classification:
-  //   1. Match /-prefixed strings, keep only those whose last segment has an
-  //      extension >= 2 chars (any length, no cap)
-  //   2. fs.statSync each: file exists → input, missing → output
-  //   3. Assign to accepts keys by hint (input/output/src/dst) + extension
-  //   4. Fallback: leftover unused paths fill other path-like keys
-  const accepts = Object.keys(best.cap.accepts || {});
-  const input = {};
-  const pathKeys = accepts.filter(k => /path|_file$|_dir$/.test(k));
-  // v0.56.60 — hoist to function scope so return statement can access them
-  let _existing = [], _future = [];
-  if (pathKeys.length > 0) {
-    const _rawPaths = [...message.matchAll(/\/[\w./-]+/g)].map(m => m[0]);
-    const _paths = _rawPaths.filter(p => {
-      const _last = p.split("/").pop() || "";
-      return _last.includes(".") && (_last.split(".").pop() || "").length >= 2;
-    });
-    if (_paths.length > 0) {
-      _existing = [];
-      _future = [];
-      for (const p of _paths) {
-        try { const st = statSync(p); if (st.isFile()) _existing.push(p); else _future.push(p); }
-        catch { _future.push(p); }
-      }
-      const _inKeys = pathKeys.filter(k => /input|_in$|^src|source/.test(k));
-      const _outKeys = pathKeys.filter(k => /output|_out$|^dst|dest|target/.test(k));
-      const _otherKeys = pathKeys.filter(k => !_inKeys.includes(k) && !_outKeys.includes(k));
-      const _usedEx = new Set();
-      const _usedFu = new Set();
-      const _tryExt = (pool, key, usedSet) => {
-        const m = key.match(/_(\w+?)(_path|_file|_dir)$/);
-        if (!m) return null;
-        const hint = m[1].toLowerCase();
-        for (const p of pool) {
-          if (usedSet.has(p)) continue;
-          if (p.toLowerCase().endsWith("." + hint)) return p;
-        }
-        return null;
-      };
-      for (const k of _inKeys) {
-        const byExt = _tryExt(_existing, k, _usedEx);
-        if (byExt) { input[k] = byExt; _usedEx.add(byExt); continue; }
-        const p = _existing.find(x => !_usedEx.has(x));
-        if (p) { input[k] = p; _usedEx.add(p); }
-      }
-      for (const k of _outKeys) {
-        const byExt = _tryExt(_future, k, _usedFu);
-        if (byExt) { input[k] = byExt; _usedFu.add(byExt); continue; }
-        const p = _future.find(x => !_usedFu.has(x));
-        if (p) { input[k] = p; _usedFu.add(p); }
-      }
-      for (const k of _otherKeys) {
-        const leftover = [..._existing.filter(p => !_usedEx.has(p)), ..._future.filter(p => !_usedFu.has(p))];
-        if (leftover.length > 0) {
-          input[k] = leftover[0];
-          // v0.56.58 — mark used so same path is not assigned to multiple keys.
-          // Without this, xml_path and toml_path both got /tmp/t3_in.xml;
-          // handler wrote TOML back into the input, output never created,
-          // chat reported ok:true with the input file as the artifact.
-          if (_existing.includes(leftover[0])) _usedEx.add(leftover[0]);
-          if (_future.includes(leftover[0])) _usedFu.add(leftover[0]);
-        }
-      }
-    }
-  }
-  // Require every non-optional accepts key to be filled
-  for (const k of accepts) {
-    const spec = best.cap.accepts[k];
-    const optional = spec && typeof spec === "object" && spec.optional === true;
-    if (!optional && input[k] === undefined) return null;
-  }
-  return { capability_id: best.cap.id, input, score: best.score, gap: best.score - (second ? second.score : 0), kind: best.cap.kind, produces: best.cap.produces || {}, existing_paths: _existing.slice(), future_paths: _future.slice() };
-}
-
-async function buildChatTraceEmail(ctx, opts) {
-  const L = [];
-  L.push("**Chat trace: " + opts.capabilityId + "**");
-  L.push("");
-  L.push("- conversation_id: " + opts.conversationId);
-  L.push("- capability_id: " + opts.capabilityId);
-  L.push("- via: " + (opts.via || "direct_match"));
-  L.push("- total_ms: " + opts.totalMs);
-  L.push("- artifacts: " + (opts.artifacts ? opts.artifacts.length : 0));
-  L.push("");
-  if (opts.input && Object.keys(opts.input).length) {
-    L.push("**Extracted input:**");
-    L.push("```json");
-    L.push(JSON.stringify(opts.input, null, 2));
-    L.push("```");
-    L.push("");
-  }
-  if (opts.output && Object.keys(opts.output).length) {
-    L.push("**Handler output:**");
-    L.push("```json");
-    const _os = JSON.stringify(opts.output, null, 2);
-    L.push(_os.slice(0, 3000));
-    if (_os.length > 3000) L.push("// ... [" + (_os.length - 3000) + " more chars]");
-    L.push("```");
-    L.push("");
-  }
-  if (opts.artifacts && opts.artifacts.length) {
-    L.push("**Artifacts (" + opts.artifacts.length + "):**");
-    for (const a of opts.artifacts) {
-      L.push("- " + a.path + " — " + a.bytes + " bytes, field=" + a.field);
-    }
-    L.push("");
-  }
-  let combined = [];
-  try {
-    const all = ctx.events.all();
-    const tStart = opts.startedAt || 0;
-    const tEnd = opts.startedAt ? opts.startedAt + opts.totalMs + 15000 : Date.now();
-    combined = all.filter(e => {
-      if (e.conversation_id === opts.conversationId) return true;
-      if (e.capability_id === opts.capabilityId && e.at >= tStart && e.at <= tEnd) return true;
-      return false;
-    });
-    const seen = new Set();
-    combined = combined.filter(e => {
-      const k = e.kind + "|" + e.at + "|" + (e.capability_id || "");
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-    combined.sort((a, b) => (a.at || 0) - (b.at || 0));
-  } catch {}
-  const t0 = combined.length > 0 ? combined[0].at : 0;
-  L.push("**Full event timeline (" + combined.length + " events):**");
-  L.push("");
-  L.push("```");
-  for (const e of combined) {
-    const rel = e.at ? (e.at - t0) : 0;
-    L.push("+" + rel + "ms  " + e.kind + (e.capability_id ? "  " + e.capability_id : "") + (e.code ? "  code=" + e.code : ""));
-  }
-  L.push("```");
-  L.push("");
-  if (opts.handlerPath) {
-    try {
-      const fs = await import("node:fs");
-      if (fs.existsSync(opts.handlerPath)) {
-        const src = fs.readFileSync(opts.handlerPath, "utf8");
-        L.push("**Handler source (first 2500 chars):**");
-        L.push("```js");
-        L.push(src.slice(0, 2500));
-        if (src.length > 2500) L.push("// ... [" + (src.length - 2500) + " more chars]");
-        L.push("```");
-      }
-    } catch {}
-  }
-  return L.join(String.fromCharCode(10));
+function deriveCapabilityId(message) {
+  const m = String(message).match(/\b(?:convert|change|transform|turn)\s+(?:the\s+)?([a-zA-Z0-9]+)\s+(?:file\s+)?(?:to|into)\s+([a-zA-Z0-9]+)\b/i);
+  if (m) return (m[1] + "_to_" + m[2]).toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  return null;
 }
 
 export default async function agentryChat(input, ctx) {
-  const {
-    message,
-    agent_id,
-    conversation_id,
-    max_steps,
-    execute_default,
-  } = input || {};
+  const { message, conversation_id } = input || {};
   if (!message || typeof message !== "string" || !message.trim()) {
     throw new Error("agentry.chat requires message (non-empty string)");
   }
   if (typeof ctx.invoke !== "function") throw new Error("agentry.chat requires ctx.invoke");
 
-  const graph = ctx.graph;
-  const events = ctx.events;
+  const graph = ctx.graph, events = ctx.events;
   const started = Date.now();
+  const conversationId = conversation_id || ("conv_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6));
 
-  // v0.56.57 — invalidate cache. agentry.build (in the MCP process) writes new
-  // capability nodes to disk async while this chat handler holds a stale
-  // in-memory cache from boot. Without this, getCapability() returns null for
-  // capabilities built after boot, causing chat to re-queue instead of firing
-  // the hot path.
   if (typeof graph.invalidateCache === "function") graph.invalidateCache();
+  events.emit("chat.user_turn", { conversation_id: conversationId, message: String(message).slice(0, 2000) });
 
-  const conversationId = conversation_id || genConversationId();
-  const execute = execute_default !== false;
-  const maxSteps = Math.max(1, Math.min(20, Number(max_steps) || DEFAULT_MAX_STEPS));
-
-  // ── 1. Resolve / boot agent ──
-  let agentId = agent_id;
-  if (!agentId) {
-    // If this conversation already has an agent (from prior turns), reuse it.
-    // Otherwise boot a fresh one named after the conversation.
-    const agentName = genEphemeralAgentName(conversationId);
-    // Check if an agent with this deterministic name already exists
-    const existingCandidates = [...graph.capabilities().values()].filter(c =>
-      c.kind === "agent" && c.name === agentName && !c.retired_at
-    );
-    if (existingCandidates.length > 0) {
-      agentId = existingCandidates[0].id;
-    } else {
-            let bootError = null;
-      try {
-        const boot = await ctx.invoke("agentry.agent.boot", { name: agentName },
-          { tenant: "local", by: "agentry.chat" });
-        if (boot.ok && boot.output?.agent_id) {
-          agentId = boot.output.agent_id;
-        } else {
-          bootError = "boot returned ok=" + boot.ok +
-            " agent_id=" + JSON.stringify(boot.output?.agent_id || null) +
-            " error=" + (boot.error?.message || "none");
-        }
-      } catch (e) {
-        bootError = "boot threw: " + e.message;
-      }
-      if (bootError) {
-        events.emit("chat.agent_boot_failed", { conversation_id: conversationId, error: bootError });
-      }
+  // ── 1. Score live caps by token overlap (no direction heuristic) ──
+  const tokens = String(message).toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3);
+  const candidates = [];
+  for (const c of graph.capabilities().values()) {
+    if (c.retired_at || !c.invoked_via || SKIP_KINDS.has(c.kind)) continue;
+    const hay = (String(c.id) + " " + String(c.notes || "") + " " + String(c.description || "")).toLowerCase();
+    let score = 0;
+    for (const t of tokens) if (hay.includes(t)) score++;
+    if (score >= 2) {
+      candidates.push({
+        id: c.id,
+        kind: c.kind,
+        accepts: Object.keys(c.accepts || {}),
+        produces: Object.keys(c.produces || {}),
+        why: String(c.notes || c.description || c.id).slice(0, 120),
+        score,
+      });
     }
   }
+  candidates.sort((a, b) => b.score - a.score);
+  const top = candidates.slice(0, 5);
 
-  // ── 2. Log user turn ──
-  events.emit("chat.user_turn", {
-    conversation_id: conversationId,
-    agent_id: agentId || null,
-    message: String(message).slice(0, 2000),
-  });
+  // ── 2. Candidates exist — return them, let DSH pick ──
+  if (top.length > 0) {
+    events.emit("chat.candidates_returned", { conversation_id: conversationId, count: top.length, ids: top.map(c => c.id) });
+    return {
+      output: {
+        state: "candidates",
+        conversation_id: conversationId,
+        candidates: top,
+        hint: "Pick one and call invoke({capability_id, input}). If none fit, call ensure_capability or use your own tools.",
+      },
+      cost: { time_ms: Date.now() - started },
+    };
+  }
 
-  // ── 2.5 v0.56.21 — fast path: direct match ──
-  const _direct = await tryDirectMatch(String(message), graph, ctx);
-  if (_direct) {
-    events.emit("chat.direct_match", {
-      conversation_id: conversationId, agent_id: agentId,
-      capability_id: _direct.capability_id, score: _direct.score, gap: _direct.gap, kind: _direct.kind,
-    });
-    const _directStarted = Date.now();
+  // ── 3. No candidates — derive description + build capability id ──
+  const desc = deriveDescription(message);
+  const capId = deriveCapabilityId(message);
+  if (desc && desc.length >= 6) {
+    const buildId = capId || ("task_" + Date.now().toString(36));
+    const gapId = "gap:" + buildId;
     try {
-      const _r = await ctx.invoke(_direct.capability_id, _direct.input, {
-        tenant: "local", by: "agentry.chat.direct", task_id: ctx.task_id,
-      });
-      const _directMs = Date.now() - _directStarted;
-      if (_r.ok) {
-        // v0.56.25 — build artifacts from produces path fields, verify each
-        // exists. Prior version trusted _r.output.artifacts which handlers
-        // never return (handlers return flat fields like {output_path, bytes}).
-        // Result: ok:true with artifacts:[] even when handler wrote a file.
-        const _artifacts = [];
-        const _produces = _direct.produces || {};
-        const _outputObj = _r.output || {};
-        for (const _k of Object.keys(_produces)) {
-          const _v = _outputObj[_k];
-          if (typeof _v !== "string" || !_v) continue;
-          if (!/\.\w{2,12}$/.test(_v) && !_v.startsWith("/")) continue;
-          try {
-            const _st = statSync(_v);
-            if (_st.isFile() && _st.size > 0) {
-              _artifacts.push({ kind: "file", field: _k, path: _v, bytes: _st.size, from_step: 0 });
-            }
-          } catch {}
-        }
-        // v0.56.58 — artifact cannot equal a pre-existing input file. If handler
-        // wrote output back into the input file, that's a silent lie. v0.56.59
-        // fix: only check against paths that PRE-EXISTED at extraction time.
-        // Output paths (files that didn't exist yet) are legit targets — the
-        // user literally asked the handler to write there.
-        {
-          const _preExisting = new Set((_direct.existing_paths || []).filter(p => typeof p === "string"));
-          const _liars = _artifacts.filter(a => _preExisting.has(a.path));
-          if (_liars.length > 0) {
-            events.emit("chat.direct_artifact_equals_input", {
-              conversation_id: conversationId,
-              capability_id: _direct.capability_id,
-              input_paths: [..._preExisting],
-              artifact_paths: _liars.map(a => a.path),
-            });
-            return {
-              output: {
-                ok: false,
-                conversation_id: conversationId,
-                agent_id: agentId,
-                message: "Handler returned success but wrote output to an input path. Output not created.",
-                plan: [{ capability_id: _direct.capability_id, input: _direct.input, why: "direct_match" }],
-                task: {
-                  task_id: null, state: "failed",
-                  artifacts: [],
-                  trace: [{ step: 0, capability_id: _direct.capability_id, ok: false, ms: _directMs, error: { code: "artifact_equals_input", message: "handler wrote to input path" } }],
-                  error: { code: "artifact_equals_input", message: "handler wrote output to input path" },
-                },
-                executed: true,
-                error: { code: "artifact_equals_input", message: "handler wrote output to input path" },
-                via: "direct_match",
-              },
-              cost: { time_ms: Date.now() - started },
-            };
-          }
-        }
-        const _artifactMissing = (_artifacts.length === 0 && Object.keys(_produces).some(k => /path|_file|_out/.test(k)));
-        events.emit("chat.direct_success", {
-          conversation_id: conversationId, capability_id: _direct.capability_id, ms: _directMs,
-          artifacts_count: _artifacts.length,
-          artifact_missing: _artifactMissing,
-        });
-        if (String(process.env.AGENTRY_CHAT_EMAIL || "0") === "1") {
-          (async () => {
-            try {
-              const _capNode = graph.getCapability(_direct.capability_id);
-              const _body = await buildChatTraceEmail(ctx, {
-                conversationId, capabilityId: _direct.capability_id,
-                via: "direct_match", totalMs: _directMs, startedAt: started,
-                input: _direct.input, output: _r.output, artifacts: _artifacts,
-                handlerPath: (_capNode && _capNode.handler_file) || null,
-              });
-              await ctx.invoke("notify.fallback", {
-                subject: "[agentry] chat: " + _direct.capability_id,
-                body_markdown: _body,
-                primary: "notify.email.gmail",
-                fallback: "notify.console",
-              }, { tenant: "local", by: "agentry.chat" });
-              events.emit("chat.trace_email_sent", { conversation_id: conversationId, capability_id: _direct.capability_id, body_len: _body.length });
-            } catch (e) {
-              try { events.emit("chat.trace_email_failed", { conversation_id: conversationId, capability_id: _direct.capability_id, error: String(e.message || "").slice(0, 200) }); } catch {}
-            }
-          })();
-        }
-        events.emit("chat.assistant_turn", {
-          conversation_id: conversationId, agent_id: agentId,
-          message: "Executed " + _direct.capability_id + " directly (" + _directMs + "ms, " + _artifacts.length + " artifacts)",
-        });
-        return {
-          output: {
-            ok: true, conversation_id: conversationId, agent_id: agentId,
-            message: "Executed " + _direct.capability_id + " directly (" + _artifacts.length + " artifacts)" +
-              (_artifactMissing ? " — WARNING: no artifact file produced" : ""),
-            plan: [{ capability_id: _direct.capability_id, input: _direct.input, why: "direct_match", score: _direct.score }],
-            task: {
-              task_id: null, state: "done",
-              artifacts: _artifacts,
-              trace: [{ step: 0, capability_id: _direct.capability_id, ok: true, ms: _directMs, output_keys: Object.keys(_outputObj), artifact_missing: _artifactMissing }],
-              error: null,
-            },
-            executed: true, error: null, via: "direct_match",
-          },
-          cost: { time_ms: Date.now() - started },
-        };
-      }
-      events.emit("chat.direct_failed", {
-        conversation_id: conversationId, capability_id: _direct.capability_id,
-        ms: _directMs, error: _r.error && _r.error.message,
-      });
-      // Fall through — planner might route differently or fix input shape
-    } catch (e) {
-      events.emit("chat.direct_threw", {
-        conversation_id: conversationId, capability_id: _direct.capability_id, error: e.message,
-      });
-      // Fall through
-    }
-  }
-
-  // ── 3. Plan ──
-  // Prior turns inform the planner via a prefix in the intent.
-  const priorTurns = getPriorTurns(ctx, conversationId);
-  const priorContext = priorTurns.length > 0
-    ? "Prior conversation:\n" + priorTurns.map(t => t.role + ": " + t.text).join("\n") + "\n\nCurrent request: "
-    : "";
-  const intentWithContext = priorContext + String(message);
-
-  let planRes;
-  try {
-    planRes = await ctx.invoke("agentry.agent.plan", {
-      intent: intentWithContext,
-      agent_id: agentId || undefined,
-      max_steps: maxSteps,
-      execute: false,
-    }, { tenant: "local", by: "agentry.chat", });
-  } catch (e) {
-    events.emit("chat.plan_threw", { conversation_id: conversationId, error: e.message });
-    const errMsg = "Planning failed: " + e.message;
-    events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: errMsg });
-    return {
-      output: {
-        ok: false, conversation_id: conversationId, agent_id: agentId,
-        message: errMsg, plan: null, task: failTask("plan", e.message), executed: false,
-        error: { phase: "plan", message: e.message },
-      },
-      cost: { time_ms: Date.now() - started },
-    };
-  }
-  if (!planRes.ok) {
-    events.emit("chat.plan_failed", { conversation_id: conversationId, error: planRes.error });
-    const errMsg = "Planning failed: " + (planRes.error?.message || "unknown");
-    events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: errMsg });
-    return {
-      output: {
-        ok: false, conversation_id: conversationId, agent_id: agentId,
-        message: errMsg, plan: null, task: failTask("plan", planRes.error?.message || "unknown"), executed: false,
-        error: { phase: "plan", message: planRes.error?.message || "unknown" },
-      },
-      cost: { time_ms: Date.now() - started },
-    };
-  }
-
-  const plan = planRes.output.plan || [];
-  events.emit("chat.plan_ready", {
-    conversation_id: conversationId,
-    agent_id: agentId,
-    steps: plan.length,
-    capabilities: plan.map(s => s.capability_id),
-  });
-
-  // ── 4. If plan-only, return early ──
-  if (!execute) {
-    const summary = "Planned " + plan.length + " step(s): " + plan.map(s => s.capability_id).join(" → ");
-    events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: summary });
-    return {
-      output: {
-        ok: true, conversation_id: conversationId, agent_id: agentId,
-        message: summary, plan, task: null, executed: false, error: null,
-      },
-      cost: { time_ms: Date.now() - started, http_calls: 1 },
-    };
-  }
-
-  // ── 4.5 v0.56.52 — non-blocking cold path ──
-  if (execute) {
-    // v0.56.57 — invalidate before scan. Planner LLM call can take 3-8s, during
-    // which a background build might have just finished. Re-read the graph.
-    if (typeof graph.invalidateCache === "function") graph.invalidateCache();
-    const _missingCaps = [];
-    for (const step of plan) {
-      if (!graph.getCapability(step.capability_id)) _missingCaps.push(step);
-    }
-    if (_missingCaps.length > 0) {
       const { recordGap } = await import("./agentry.capability_gap.mjs");
-      const _gapIds = [];
-      const _desc = _missingCaps.length === 1
-        ? (_missingCaps[0].wanted_description || _missingCaps[0].why || _missingCaps[0].capability_id)
-        : _missingCaps.map(m => m.capability_id).join(", ");
-      const _msg = "Building " + _missingCaps.length + " capability: " + _missingCaps.map(m => m.capability_id).join(", ") + ". " +
-        "What agentry is doing now: (1) discovering packages, (2) ranking candidates, (3) synthesizing the handler, (4) trial-verifying it produces real artifacts. " +
-        "ETA ~90s. Retry after that, or wait for notification.";
-      for (const step of _missingCaps) {
-        const gapId = "gap:" + step.capability_id;
-        try {
-          recordGap({ graph, events }, {
-            key: gapId,
-            wanted_kind: step.wanted_kind || "tool",
-            wanted_id: step.capability_id,
-            origin_conversation_id: conversationId,
-            wanted_description: step.wanted_description || step.why || step.capability_id.replace(/[._]/g, " "),
-            reason: "chat.queued: plan needed cap",
-          });
-          _gapIds.push(gapId);
-          ctx.invoke("agentry.build", { gap_id: gapId }, { tenant: "local", by: "chat.build" })
-            .catch(e => events.emit("chat.build_async_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) }));
-        } catch (e) {
-          events.emit("chat.record_gap_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) });
-        }
-      }
-      events.emit("chat.queued", { conversation_id: conversationId, agent_id: agentId, capability_building: _missingCaps.map(m => m.capability_id), gap_ids: _gapIds });
-      events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: _msg });
+      recordGap({ graph, events }, {
+        key: gapId,
+        wanted_kind: "tool",
+        wanted_id: buildId,
+        origin_conversation_id: conversationId,
+        wanted_description: desc,
+        reason: "chat.no_candidates",
+      });
+      ctx.invoke("agentry.build", { gap_id: gapId }, { tenant: "local", by: "chat.build" })
+        .catch(e => events.emit("chat.build_async_failed", { gap_id: gapId, error: String(e.message || "").slice(0, 200) }));
+      events.emit("chat.queued", { conversation_id: conversationId, gap_id: gapId, capability_building: buildId });
       return {
         output: {
-          ok: true, conversation_id: conversationId, agent_id: agentId,
-          message: _msg, plan, task: null, executed: false,
           state: "queued",
-          capability_building: _missingCaps.map(m => m.capability_id),
-          gap_ids: _gapIds,
+          conversation_id: conversationId,
+          capability_building: buildId,
+          gap_id: gapId,
           eta_s: 90,
-          error: null,
+          hint: "Capability being built. Retry in ~90s, or use your own tools to accomplish this now.",
         },
         cost: { time_ms: Date.now() - started },
       };
+    } catch (e) {
+      events.emit("chat.gap_record_failed", { gap_id: gapId, error: e.message });
     }
   }
 
-  // ── 5. Execute via agent.task ──
-  if (!agentId) {
-    const bootReason = (function() {
-      try {
-        const recent = ctx.events.all().filter(e => e.kind === "chat.agent_boot_failed" && e.conversation_id === conversationId).slice(-1)[0];
-        return recent ? recent.error : "unknown (no boot attempt logged)";
-      } catch { return "unknown"; }
-    })();
-    const errMsg = "Cannot execute: no agent could be booted. Reason: " + bootReason;
-    events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: null, message: errMsg });
-    return {
-      output: {
-        ok: false, conversation_id: conversationId, agent_id: null,
-        message: errMsg, plan, task: failTask("boot", bootReason || "no agent"), executed: false,
-        error: { phase: "boot", message: bootReason || "no agent" },
-      },
-      cost: { time_ms: Date.now() - started },
-    };
-  }
-
-  let taskRes;
-  try {
-    taskRes = await ctx.invoke("agentry.agent.task", {
-      agent_id: agentId,
-      intent: String(message),
-      plan,
-    }, { tenant: "local", by: "agentry.chat" });
-  } catch (e) {
-    events.emit("chat.task_threw", { conversation_id: conversationId, error: e.message });
-    const errMsg = "Execution failed: " + e.message;
-    events.emit("chat.assistant_turn", { conversation_id: conversationId, agent_id: agentId, message: errMsg });
-    return {
-      output: {
-        ok: false, conversation_id: conversationId, agent_id: agentId,
-        message: errMsg, plan, task: failTask("execute", e.message), executed: true,
-        error: { phase: "execute", message: e.message },
-      },
-      cost: { time_ms: Date.now() - started },
-    };
-  }
-
-  const task = taskRes.output || {};
-  const summarised = summariseTask(task);
-  const ok = task.state === "done" && task.ok === true;
-
-  events.emit("chat.assistant_turn", {
-    conversation_id: conversationId,
-    agent_id: agentId,
-    message: summarised,
-    task_id: task.task_id,
-    state: task.state,
-  });
-  events.emit("chat.completed", {
-    conversation_id: conversationId,
-    agent_id: agentId,
-    task_id: task.task_id,
-    ok,
-    steps: (task.trace || []).length,
-    artifacts: (task.artifacts || []).length,
-    ms: Date.now() - started,
-  });
-  if (String(process.env.AGENTRY_CHAT_EMAIL || "0") === "1") {
-    (async () => {
-      try {
-        const _capIds = plan.map(s => s.capability_id);
-        const _body = await buildChatTraceEmail(ctx, {
-          conversationId, capabilityId: (_capIds[0] || "planner"),
-          via: "planner", totalMs: Date.now() - started, startedAt: started,
-          input: null, output: task, artifacts: task.artifacts || [],
-          handlerPath: null,
-        });
-        await ctx.invoke("notify.fallback", {
-          subject: "[agentry] chat (planner): " + _capIds.join(", "),
-          body_markdown: _body,
-          primary: "notify.email.gmail",
-          fallback: "notify.console",
-        }, { tenant: "local", by: "agentry.chat" });
-        events.emit("chat.trace_email_sent", { conversation_id: conversationId, capability_id: _capIds[0] || null, via: "planner", body_len: _body.length });
-      } catch (e) {
-        try { events.emit("chat.trace_email_failed", { conversation_id: conversationId, error: String(e.message || "").slice(0, 200) }); } catch {}
-      }
-    })();
-  }
-
+  // ── 4. Nothing matched, nothing to build — hand off ──
+  events.emit("chat.no_match", { conversation_id: conversationId });
   return {
     output: {
-      ok,
+      state: "no_match",
       conversation_id: conversationId,
-      agent_id: agentId,
-      message: summarised,
-      plan,
-      task,
-      executed: true,
-      error: ok ? null : { phase: "execute", message: summarised },
+      hint: "No capability available. Use your own tools (bash, node, python, web_fetch) or call discover() / ensure_capability().",
     },
-    cost: {
-      time_ms: Date.now() - started,
-      http_calls: 1,
-    },
+    cost: { time_ms: Date.now() - started },
   };
 }

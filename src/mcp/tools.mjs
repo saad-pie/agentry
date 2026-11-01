@@ -417,20 +417,17 @@ export function registerAgentryTools(deps) {
     }
   );
 
-  // --- agentry.chat (v0.50.0 — the parent loop) ---
+  // --- agentry.chat (v0.58.0 — LOOKUP ONLY) ---
   registerTool(
     {
       name: "chat",
       description:
-        "Talk to agentry in natural language. Give it a task intent; it plans (agent.plan), executes the plan (agent.task), and returns a summary plus the full structured trace. This is the primary tool — use it when you want agentry to decide HOW to accomplish something, not just to invoke a specific capability. Returns {ok, message, conversation_id, agent_id, plan, task, executed, error}. conversation_id maintains thread continuity across calls. For direct capability invocation where you already know the capability_id, use 'invoke' instead.",
+        "LOOKUP ONLY. Given a natural-language intent, returns relevant capabilities from agentry's graph. Does NOT plan, does NOT invoke, does NOT boot agents.\n\nReturns one of four states:\n  { state: \"candidates\", candidates: [{id, kind, accepts, produces, why, score}, ...] } — pick one and call invoke, or if none fit, call ensure_capability or use your own tools\n  { state: \"queued\", capability_building, gap_id, eta_s } — capability is being built in the background; retry in ~90s or use your own tools now\n  { state: \"no_match\", hint } — nothing available; use your own tools (bash, node, python, web_fetch) or call discover() / ensure_capability()\n\nYou are the brain. This tool is just an index.",
       inputSchema: {
         type: "object",
         properties: {
-          message: { type: "string", description: "Natural-language task description. E.g. 'generate a QR for hello and save as PDF'." },
-          conversation_id: { type: "string", description: "Optional. Reuse a prior conversation for continuity — prior turns are passed to the planner." },
-          agent_id: { type: "string", description: "Optional. Use a specific agent. If absent, chat auto-boots a per-conversation agent." },
-          max_steps: { type: "number", description: "Optional. Max plan steps (default 8)." },
-          execute_default: { type: "boolean", description: "Default true. Set false for plan-only mode (returns plan without side effects)." },
+          message: { type: "string", description: "Natural-language task description." },
+          conversation_id: { type: "string", description: "Optional. Reuse a conversation id for thread continuity." },
         },
         required: ["message"],
       },
@@ -443,75 +440,42 @@ export function registerAgentryTools(deps) {
       if (typeof deps.graph.invalidateCache === "function") deps.graph.invalidateCache();
       const input = { message };
       if (args.conversation_id) input.conversation_id = String(args.conversation_id);
-      if (args.agent_id) input.agent_id = String(args.agent_id);
-      if (typeof args.max_steps === "number") input.max_steps = args.max_steps;
-      if (typeof args.execute_default === "boolean") input.execute_default = args.execute_default;
 
       const startedAt = Date.now();
       const res = await deps.invoke("agentry.chat", input, { tenant: "mcp", by: "mcp.chat" });
       const ms = Date.now() - startedAt;
 
       if (!res.ok) {
-        deps.events.emit("mcp.chat.failed", {
-          code: res.error?.code || null,
-          message: String(res.error?.message || "").slice(0, 300),
-          ms,
-        });
+        deps.events.emit("mcp.chat.failed", { code: res.error?.code || null, ms });
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              ok: false,
-              message: String(res.error?.message || "unknown error"),
-              error: { code: res.error?.code || null, message: res.error?.message || "unknown" },
-              ms,
-            }, null, 2),
-          }],
+          content: [{ type: "text", text: JSON.stringify({
+            state: "error",
+            error: { code: res.error?.code || null, message: res.error?.message || "unknown" },
+            ms,
+          }, null, 2) }],
           isError: true,
         };
       }
 
       const o = res.output || {};
-      deps.events.emit("mcp.chat.succeeded", {
+      deps.events.emit("mcp.chat." + (o.state || "unknown"), {
         conversation_id: o.conversation_id,
-        agent_id: o.agent_id,
-        executed: o.executed,
-        steps: (o.plan || []).length,
-        artifacts: (o.task?.artifacts || []).length,
-        state: o.task?.state || null,
+        candidates: (o.candidates || []).length,
+        building: o.capability_building || null,
         ms,
       });
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            ok: o.ok === true,
-            message: o.message,
-            conversation_id: o.conversation_id,
-            agent_id: o.agent_id,
-            executed: o.executed === true,
-            plan: (o.plan || []).map(s => s.capability_id),
-            task: o.task ? {
-              task_id: o.task.task_id,
-              state: o.task.state,
-              artifacts: (o.task.artifacts || []).map(a => ({
-                kind: a.kind, path: a.path || null, bytes: a.bytes || 0,
-              })),
-              trace_summary: (o.task.trace || []).map(t => ({
-                step: t.step, cap: t.capability_id, ok: t.ok, ms: t.ms,
-              })),
-              error: o.task.error || null,
-            } : null,
-            error: o.error || null,
-            // v0.56.53 — forward cold-path status fields
-            ...(o.state ? { state: o.state } : {}),
-            ...(Array.isArray(o.capability_building) && o.capability_building.length ? { capability_building: o.capability_building } : {}),
-            ...(Array.isArray(o.gap_ids) && o.gap_ids.length ? { gap_ids: o.gap_ids } : {}),
-            ...(typeof o.eta_s === "number" ? { eta_s: o.eta_s } : {}),
-            ms,
-          }, null, 2),
-        }],
+        content: [{ type: "text", text: JSON.stringify({
+          state: o.state,
+          conversation_id: o.conversation_id,
+          candidates: o.candidates || null,
+          capability_building: o.capability_building || null,
+          gap_id: o.gap_id || null,
+          eta_s: o.eta_s || null,
+          hint: o.hint || null,
+          ms,
+        }, null, 2) }],
       };
     }
   );

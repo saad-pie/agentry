@@ -58,6 +58,28 @@ export class Runtime {
     // They used the DeepSeek Harness business API, which silently returns
     // "done" without producing real artifacts. Superseded by agentry.agent.dsh
     // (headless, returns final/messages/tool_calls synchronously).
+    // v0.58.0 — retire planning/task/message caps. Their handlers are
+    // deleted; graph nodes would dangle otherwise. status() would list
+    // them, DSH could try to invoke, get ENOENT.
+    for (const _legacyId of [
+      "agentry.agent.plan",
+      "agentry.agent.task",
+      "agentry.agent.boot",
+      "agentry.task.run",
+      "agentry.message.send",
+      "agentry.message.read",
+    ]) {
+      try {
+        const _cap = this.graph.getCapability(_legacyId);
+        if (_cap && !_cap.retired_at) {
+          this.graph.retireCapability(_legacyId, "v0.58.0: chat is lookup-only, DSH is the brain; handler removed");
+          this.events.emit("runtime.boot.legacy_retired", { capability_id: _legacyId });
+        }
+      } catch (_e) {
+        this.events.emit("runtime.boot.legacy_retire_failed", { capability_id: _legacyId, error: String(_e.message || _e).slice(0, 200) });
+      }
+    }
+
     for (const _legacyId of ["agent.dsh", "agent.dsh_poll"]) {
       try {
         const _cap = this.graph.getCapability(_legacyId);

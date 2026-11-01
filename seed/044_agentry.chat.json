@@ -5,23 +5,40 @@
   "handler": "agentry.chat",
   "accepts": {
     "message": "string",
-    "agent_id": { "type": "string", "optional": true },
-    "conversation_id": { "type": "string", "optional": true },
-    "max_steps": { "type": "number", "optional": true },
-    "execute_default": { "type": "boolean", "optional": true }
+    "conversation_id": {
+      "type": "string",
+      "optional": true
+    }
   },
   "produces": {
-    "ok": "boolean",
+    "state": "string",
     "conversation_id": "string",
-    "agent_id": "string|null",
-    "message": "string",
-    "plan": "array|null",
-    "task": "object|null",
-    "executed": "boolean",
-    "error": "object|null"
+    "candidates": {
+      "type": "array",
+      "optional": true
+    },
+    "capability_building": {
+      "type": "string",
+      "optional": true
+    },
+    "gap_id": {
+      "type": "string",
+      "optional": true
+    },
+    "eta_s": {
+      "type": "number",
+      "optional": true
+    },
+    "hint": {
+      "type": "string",
+      "optional": true
+    }
   },
-  "cost": { "money_usd": 0, "time_ms": 300000 },
+  "cost": {
+    "money_usd": 0,
+    "time_ms": 100
+  },
   "limits": {},
   "source": "seeded:agentry",
-  "notes": "v0.43.0 — the user-facing parent loop. Accepts a natural-language message, plans via agent.plan, executes via agent.task, returns a human-readable summary + the structured trace. conversation_id maintains thread continuity (prior turns passed to planner, ephemeral agent booted per conversation). execute_default=false returns the plan without side effects. This is the primary MCP tool."
+  "notes": "v0.58.0 — LOOKUP ONLY. Returns state=candidates|queued|no_match. DSH is the brain: it plans, picks from candidates, invokes, or uses its own tools. Agentry never invokes from chat, never plans from chat, never boots agents. This is a capability index, not a loop."
 }
