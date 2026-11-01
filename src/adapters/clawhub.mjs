@@ -18,7 +18,15 @@ export async function search({ query, limit = 10 }) {
   const url = "https://clawhub.ai/api/v1/search?q="
     + encodeURIComponent(query)
     + "&limit=" + Math.min(limit, 30);
-  const data = await httpJson(url);
+  // v0.58.7 — fail-soft. ClawHub has been returning HTTP 500 and 10s
+  // timeouts. Returning [] on error lets search() continue with other
+  // adapters instead of throwing at the MCP surface.
+  let data;
+  try {
+    data = await httpJson(url, { timeoutMs: 5000 });
+  } catch (e) {
+    return [];
+  }
   const list = Array.isArray(data && data.results) ? data.results : [];
 
   const items = [];
