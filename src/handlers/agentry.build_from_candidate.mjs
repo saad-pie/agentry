@@ -11,6 +11,36 @@ export default async function agentryBuildFromCandidate(input, ctx) {
 
   events.emit("build_from_candidate.started", { gap_id, candidate_id: candidate.id });
 
+  // v0.58.4 — pre-check. If the capability already exists with a passed trial
+  // and a live handler, do NOT rebuild. A previous race caused working caps to
+  // be overwritten by subsequent synth attempts with a different spec, then
+  // retired when the new spec failed trial. This check makes build idempotent:
+  // once it works, calling build again returns the existing cap.
+  {
+    const _preTarget = gap.wanted_id || gap_id.replace(/^gap:/, "");
+    const _preCap = graph.getCapability(_preTarget);
+    if (_preCap && !_preCap.retired_at && _preCap.trial_passed_at && _preCap.handler_file) {
+      events.emit("build_from_candidate.already_exists", {
+        gap_id, capability_id: _preTarget, handler_path: _preCap.handler_file,
+      });
+      // retire gap if still open
+      try {
+        if (!gap.retired_at) graph.retireCapability(gap_id, "build_from_candidate: already adopted");
+      } catch (e) { events.emit("build.retire_gap_failed", { gap_id, error: String(e.message || "").slice(0, 200) }); }
+      return {
+        output: {
+          ok: true,
+          gap_id,
+          capability_id: _preTarget,
+          handler_path: _preCap.handler_file,
+          already_existed: true,
+          hint: "Capability already exists and passed trial. Call invoke() now.",
+        },
+        cost: { time_ms: Date.now() - started },
+      };
+    }
+  }
+
   // 1. Verify gap exists; create if missing
   let gap = graph.getCapability(gap_id);
   if (!gap) {
@@ -92,6 +122,23 @@ export default async function agentryBuildFromCandidate(input, ctx) {
     handler_path: adopted.handler_path,
     ms: Date.now() - started,
   });
+
+  // v0.58.4 — force-retire the gap after success. adopt.mjs already tries
+  // this, but if its graph cache was stale the retire call silently no-ops
+  // and the gap stays open. Background discovery loop then re-proposes,
+  // re-synthesizes with a different spec, overwrites the working cap, trial
+  // fails on the new spec, and the working cap gets retired. This second
+  // retire (with cache invalidate) prevents that race.
+  try {
+    if (typeof graph.invalidateCache === "function") graph.invalidateCache();
+    const _postGap = graph.getCapability(gap_id);
+    if (_postGap && !_postGap.retired_at) {
+      graph.retireCapability(gap_id, "build_from_candidate: successful adopt (force)");
+      events.emit("build_from_candidate.gap_force_retired", { gap_id });
+    }
+  } catch (e) {
+    events.emit("build.gap_force_retire_failed", { gap_id, error: String(e.message || "").slice(0, 200) });
+  }
 
   // v0.58.2 — checkpoint async. Prior version blocked build return on git push
   // (+60s) making total latency exceed curl timeouts even when synth succeeded.
