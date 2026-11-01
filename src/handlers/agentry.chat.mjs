@@ -176,6 +176,8 @@ function tryDirectMatch(message, graph) {
   const accepts = Object.keys(best.cap.accepts || {});
   const input = {};
   const pathKeys = accepts.filter(k => /path|_file$|_dir$/.test(k));
+  // v0.56.60 — hoist to function scope so return statement can access them
+  let _existing = [], _future = [];
   if (pathKeys.length > 0) {
     const _rawPaths = [...message.matchAll(/\/[\w./-]+/g)].map(m => m[0]);
     const _paths = _rawPaths.filter(p => {
@@ -183,8 +185,8 @@ function tryDirectMatch(message, graph) {
       return _last.includes(".") && (_last.split(".").pop() || "").length >= 2;
     });
     if (_paths.length > 0) {
-      const _existing = [];
-      const _future = [];
+      _existing = [];
+      _future = [];
       for (const p of _paths) {
         try { const st = statSync(p); if (st.isFile()) _existing.push(p); else _future.push(p); }
         catch { _future.push(p); }
