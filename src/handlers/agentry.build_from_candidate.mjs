@@ -87,6 +87,9 @@ export default async function agentryBuildFromCandidate(input, ctx) {
     candidates: [candidate],
     decisions: { [candidate.id]: { decision: "approved", at: Date.now(), auto: true, source: "dsh_build" } },
     auto_approved: true,
+    // v0.58.5c — tell adopt to try ONLY this one candidate. No expansion,
+    // no multi-candidate retries. If it fails, return; DSH picks differently.
+    skip_expansion: true,
     created_at: Date.now(),
     updated_at: Date.now(),
   });

@@ -588,7 +588,14 @@ export default async function agentryAdopt(input, ctx) {
   // every pass, if candidate count < 10, run discovery inline and
   // append fresh npm/agentskills candidates. Deduped against already-
   // attempted ids, so repeated calls converge rather than loop.
-  if (proposal.gap_wanted_id && (proposal.candidates || []).length < 10) {
+  // v0.58.5c — skip expansion for DSH builds. Prior version had adopt expand
+  // to 6+ candidates when given only 1, wasting 5-10 min per build and firing
+  // multiple trace emails. When proposal.skip_expansion is true (set by
+  // build_from_candidate from DSH's explicit choice), we try ONLY the candidate
+  // DSH passed. If it fails, return ok:false; DSH picks a different candidate.
+  // The background mechanical pipeline (agentry.ensure) does NOT set this flag,
+  // so it keeps full expansion.
+  if (proposal.skip_expansion !== true && proposal.gap_wanted_id && (proposal.candidates || []).length < 10) {
     try {
       const _attempted = new Set([
         ...(proposal.candidates || []).map(c => c.id),
