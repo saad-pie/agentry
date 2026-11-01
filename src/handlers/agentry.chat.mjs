@@ -218,7 +218,15 @@ function tryDirectMatch(message, graph) {
       }
       for (const k of _otherKeys) {
         const leftover = [..._existing.filter(p => !_usedEx.has(p)), ..._future.filter(p => !_usedFu.has(p))];
-        if (leftover.length > 0) input[k] = leftover[0];
+        if (leftover.length > 0) {
+          input[k] = leftover[0];
+          // v0.56.58 — mark used so same path is not assigned to multiple keys.
+          // Without this, xml_path and toml_path both got /tmp/t3_in.xml;
+          // handler wrote TOML back into the input, output never created,
+          // chat reported ok:true with the input file as the artifact.
+          if (_existing.includes(leftover[0])) _usedEx.add(leftover[0]);
+          if (_future.includes(leftover[0])) _usedFu.add(leftover[0]);
+        }
       }
     }
   }
@@ -412,6 +420,40 @@ export default async function agentryChat(input, ctx) {
               _artifacts.push({ kind: "file", field: _k, path: _v, bytes: _st.size, from_step: 0 });
             }
           } catch {}
+        }
+        // v0.56.58 — artifact cannot equal input. If handler wrote output to an
+        // input path (or didn't write at all and we found the input), that's a
+        // silent success lie. Fail honestly.
+        {
+          const _inputVals = new Set(Object.values(_direct.input || {}).filter(v => typeof v === "string"));
+          const _liars = _artifacts.filter(a => _inputVals.has(a.path));
+          if (_liars.length > 0) {
+            events.emit("chat.direct_artifact_equals_input", {
+              conversation_id: conversationId,
+              capability_id: _direct.capability_id,
+              input_paths: [..._inputVals],
+              artifact_paths: _liars.map(a => a.path),
+            });
+            return {
+              output: {
+                ok: false,
+                conversation_id: conversationId,
+                agent_id: agentId,
+                message: "Handler returned success but wrote output to an input path. Output not created.",
+                plan: [{ capability_id: _direct.capability_id, input: _direct.input, why: "direct_match" }],
+                task: {
+                  task_id: null, state: "failed",
+                  artifacts: [],
+                  trace: [{ step: 0, capability_id: _direct.capability_id, ok: false, ms: _directMs, error: { code: "artifact_equals_input", message: "handler wrote to input path" } }],
+                  error: { code: "artifact_equals_input", message: "handler wrote output to input path" },
+                },
+                executed: true,
+                error: { code: "artifact_equals_input", message: "handler wrote output to input path" },
+                via: "direct_match",
+              },
+              cost: { time_ms: Date.now() - started },
+            };
+          }
         }
         const _artifactMissing = (_artifacts.length === 0 && Object.keys(_produces).some(k => /path|_file|_out/.test(k)));
         events.emit("chat.direct_success", {
