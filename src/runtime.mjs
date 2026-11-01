@@ -68,6 +68,7 @@ export class Runtime {
       "agentry.task.run",
       "agentry.message.send",
       "agentry.message.read",
+      "agentry.chat",
     ]) {
       try {
         const _cap = this.graph.getCapability(_legacyId);

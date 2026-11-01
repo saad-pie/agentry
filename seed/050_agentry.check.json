@@ -1,0 +1,30 @@
+{
+  "id": "agentry.check",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.check",
+  "accepts": {
+    "intent_or_id": "string",
+    "wanted_kind": {
+      "type": "string",
+      "optional": true
+    }
+  },
+  "produces": {
+    "exists": "boolean",
+    "capability_id": "string",
+    "matches": "array",
+    "gap_id": {
+      "type": "string",
+      "optional": true
+    },
+    "hint": "string"
+  },
+  "cost": {
+    "money_usd": 0,
+    "time_ms": 20
+  },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.58.1 — pure lookup. Returns {exists:true, capability_id, matches:[...]} when caps match, {exists:false, gap_id, capability_id} when nothing matches. DSH picks. No planning, no invoke, no boot."
+}

@@ -1,0 +1,32 @@
+{
+  "id": "agentry.build_from_candidate",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.build_from_candidate",
+  "accepts": {
+    "gap_id": "string",
+    "candidate": "object",
+    "wanted_kind": {
+      "type": "string",
+      "optional": true
+    }
+  },
+  "produces": {
+    "ok": "boolean",
+    "gap_id": "string",
+    "capability_id": "string",
+    "handler_path": "string",
+    "reason": {
+      "type": "string",
+      "optional": true
+    },
+    "hint": "string"
+  },
+  "cost": {
+    "money_usd": 0,
+    "time_ms": 120000
+  },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.58.1 — synthesize from a candidate DSH explicitly chose. No LLM ranking, no proposal scoring. Wraps the candidate in a single-candidate pre-approved proposal and calls adopt."
+}

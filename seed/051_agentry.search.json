@@ -1,0 +1,32 @@
+{
+  "id": "agentry.search",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.search",
+  "accepts": {
+    "query": "string",
+    "adapters": {
+      "type": "array",
+      "optional": true
+    },
+    "limit": {
+      "type": "number",
+      "optional": true
+    }
+  },
+  "produces": {
+    "results": "object",
+    "counts": "object",
+    "errors": {
+      "type": "object",
+      "optional": true
+    }
+  },
+  "cost": {
+    "money_usd": 0,
+    "time_ms": 1500
+  },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.58.1 — raw adapter fan-out. DSH specifies which adapters to query. Returns results grouped by adapter, no ranking. DSH reads them and picks."
+}
