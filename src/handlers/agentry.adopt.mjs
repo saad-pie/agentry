@@ -1099,15 +1099,16 @@ export default async function agentryAdopt(input, ctx) {
     retry_exhausted: retryExhausted,
   });
 
-  // ─── Checkpoint on growth ───
+  // ─── v0.58.3 — Checkpoint on growth (fire-and-forget) ───
+  // Prior version awaited git push (+30-60s) inline. That blocked adopt's
+  // return, making build_from_candidate latency exceed client timeouts.
   if (adopted.length > 0) {
-    try {
-      await ctx.invoke("agentry.checkpoint", {
+    setImmediate(() => {
+      ctx.invoke("agentry.checkpoint", {
         reason: `adopt:${adopted.length}_capabilities`,
-      }, { tenant: "local", by: "agentry.adopt" });
-    } catch (e) {
-      events.emit("adoption.checkpoint_failed", { proposal_id, error: e.message });
-    }
+      }, { tenant: "local", by: "agentry.adopt" })
+        .catch(e => events.emit("adoption.checkpoint_async_failed", { proposal_id, error: String(e.message || "").slice(0, 200) }));
+    });
   }
 
   const body = renderAdoptionEmail({ proposal, adopted, failed, retiredGap, retiredWatches });
