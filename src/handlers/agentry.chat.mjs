@@ -139,6 +139,11 @@ function tryDirectMatch(message, graph) {
   // agent boot + task wrap (~5s). Falls through to planner on any doubt.
   const tokens = message.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3);
   if (tokens.length === 0) return null;
+  // v0.56.61 — extract target word for direction-aware scoring
+  const _targetWord = (() => {
+    const _m = message.toLowerCase().match(/\b(?:to|into|as)\s+([a-z][a-z0-9]{2,15})\b/);
+    return _m ? _m[1] : null;
+  })();
   const candidates = [];
   for (const c of graph.capabilities().values()) {
     if (c.retired_at) continue;
@@ -149,6 +154,21 @@ function tryDirectMatch(message, graph) {
     const hay = (String(c.id || "") + " " + String(c.notes || "") + " " + String(c.description || "")).toLowerCase();
     let score = 0;
     for (const t of tokens) if (hay.includes(t)) score++;
+    // v0.56.61 — direction score. If target word exists, boost caps whose _to_X
+    // suffix matches target, penalize caps whose _to_X is a different direction.
+    // Fixes yaml->json matching yaml->toml because both tokens appear in message.
+    if (_targetWord && score > 0) {
+      const _idLow = String(c.id || "").toLowerCase();
+      const _toMatch = _idLow.match(/_to_([a-z0-9]+)/);
+      const _colonMatch = _idLow.match(/:([a-z0-9]+)(?:_|$)/);
+      const _suffix = _toMatch ? _toMatch[1] : (_colonMatch ? _colonMatch[1] : null);
+      if (_suffix) {
+        if (_suffix === _targetWord) score += 25;
+        else if (!_idLow.includes("_" + _targetWord)) score -= 20;
+      } else if (_idLow.includes("_" + _targetWord) || _idLow.endsWith("." + _targetWord) || _idLow.includes(":" + _targetWord)) {
+        score += 15;
+      }
+    }
     if (score > 0) candidates.push({ cap: c, score });
   }
   if (candidates.length === 0) return null;
