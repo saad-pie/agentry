@@ -23,7 +23,14 @@ function compilePlanToScript(plan) {
     if (step.what) parts.push("  // what: " + String(step.what).replace(/\n/g, "\n  // "));
     if (step.fails_if) parts.push("  // fails_if: " + String(step.fails_if).replace(/\n/g, "\n  // "));
     const rawCode = String(step.code || "").trim();
-    const code = decodeIfDoubleEscaped(rawCode);
+    let code = decodeIfDoubleEscaped(rawCode);
+    // v0.58.2 — unwrap inner async IIFE. LLM wraps step body in
+    // (async () => {...})(); but nothing awaits it, so all steps race. The
+    // outer wrapper IS async — unwrap and let step code run at top level.
+    {
+      const _m = code.match(/^\s*\(async\s*\(\s*\)\s*=>\s*\{([\s\S]*)\}\s*\)\s*\(\s*\)\s*;?\s*$/);
+      if (_m) code = _m[1];
+    }
     parts.push("  { // scope for step " + step.step);
     parts.push("    // BEGIN " + step.verb);
     if (code) parts.push(indentBlock(code, "    "));
