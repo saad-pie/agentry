@@ -39,6 +39,7 @@
 // failure from empty plan from execution throw. Every failure now carries
 // phase + message.
 import { statSync } from "node:fs";
+import { pick as routingPick } from "../routing/index.mjs";
 
 function failTask(phase, message) {
   return {
@@ -93,25 +94,6 @@ function summariseTask(task) {
   return "Task ended in state: " + state;
 }
 
-// Extract the "best answer" text from a task, if any step produced one.
-// For DSH steps, that's trace[i].output_keys containing "final" (but
-// trace only stores keys, not values — the values live in task
-// artifacts/stepOutputs which aren't persisted). For most steps, the
-// artifact paths are the answer. Return null if nothing text-shaped.
-function extractAnswerFromTask(task) {
-  // Best source: last successful step's trace entry output_keys.
-  const steps = task.trace || [];
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const s = steps[i];
-    if (!s.ok) continue;
-    // We don't persist step output values in trace (only keys). Fall
-    // back to artifacts, which is what most callers want.
-    const arts = (task.artifacts || []).filter(a => a.from_step === s.step);
-    if (arts.length > 0) return null; // artifacts exist, summary already covers it
-  }
-  return null;
-}
-
 // Walk prior conversation messages for this thread. Retrieved from the
 // events log, filtered by conversation_id. Cheap and correct.
 function getPriorTurns(ctx, conversationId) {
@@ -132,18 +114,13 @@ function getPriorTurns(ctx, conversationId) {
   }
 }
 
-function tryDirectMatch(message, graph) {
+async function tryDirectMatch(message, graph, ctx) {
   // v0.56.21 — if the message clearly names an existing capability and we
   // can build its required inputs from path-like tokens in the message,
   // invoke directly. Skips the entire planner (LLM call ~2-3s) plus the
   // agent boot + task wrap (~5s). Falls through to planner on any doubt.
   const tokens = message.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3);
   if (tokens.length === 0) return null;
-  // v0.56.61 — extract target word for direction-aware scoring
-  const _targetWord = (() => {
-    const _m = message.toLowerCase().match(/\b(?:to|into|as)\s+([a-z][a-z0-9]{2,15})\b/);
-    return _m ? _m[1] : null;
-  })();
   const candidates = [];
   for (const c of graph.capabilities().values()) {
     if (c.retired_at) continue;
@@ -154,21 +131,6 @@ function tryDirectMatch(message, graph) {
     const hay = (String(c.id || "") + " " + String(c.notes || "") + " " + String(c.description || "")).toLowerCase();
     let score = 0;
     for (const t of tokens) if (hay.includes(t)) score++;
-    // v0.56.61 — direction score. If target word exists, boost caps whose _to_X
-    // suffix matches target, penalize caps whose _to_X is a different direction.
-    // Fixes yaml->json matching yaml->toml because both tokens appear in message.
-    if (_targetWord && score > 0) {
-      const _idLow = String(c.id || "").toLowerCase();
-      const _toMatch = _idLow.match(/_to_([a-z0-9]+)/);
-      const _colonMatch = _idLow.match(/:([a-z0-9]+)(?:_|$)/);
-      const _suffix = _toMatch ? _toMatch[1] : (_colonMatch ? _colonMatch[1] : null);
-      if (_suffix) {
-        if (_suffix === _targetWord) score += 25;
-        else if (!_idLow.includes("_" + _targetWord)) score -= 20;
-      } else if (_idLow.includes("_" + _targetWord) || _idLow.endsWith("." + _targetWord) || _idLow.includes(":" + _targetWord)) {
-        score += 15;
-      }
-    }
     if (score > 0) candidates.push({ cap: c, score });
   }
   if (candidates.length === 0) return null;
@@ -182,9 +144,21 @@ function tryDirectMatch(message, graph) {
     const _bT = Number(b.cap.trial_passed_at || b.cap.adopted_from?.synthesized_at || 0);
     return _bT - _aT;
   });
-  const best = candidates[0];
+  let best = candidates[0];
   const second = candidates[1];
   if (best.score < 2) return null;
+  // v0.57.1 — LLM tiebreak. No regex for semantics. When top-2 scores are
+  // within 1 point, ask routing.pick which capability serves the intent.
+  if (second && second.score >= best.score - 1 && ctx) {
+    try {
+      const _top = candidates.filter(c => c.score >= best.score - 1).slice(0, 5);
+      const _picked = await routingPick(String(message), _top.map(x => x.cap), ctx);
+      if (_picked) {
+        const _found = _top.find(c => c.cap.id === _picked.id);
+        if (_found) best = _found;
+      }
+    } catch (e) {}
+  }
   // v0.56.27 — dynamic path extraction. Any fixed cap on extension length has
   // the same failure mode (parquet was truncated by \w{1,6}, then markdown by
   // \w{1,12} would break on .webmanifest). Filesystem-based classification:
@@ -372,10 +346,6 @@ export default async function agentryChat(input, ctx) {
   if (!agentId) {
     // If this conversation already has an agent (from prior turns), reuse it.
     // Otherwise boot a fresh one named after the conversation.
-    const priorTurns = getPriorTurns(ctx, conversationId);
-    const priorAgent = priorTurns.length > 0
-      ? null // we don't track per-turn agent_ids; boot fresh under conv name
-      : null;
     const agentName = genEphemeralAgentName(conversationId);
     // Check if an agent with this deterministic name already exists
     const existingCandidates = [...graph.capabilities().values()].filter(c =>
@@ -412,7 +382,7 @@ export default async function agentryChat(input, ctx) {
   });
 
   // ── 2.5 v0.56.21 — fast path: direct match ──
-  const _direct = tryDirectMatch(String(message), graph);
+  const _direct = await tryDirectMatch(String(message), graph, ctx);
   if (_direct) {
     events.emit("chat.direct_match", {
       conversation_id: conversationId, agent_id: agentId,
@@ -455,7 +425,7 @@ export default async function agentryChat(input, ctx) {
             events.emit("chat.direct_artifact_equals_input", {
               conversation_id: conversationId,
               capability_id: _direct.capability_id,
-              input_paths: [..._inputVals],
+              input_paths: [..._preExisting],
               artifact_paths: _liars.map(a => a.path),
             });
             return {
