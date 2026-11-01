@@ -93,6 +93,13 @@ export default async function agentryBuildFromCandidate(input, ctx) {
     ms: Date.now() - started,
   });
 
+  // v0.58.2 — checkpoint async. Prior version blocked build return on git push
+  // (+60s) making total latency exceed curl timeouts even when synth succeeded.
+  setImmediate(() => {
+    ctx.invoke("agentry.checkpoint", { reason: "build_from_candidate:" + (adopted.capability_id || gapCapId) })
+      .catch(e => events.emit("build.checkpoint_async_failed", { gap_id, error: String(e.message || "").slice(0, 200) }));
+  });
+
   return {
     output: {
       ok: true,

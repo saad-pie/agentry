@@ -202,6 +202,12 @@ export function renderHandler(spec) {
   out.push("  }");
   out.push("  const probe = await run(" + JSON.stringify(spec.accept_spec?.input || {}) + ", deps, { session });");
   out.push("  const out = probe.output || probe;");
+  out.push("  // v0.58.2 — verify produces fields are non-null. Prior version trusted");
+  out.push("  // trial to pass on exit_code alone; broken handlers that returned null/undefined");
+  out.push("  // for a promised field passed trial and shipped as silent-failure caps.");
+  out.push("  const _PRODUCES = " + JSON.stringify(spec.capability?.produces || {}) + ";");
+  out.push("  const _missingProduces = Object.keys(_PRODUCES).filter(k => out[k] === undefined || out[k] === null);");
+  out.push("  if (_missingProduces.length > 0) throw new Error(\"accept: handler returned null/undefined for produces field(s): \" + _missingProduces.join(\", \"));");
   out.push("  const minBytes = " + (spec.accept_spec?.min_bytes ?? 0) + ";");
   out.push("  if (minBytes > 0) {");
   out.push("    const size = typeof out.bytes === \"number\" ? out.bytes : 0;");
