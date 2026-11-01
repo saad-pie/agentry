@@ -338,10 +338,12 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
   // 5. Re-trial.
   let trialRes2;
   try {
+    // v0.58.5 — reuse synth session for retrial too
     trialRes2 = await ctx.invoke("agentry.trial", {
       capability_id: synthesis.capability_id,
       handler_path: repaired_path,
       seed_path: synthesis.seed_path,
+      session: synthesis.repo_session || undefined,
     }, { tenant: "local", by: "agentry.adopt" });
   } catch (e) {
     events.emit("adoption.repair_trial_threw", {
@@ -760,10 +762,16 @@ export default async function agentryAdopt(input, ctx) {
     // ── Trial ──
     let trial = null;
     try {
+      // v0.58.5 — reuse synth session. Synthesis already installed the
+      // package in repo_session; trial was creating a fresh session and
+      // reinstalling the same package (15-30s wasted per build). Passing
+      // session reuses the install; prepareSession inside accept() is a
+      // no-op because PREPARE_KEY(capId) is already set in session env.
       const trialRes = await ctx.invoke("agentry.trial", {
         capability_id: synthesis.capability_id,
         handler_path: synthesis.handler_path,
         seed_path: synthesis.seed_path,
+        session: synthesis.repo_session || undefined,
       }, { tenant: "local", by: "agentry.adopt" });
 
       if (!trialRes.ok || !trialRes.output?.ok) {
