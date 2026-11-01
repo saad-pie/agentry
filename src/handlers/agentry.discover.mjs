@@ -23,6 +23,19 @@ const DEFAULT_SOURCES = ["local", "npm", "pypi", "crates", "maven", "nuget", "go
 // These will move to src/adapters/ in subsequent rounds.
 
 async function searchMcp(query, limit) {
+  // v0.58.7b — retry simplified. MCP registry matches server names, not
+  // natural language. "convert json to yaml" returns 0.
+  const _FILLER = new Set(["convert","change","transform","turn","make","create","generate","to","into","from","with","and","or","the","a","an","file","files","using","please","via","through","for","of"]);
+  const _simple = String(query).toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !_FILLER.has(t)).slice(0, 3).join(" ");
+  const _tries = _simple && _simple !== String(query).toLowerCase().trim() ? [query, _simple] : [query];
+  for (const _q of _tries) {
+    const _result = await _searchMcpOnce(_q, limit);
+    if (_result.items && _result.items.length > 0) return _result;
+  }
+  return { items: [] };
+}
+
+async function _searchMcpOnce(query, limit) {
   const q = encodeURIComponent(query);
   let lastErr = null;
   for (const base of MCP_REGISTRY_CANDIDATES) {

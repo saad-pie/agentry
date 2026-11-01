@@ -16,12 +16,23 @@ export const meta = {
 };
 
 export async function search({ query, limit = 10 }) {
-  const url = "https://search.maven.org/solrsearch/select?q="
-    + encodeURIComponent(query)
-    + "&rows=" + Math.min(limit, 30)
-    + "&wt=json";
-  const data = await httpJson(url);
-  const docs = Array.isArray(data?.response?.docs) ? data.response.docs : [];
+  // v0.58.7b — retry simplified. Maven Solr searches artifact names,
+  // not natural-language queries. "convert json to yaml" returns 0, "yaml" returns 855.
+  const _FILLER = new Set(["convert","change","transform","turn","make","create","generate","to","into","from","with","and","or","the","a","an","file","files","using","please","via","through","for","of"]);
+  const _simple = String(query).toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !_FILLER.has(t)).slice(0, 3).join(" ");
+  const _queries = _simple && _simple !== String(query).toLowerCase().trim() ? [query, _simple] : [query];
+  let docs = [];
+  for (const _q of _queries) {
+    const url = "https://search.maven.org/solrsearch/select?q="
+      + encodeURIComponent(_q)
+      + "&rows=" + Math.min(limit, 30)
+      + "&wt=json";
+    try {
+      const data = await httpJson(url);
+      docs = Array.isArray(data?.response?.docs) ? data.response.docs : [];
+      if (docs.length > 0) break;
+    } catch (e) { /* next */ }
+  }
 
   return docs.slice(0, limit).map(d => {
     const coord = d.id || ((d.g || "") + ":" + (d.a || ""));
