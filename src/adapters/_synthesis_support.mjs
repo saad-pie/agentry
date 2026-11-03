@@ -36,6 +36,7 @@ export const SYNTHESIS_SUPPORT = {
   "nuget":            { synthesizable: false, runtime: "dotnet_missing" },
   "gomod":            { synthesizable: true,  runtime: "go" },
   "huggingface":      { synthesizable: false, runtime: "model_not_runtime_lib" },
+  "mcp":              { synthesizable: false, runtime: "no_install_primitive" },
   "dsh_plugins":      { synthesizable: true,  runtime: "node" },
 };
 

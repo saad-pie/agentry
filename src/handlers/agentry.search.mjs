@@ -4,7 +4,7 @@
 
 import { runAdapters } from "../adapters/_registry.mjs";
 
-const DEFAULT_ADAPTERS = ["npm","pypi","crates","gomod","maven","nuget","agentskills_code","clawhub","hermes_atlas","dsh_plugins","github","web"];
+const DEFAULT_ADAPTERS = ["npm","pypi","crates","gomod","maven","nuget","agentskills_code","clawhub","hermes_atlas","dsh_plugins","github","web","mcp"];
 
 // v0.58.7 — filler words that don't help maven/nuget search. They index
 // package/artifact names, not natural-language queries. "convert json to
