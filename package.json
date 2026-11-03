@@ -1,6 +1,6 @@
 {
   "name": "agentry",
-  "version": "0.6.4",
+  "version": "0.58.8",
   "description": "A capability graph the agent grows itself. Append-only. Observable. Self-extending.",
   "type": "module",
   "main": "src/index.mjs",

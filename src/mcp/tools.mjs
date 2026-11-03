@@ -63,7 +63,7 @@ export function registerAgentryTools(deps) {
   // ───────── search ─────────
   registerTool({
     name: "search",
-    description: "Search external registries. Returns RAW results grouped by adapter — no ranking, no filtering, no recommendation. YOU read them and pick one, then call build(). Adapters: npm, pypi, crates, gomod, maven, nuget, agentskills_code, clawhub, hermes_atlas, dsh_plugins, huggingface, github, web, mcp.",
+    description: "Search external registries. Returns RAW results grouped by adapter — no ranking, no filtering, no recommendation. YOU read them and pick one, then call build(). Adapters: npm, pypi, crates, gomod, maven, nuget, agentskills_code, clawhub, hermes_atlas, dsh_plugins, github, web, mcp.",
     inputSchema: {
       type: "object",
       properties: {

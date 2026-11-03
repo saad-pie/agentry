@@ -93,10 +93,20 @@ export default async function agentryCheckpoint(input, ctx) {
     throw new Error(`checkpoint: git add failed — ${add.stderr.slice(0, 200)}`);
   }
 
-  // Is there anything to commit?
   const diff = git(["diff-index", "--quiet", "HEAD", "--"]);
   if (diff.exit_code === 0) {
-    // Exit 0 = clean tree. Nothing to do.
+    const pending = git(["log", "origin/HEAD..HEAD", "--oneline"]);
+    if (pending.exit_code === 0 && pending.stdout.trim().length > 0) {
+      const push = git(["push", "-u", "origin", "HEAD"], { timeout: 60000 });
+      if (push.exit_code === 0) {
+        ctx.events.emit("checkpoint.pushed_retry", { reason, commits: pending.stdout.trim().split("\n").length });
+        return {
+          output: { committed: false, pushed: true, sha: null, reason, note: "retried pending push" },
+          cost: { time_ms: Date.now() - started },
+        };
+      }
+      ctx.events.emit("checkpoint.push_retry_failed", { reason, stderr: push.stderr.slice(0, 200) });
+    }
     ctx.events.emit("checkpoint.clean", { reason });
     return {
       output: {

@@ -153,6 +153,14 @@ export async function runAdapters({ query, limit = 10, sources = null, ctx = {} 
     }
   });
 
+  if (sources && Array.isArray(sources)) {
+    for (const _s of sources) {
+      if (!names.includes(_s) && !results[_s]) {
+        results[_s] = [];
+        errors[_s] = "unknown_adapter";
+      }
+    }
+  }
   const counts = {};
   for (const [k, v] of Object.entries(results)) counts[k] = v.length;
 

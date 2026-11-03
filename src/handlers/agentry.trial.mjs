@@ -220,7 +220,11 @@ export default async function agentryTrial(input, ctx) {
         if (!fsCheck.existsSync(val)) { _failures.push(key + ": file_missing"); continue; }
         const st = fsCheck.statSync(val);
         if (st.size === 0) { _failures.push(key + ": file_empty"); continue; }
-        const head = fsCheck.readFileSync(val).slice(0, 8).toString("hex");
+        const _fd = fsCheck.openSync(val, "r");
+        const _buf = Buffer.alloc(8);
+        fsCheck.readSync(_fd, _buf, 0, 8, 0);
+        fsCheck.closeSync(_fd);
+        const head = _buf.toString("hex");
         if (!head.startsWith(expected)) {
           _failures.push(key + ": magic_mismatch ext=" + ext + " got=" + head + " expected=" + expected);
         }

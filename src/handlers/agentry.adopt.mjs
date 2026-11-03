@@ -489,7 +489,7 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
         produces_keys: Object.keys((synthesis.spec && synthesis.spec.capability && synthesis.spec.capability.produces) || {}),
       },
       outcome: { verified: true, via_repair: true },
-      total_ms: Date.now() - started,
+      total_ms: 0, // v0.58.8 started out of scope
     };
     emitTrace(ctx.events, _traceR);
     if (String(process.env.AGENTRY_TRACE_EMAIL || "1") !== "0") {

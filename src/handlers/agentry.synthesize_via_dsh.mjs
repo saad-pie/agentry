@@ -401,13 +401,11 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   } catch (e) {
     _recordFailure("dsh_threw", null);
     events.emit("dsh_synth.dsh_threw", { capability_id, error: e.message });
-    _recordFailure("dsh_threw", spec);
     return { output: { verified: false, capability_id, reason: "dsh_threw: " + e.message }, cost: { time_ms: Date.now() - started } };
   }
   if (!dshRes.ok) {
     _recordFailure("dsh_failed", null);
     events.emit("dsh_synth.dsh_failed", { capability_id, error: dshRes.error?.message });
-    _recordFailure("dsh_failed", spec);
     return { output: { verified: false, capability_id, reason: "dsh_failed: " + (dshRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
   }
   const finalText = String(dshRes.output?.final || "");

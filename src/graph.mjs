@@ -46,7 +46,13 @@ export class CapabilityGraph {
   // ---------- low-level: append + read ----------
   _append(file, obj) {
     appendFileSync(file, JSON.stringify(obj) + "\n");
-    this._cache = null; // invalidate
+    if (this._cache?.caps && obj.id && file === this.capsFile) {
+      const existing = this._cache.caps.get(obj.id);
+      if (obj.retired_at) this._cache.caps.delete(obj.id);
+      else this._cache.caps.set(obj.id, { ...(existing || {}), ...obj });
+    } else {
+      this._cache = null;
+    }
   }
 
   _readAll(file) {

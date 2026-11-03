@@ -6,7 +6,7 @@
 // subdirectory if the caller wants stronger isolation.
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve, normalize } from "node:path";
+import { join, resolve, normalize, relative, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const SESSION_DIR_NAME = "sessions";
@@ -49,6 +49,11 @@ export class SessionStore {
 
   create({ id, cwd = ".", env = {} } = {}) {
     const sid = id || `sess_${randomBytes(8).toString("hex")}`;
+    if (typeof sid === "string" && (sid.startsWith("/") || sid.split("/").some(s => s === ".."))) {
+      const e = new Error(`session.create: absolute or .. rejected: ${sid}`);
+      e.code = "INVALID_REQUEST";
+      throw e;
+    }
     if (this._cache.has(sid)) {
       return { created: false, session: this._cache.get(sid) };
     }
@@ -135,7 +140,8 @@ export class SessionStore {
     const abs = resolve(base, path);
     const normalizedRoot = normalize(s.root);
     const normalizedAbs = normalize(abs);
-    if (!normalizedAbs.startsWith(normalizedRoot)) {
+    const _rel = relative(normalizedRoot, normalizedAbs);
+    if (_rel.startsWith("..") || isAbsolute(_rel)) {
       const e = new Error(`path escapes session root: ${path}`);
       e.code = "NOT_FOUND";
       throw e;
