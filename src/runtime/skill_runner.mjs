@@ -224,11 +224,12 @@ function buildChain(provider, model) {
   if (provider && model) chain.push({ provider, model });
   // Fallback order: gemini via the atria proxy, then back to groq
   // with a smaller model. Skip duplicates.
+  // v0.60.0-phase2.1 — Coarena last (tool loop; would burn rpm as primary).
   const extra = [
-    { provider: "ollama", model: "beam:cloud" },
     { provider: "orcarouter", model: "tencent/hy4-preview-free" },
     { provider: "groq", model: "openai/gpt-oss-20b" },
     { provider: "google", model: "gemini-2.5-flash" },
+    { provider: "coarena", model: "claude-haiku-5-5" },
   ];
   for (const e of extra) {
     if (chain.some(c => c.provider === e.provider && c.model === e.model)) continue;

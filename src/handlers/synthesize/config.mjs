@@ -16,12 +16,12 @@ export const INSTALLER_PATH = join(HERE, "..", "..", "runtime", "installer.mjs")
 export const SKILL_RUNNER_PATH = join(HERE, "..", "..", "runtime", "skill_runner.mjs").replace(/\\/g, "/");
 
 // v0.56.45 — AnyRouter primary (1M ctx). Free models, 532 tok/s.
+// v0.60.0-phase2.1 — Coarena primary (Sonnet). Best cost/quality for codegen.
 export const MODEL_CHAIN = [
-  { provider: "ollama", model: "beam:cloud" },
+  { provider: "coarena", model: "claude-sonnet-5-5" },
+  { provider: "groq", model: "openai/gpt-oss-120b" },
   { provider: "orcarouter", model: "tencent/hy4-preview-free" },
   { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
-  { provider: "groq", model: "openai/gpt-oss-120b" },
-  { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
 

@@ -29,11 +29,12 @@ import { link, RELATIONS } from "../graph/edges.mjs";
 import { isSynthesizable, supportFor } from "../adapters/_synthesis_support.mjs";
 
 // v0.56.45 — AnyRouter primary
+// v0.60.0-phase2.1 — Coarena primary (Opus). No user content in prompt.
 const MODEL_CHAIN = [
+  { provider: "coarena", model: "claude-opus-5-5" },
   { provider: "groq", model: "openai/gpt-oss-120b" },
   { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
   { provider: "orcarouter", model: "tencent/hy4-preview-free" },
-  { provider: "ollama", model: "beam:cloud" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
 

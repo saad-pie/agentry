@@ -38,6 +38,11 @@ function buildHardenPrompt({ src, capability, seed }) {
   L.push(String(src || "").slice(0, 24000));
   L.push("</HANDLER>");
   L.push("");
+  L.push("CRITICAL — SURGICAL EDIT:");
+  L.push("Do NOT re-derive the handler from scratch. Preserve every line not");
+  L.push("directly affected by the edge case you are fixing. You are patching,");
+  L.push("not rewriting.");
+  L.push("");
   L.push("TASK: produce an improved version that:");
   L.push("  1. Handles edge cases: empty strings, missing optional keys, null,");
   L.push("     non-UTF8/emoji, very large inputs, malformed JSON, missing files.");

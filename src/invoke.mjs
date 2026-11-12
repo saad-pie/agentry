@@ -131,10 +131,21 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
     events.emit("invoke.run_record_failed", { capability_id: capabilityId, error: e.message });
   }
 
-  // v0.60.0-phase2 — mark ephemeral caps on first success.
+  // v0.60.0-phase2.1 — mark ephemeral on first success AND fire promote
+  // immediately (fire-and-forget). Runtime tick stays as backstop.
   if (result.ok && cap.tier === "ephemeral" && !cap.first_succeeded_at) {
-    try { graph.putCapability({ id: capabilityId, first_succeeded_at: Date.now() }); }
-    catch (e) { events.emit("invoke.first_success_mark_failed", { capability_id: capabilityId, error: String(e.message || "").slice(0, 200) }); }
+    try {
+      graph.putCapability({ id: capabilityId, first_succeeded_at: Date.now() });
+      const _deps = deps;
+      const _capId = capabilityId;
+      const _events = events;
+      setImmediate(() => {
+        invoke(_deps, "agentry.promote", { capability_id: _capId }, { tenant: "local", by: "invoke.auto_promote" })
+          .catch(e => _events.emit("invoke.auto_promote_failed", { capability_id: _capId, error: String(e && e.message || "").slice(0, 200) }));
+      });
+    } catch (e) {
+      events.emit("invoke.first_success_mark_failed", { capability_id: capabilityId, error: String(e.message || "").slice(0, 200) });
+    }
   }
 
   // 6. Emit finish event

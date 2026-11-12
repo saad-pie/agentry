@@ -131,6 +131,12 @@ export function loadConfig(overrides = {}) {
           baseUrl: env("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1"),
           apiKey: env("HF_TOKEN", env("HUGGINGFACE_API_KEY", null)),
         },
+        // v0.60.0-phase2.1 — Coarena free tier (18 models, OpenAI-compatible).
+        // Limits: $5/day, 30 rpm, 2 concurrent. Prompts retained forever.
+        coarena: {
+          baseUrl: env("COARENA_BASE_URL", "https://coarena.ai/api/v1"),
+          apiKey: env("COARENA_API_KEY", null),
+        },
         ollama: {
           baseUrl: env("OLLAMA_BASE_URL", "https://ollama.com/v1"),
           apiKey: env("OLLAMA_API_KEY", null),

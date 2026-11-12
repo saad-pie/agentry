@@ -555,6 +555,8 @@ export default async function agentryReasonDeep(input, ctx) {
   if (FALLBACK_MODEL && (FALLBACK_MODEL !== MODEL || FALLBACK_PROVIDER !== PROVIDER)) {
     modelChain.push({ provider: FALLBACK_PROVIDER, model: FALLBACK_MODEL });
   }
+  // v0.60.0-phase2.1 — Coarena last resort (tool loop; would burn rpm).
+  modelChain.push({ provider: "coarena", model: "claude-haiku-5-5" });
 
   outer:
   for (let mi = 0; mi < modelChain.length; mi++) {

@@ -22,12 +22,12 @@ const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR || "/tmp/home/.dsh/agentry-synth
 const INSTALLER_PATH = join(HERE, "..", "runtime", "installer.mjs").replace(/\\/g, "/");
 
 // v0.56.45 — AnyRouter primary
+// v0.60.0-phase2.1 — Coarena primary (Opus). Best at surgical plan edits.
 const MODEL_CHAIN = [
-  { provider: "ollama", model: "beam:cloud" },
+  { provider: "coarena", model: "claude-opus-5-5" },
+  { provider: "groq", model: "openai/gpt-oss-120b" },
   { provider: "orcarouter", model: "tencent/hy4-preview-free" },
   { provider: "orcarouter", model: "z-ai/glm-5.3-flash-free" },
-  { provider: "groq", model: "openai/gpt-oss-120b" },
-  { provider: "groq", model: "qwen/qwen3.8-27b" },
   { provider: "google", model: "gemini-2.5-flash" },
 ];
 
