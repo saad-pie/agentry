@@ -398,6 +398,8 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
     ) + ":" + candidate.id,
     notes: candidate.url || null,
     trial: false,
+    tier: "ephemeral",
+    seed_path: synthesis.seed_path,
     trial_passed_at: Date.now(),
     repaired_at: Date.now(),
     original_handler_file: synthesis.handler_path,
@@ -874,6 +876,8 @@ export default async function agentryAdopt(input, ctx) {
       ) + ":" + candidate.id,
       notes: candidate.url || null,
       trial: false,
+      tier: "ephemeral",
+      seed_path: synthesis.seed_path,
       trial_passed_at: Date.now(),
       adopted_from: {
         proposal_id: proposal.id,

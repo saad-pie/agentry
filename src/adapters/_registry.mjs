@@ -61,12 +61,16 @@ export async function httpText(url, opts = {}) {
 
 const ADAPTERS = new Map();  // name -> { meta, search, file }
 
-let _loaded = false;
+let _loadPromise = null;
 let _loadErrors = [];
 
 export async function loadAdapters() {
-  if (_loaded) return { loaded: [...ADAPTERS.keys()], errors: _loadErrors };
-  _loaded = true;
+  if (_loadPromise) return _loadPromise;
+  _loadPromise = _doLoadAdapters();
+  return _loadPromise;
+}
+
+async function _doLoadAdapters() {
   _loadErrors = [];
 
   let files = [];

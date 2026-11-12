@@ -151,7 +151,7 @@ export function validateSpecConsistency(spec, capability_id) {
   const emitCode = emitStep ? String(emitStep.code || "") : "";
   for (const key of Object.keys(produces)) {
     if (key === "captured_at" || key === "bytes") continue;
-    if (!emitCode.includes(key)) {
+    if (!new RegExp("\\b" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\    if (!emitCode.includes(key)) {") + "\\b").test(emitCode)) {
       return {
         ok: false,
         check: "produces_key_not_emitted",

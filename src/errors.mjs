@@ -8,6 +8,10 @@ export class AgentryError extends Error {
     this.name = "AgentryError";
     this.code = code;
     this.meta = meta;
+    // v0.60.0-phase2 — hoist common fields to top-level.
+    if (meta.retryable !== undefined) this.retryable = meta.retryable;
+    if (meta.retry_after_ms !== undefined) this.retry_after_ms = meta.retry_after_ms;
+    if (meta.status !== undefined) this.status = meta.status;
   }
 
   toJSON() {

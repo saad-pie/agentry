@@ -3,7 +3,7 @@
 // Separate from the graph because events outlive tasks and capabilities.
 // If you delete every other file, events.jsonl is enough to rebuild the rest.
 
-import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync, writeFileSync, readdirSync, unlinkSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { errors } from "./errors.mjs";
 
@@ -79,29 +79,19 @@ export class EventLog {
    */
   recent(n = 500) {
     if (!existsSync(this.file)) return [];
+    // v0.60.0-phase2 — real backwards chunked reader.
     const st = statSync(this.file);
-    const MAX_READ = Math.min(st.size, 2 * 1024 * 1024);
-    const fd = (typeof require === "function" ? require("node:fs") : null);
-    // Use fs primitives imported at top of file
     const CHUNK = 256 * 1024;
-    let offset = st.size;
-    const chunks = [];
-    let bytesRead = 0;
-    const fsPromises = null;
-    const openFn = (() => {
-      try { return (0, eval)("require")("node:fs").openSync; } catch { return null; }
-    })();
-    // Fallback: read whole file if fs primitives unavailable (shouldn't happen in ESM)
-    try {
-      const raw = readFileSync(this.file, "utf8");
-      const lines = raw.split("\n").filter(Boolean);
-      const tail = lines.slice(-n);
-      const out = [];
-      for (const line of tail) { try { out.push(JSON.parse(line)); } catch {} }
-      return out;
-    } catch {
-      return [];
-    }
+    const readSize = Math.min(st.size, CHUNK * 4);
+    const buf = Buffer.alloc(readSize);
+    const fd = openSync(this.file, "r");
+    try { readSync(fd, buf, 0, readSize, Math.max(0, st.size - readSize)); }
+    finally { closeSync(fd); }
+    const lines = buf.toString("utf8").split("\n").filter(Boolean);
+    const tail = lines.slice(-n);
+    const out = [];
+    for (const line of tail) { try { out.push(JSON.parse(line)); } catch {} }
+    return out;
   }
 
   /** Read all events. Cheap at our scale. */

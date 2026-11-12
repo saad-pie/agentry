@@ -1,0 +1,852 @@
+// agentry/src/handlers/agentry.synthesize_via_dsh.mjs
+// v0.52.25 — DSH-driven synthesis.
+//
+// Given a capability_id + intent, calls agentry.agent.dsh with a prompt
+// that returns a JSON spec (package_name + code_body + test fixture),
+// renders the spec into a pipeline-shaped handler file, VERIFIES via
+// real execution against the fixture, writes graph node + runtime seed.
+//
+// Fast path for agentry.ensure BEFORE the polling loop. Success means
+// the capability is invokable in 60-90s instead of waiting ~10min for
+// the mechanical discovery pipeline.
+//
+// Design:
+//   - DSH does the hard part: pick package, install, write working code.
+//   - We render boilerplate: exact pipeline template, node --check,
+//     prepareSession wiring, output shape.
+//   - Verify via real invocation before writing to graph. Fail = retire
+//     trial node, return {verified:false}.
+//   - No registerHandler call needed: in_process_js lazy-loads via
+//     cap.handler_file with a Date.now() cache-buster on first invoke.
+
+import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { extractJson } from "./synthesize/validate/json.mjs";
+import { pickReferenceHandlers, formatReferences } from "./synthesize/references.mjs";
+import { recordOutcome, writeReference } from "./synthesize/outcomes.mjs";
+
+const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR || "/tmp/home/.dsh/agentry-synthesized/handlers";
+const SEEDS_DIR = process.env.AGENTRY_SEEDS_DIR || "/tmp/home/.dsh/agentry-synthesized/seeds";
+const INSTALLER_PATH = "/tmp/home/.dsh/node_modules/agentry/src/runtime/installer.mjs";
+
+function sanitizeId(id) {
+  let s = String(id || "").toLowerCase();
+  s = s.replace(/^gap:/i, "");
+  s = s.replace(/^[a-z]+:/i, "");
+  s = s.replace(/[^a-z0-9_.-]+/g, "_");
+  return s.slice(0, 80);
+}
+
+function buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, references }) {
+  const accepts = accepts_hint || { input_path: "string", output_path: "string" };
+  const produces = produces_hint || { output_path: "string", bytes: "number" };
+  const env_map = Object.keys(accepts).map(k => k.toUpperCase()).join(", ");
+  const L = [];
+  L.push("GAP: capability `" + capability_id + "` is needed.");
+  L.push("Intent: " + (intent || capability_id));
+  if (wanted_kind) L.push("Wanted kind: " + wanted_kind);
+  if (wanted_description) L.push("Wanted description: " + wanted_description);
+  L.push("");
+  if (references && references.length) {
+    L.push(references);
+    L.push("CRITICAL: study the reference above. Your test_script and code_body MUST use the same patterns: await import() for modules (NEVER require), process.env.UPPER_CASE for inputs, console.log(JSON.stringify({...})) as the last line. Copy the STRUCTURE, adapt the package.");
+    L.push("");
+  }
+  L.push("TASK: Return a JSON SPEC describing a working Node.js implementation.");
+  L.push("DO NOT write the full handler file — our code renders the pipeline template around your spec.");
+  L.push("");
+  L.push("CRITICAL BUDGET CONSTRAINT: your reasoning must be brief. Do NOT write essays, do NOT plan aloud, do NOT narrate. Do your work, return the JSON. If you exhaust your token budget thinking, you cannot finish the task. Aim for 200 tokens of reasoning max, then act.");
+  L.push("");
+  L.push("STEPS:");
+  L.push("1. Pick the correct npm package. Must install cleanly in Node, no browser, no external CLI binary, no remote API key. NEVER pick puppeteer, playwright, or node-html-to-image - they download ~200MB Chromium and time out. For HTML to PNG/PDF, prefer takumi-js (pure Rust, no browser).");
+  L.push("2. `cd /tmp && npm install <pkg>` to verify it installs. Then `node -e \"import('<pkg>').then(m=>console.log('ok'))\"` to verify it loads.");
+  L.push("3. Write a small test script that: creates a real fixture, runs the operation, verifies output byte length or magic bytes.");
+  L.push("3.5. ESM ENFORCEMENT — READ THIS BEFORE WRITING ANY CODE:");
+  L.push("     You are writing ES MODULES (.mjs). `require()` is a SyntaxError here.");
+  L.push("     BAD:  const fs = require('fs');              ← SyntaxError: require is not defined");
+  L.push("     BAD:  const markdownpdf = require('markdown-pdf');  ← SyntaxError");
+  L.push("     GOOD: const fs = await import('node:fs');");
+  L.push("     GOOD: const { parse } = await import('@iarna/toml');");
+  L.push("     GOOD: const markdownpdf = (await import('markdown-pdf')).default;");
+  L.push("     CJS modules: use .default after await import. ESM modules: destructure from await import.");
+  L.push("     If you write require() anywhere in test_script or code_body, the spec will be rewritten automatically and may be broken. Write await import() yourself.");
+  L.push("4. Return the JSON below. NO prose. NO markdown fences. Just the JSON.");
+  L.push("   CRITICAL: your FINAL message must be ONE raw JSON object starting with { and ending with }.");
+  L.push("   If you write anything like \"The JSON spec has been returned\" or \"Here is the spec\" or a summary of what you did — you have FAILED.");
+  L.push("   Do not narrate. Do not summarize. Do not explain. Emit the JSON object as your literal final message text.");
+  L.push("");
+  L.push("RETURN THIS JSON SHAPE:");
+  L.push("{");
+  L.push('  "package_name": "<npm package name>",');
+  L.push('  "test_script": "<JS code that imports the package and runs the ACTUAL operation on test_input_path, writing to test_output_path. This is what we run FIRST to verify the package works in this environment. If this does not create test_output_path with >0 bytes, your approach is wrong.>",');
+  L.push('  "code_body": "<JS code that runs in an async kernel function. Read inputs from process.env.UPPERCASE_KEY. Write output file. Last line must be console.log(JSON.stringify({...})).>",');
+  L.push('  "accepts": ' + JSON.stringify(accepts) + ",");
+  L.push('  "produces": ' + JSON.stringify(produces) + ",");
+  L.push('  "test_fixture": "<bash command creating a real fixture file at test_input_path>",');
+  L.push('  "test_input_path": "/tmp/dsh_test_input.<ext>",');
+  L.push('  "test_output_path": "/tmp/dsh_test_output.<ext>",');
+  L.push('  "notes": "<free-form: anything a future AI should know about this capability. Gotchas, edge cases, packages tried and discarded, API quirks. No schema — write whatever helps.>"');
+  L.push("}");
+  L.push("");
+  L.push("COMPOSITION (PREFERRED when applicable):");
+  L.push("- If a WORKING REFERENCE capability already does most of the work, COMPOSE it instead of adding another package.");
+  L.push("- In your spec: requires.capability: [\"<ref-cap-id>\"] and glue.pre_invoke: { \"<ENV_VAR>\": { capability: \"<ref-cap-id>\", input_map: { \"<inner>\": \"<outer>\" }, extract: \"<dot.path>\" } }.");
+  L.push("- The composed capability runs FIRST. Its extracted output lands in env var. Your code_body reads process.env.<ENV_VAR>.");
+  L.push("- Example: HTML to WebP with reference html_to_png - pre_invoke html_to_png to get a PNG path, then use sharp to convert PNG to WebP. Cleaner than installing a new HTML renderer.");
+  L.push("");
+  L.push("RULES:");
+  L.push("- CRITICAL: many packages change APIs between major versions. Do NOT assume pipe patterns work. Check the ACTUAL version's README/API. If the current README shows `await pkg(...)` (promise), await it. If it shows `.pipe()` (stream), use pipe. If unsure, wrap in try/catch and log the error so we can see it.");
+  L.push("- test_script MUST be a complete working script that takes test_input_path and produces test_output_path. Run the ACTUAL operation. If test_script doesn't create the output file, your code_body won't either. Fix the approach BEFORE returning the spec.");
+  L.push("- code_body runs INSIDE an async function body. Use `const fs = await import('node:fs')` for imports. NO top-level imports.");
+  L.push("- Inputs come from process.env." + env_map + ". NOT function parameters.");
+  L.push("- Emit final output with `console.log(JSON.stringify({...}))` as the LAST line.");
+  L.push("- test_fixture MUST create the file at test_input_path. For binary use base64: `node -e \"require('fs').writeFileSync('/tmp/x.png', Buffer.from('<b64>', 'base64'))\"`.");
+  L.push("- Your budget is precious. Do NOT spend it on research, essays, or narration. Pick a package, verify it installs, write the test_script, run it, FIX any errors, THEN return the spec. If you cannot make it work after 2 attempts, return `{\"error\": \"<reason>\"}` instead of a spec.");
+  return L.join("\n");
+}
+
+function renderHandler(spec, capability_id) {
+  const id = capability_id;
+  const safeId = sanitizeId(capability_id);
+  const accepts = spec.accepts || {};
+  const produces = spec.produces || {};
+  const _composedCaps = Array.isArray(spec.requires && spec.requires.capability) ? spec.requires.capability : [];
+  const requires = { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: _composedCaps };
+  const _preInvoke = (spec.glue && spec.glue.pre_invoke) || {};
+  const env_map = {};
+  for (const k of Object.keys(accepts)) env_map[k.toUpperCase()] = k;
+  const code = String(spec.code_body || "");
+  const out = [];
+  out.push("// agentry — DSH-synthesized handler for " + id);
+  out.push("// v0.52.25 — Generated by agentry.synthesize_via_dsh. Regenerate, do not hand-edit.");
+  out.push("");
+  out.push("const CAP_ID = " + JSON.stringify(id) + ";");
+  out.push("const CAP_KIND = " + JSON.stringify(spec.kind || "tool") + ";");
+  out.push("const ACCEPTS = " + JSON.stringify(accepts, null, 2) + ";");
+  out.push("const PRODUCES = " + JSON.stringify(produces, null, 2) + ";");
+  out.push("const REQUIRES = " + JSON.stringify(requires, null, 2) + ";");
+  out.push("const ENV_MAP = " + JSON.stringify(env_map, null, 2) + ";");
+  out.push("const PRE_INVOKE = " + JSON.stringify(_preInvoke, null, 2) + ";");
+  out.push("const KERNEL_SCRIPT = " + JSON.stringify(code) + ";");
+  out.push("const DEFAULT_TIMEOUT_MS = 90000;");
+  out.push("");
+  out.push("export const capability = {");
+  out.push("  id: CAP_ID,");
+  out.push("  kind: CAP_KIND,");
+  out.push("  invoked_via: \"invoker.in_process_js\",");
+  out.push("  accepts: ACCEPTS,");
+  out.push("  produces: PRODUCES,");
+  out.push("  requires: REQUIRES,");
+  out.push("};");
+  out.push("");
+  out.push("async function _prepare(ctx, session) {");
+  out.push("  const { prepareSession } = await import(" + JSON.stringify(INSTALLER_PATH) + ");");
+  out.push("  await prepareSession(ctx, { capId: CAP_ID, session, requires_override: REQUIRES });");
+  out.push("}");
+  out.push("");
+  out.push("async function run(input, ctx, opts = {}) {");
+  out.push("  const session = opts.session || input.session || (CAP_ID + \"-default\");");
+  out.push("  if (typeof ctx.invoke !== \"function\") throw new Error(CAP_ID + \" requires ctx.invoke\");");
+  out.push("  await _prepare(ctx, session);");
+  out.push("  await ctx.invoke(\"agentry.os\", { action: \"session.create\", id: session });");
+  out.push("  const pre = {};");
+  out.push("  for (const [preKey, preSpec] of Object.entries(PRE_INVOKE)) {");
+  out.push("    const innerInput = {};");
+  out.push("    for (const [ik, ok] of Object.entries(preSpec.input_map || {})) innerInput[ik] = input[ok];");
+  out.push("    const innerRes = await ctx.invoke(preSpec.capability, innerInput);");
+  out.push("    if (!innerRes.ok) throw new Error(CAP_ID + \": pre_invoke \" + preSpec.capability + \" failed: \" + (innerRes.error && innerRes.error.message));");
+  out.push("    let preVal = innerRes.output;");
+  out.push("    for (const p of String(preSpec.extract || \"\").split(\".\")) preVal = preVal && preVal[p];");
+  out.push("    pre[preKey] = preVal == null ? \"\" : String(preVal);");
+  out.push("  }");
+  out.push("  const env = {};");
+  out.push("  for (const [envKey, inputKey] of Object.entries(ENV_MAP)) {");
+  out.push("    const v = input[inputKey];");
+  out.push("    env[envKey] = v === undefined || v === null ? \"\" : String(v);");
+  out.push("  }");
+  out.push("  for (const [k, v] of Object.entries(pre)) env[k] = v;");
+  out.push("  const timeout_ms = input.timeout_ms || DEFAULT_TIMEOUT_MS;");
+  out.push("  const res = await ctx.invoke(\"agentry.os\", {");
+  out.push("    action: \"node.run\", session, code: KERNEL_SCRIPT, env, timeout_ms,");
+  out.push("  }, { tenant: \"local\", by: CAP_ID });");
+  out.push("  if (!res.ok) throw new Error(CAP_ID + \": kernel call failed — \" + (res.error?.message || \"unknown\"));");
+  out.push("  const r = res.output.result || {};");
+  out.push("  const exitCode = r.exit_code ?? r.exitCode ?? 0;");
+  out.push("  if (exitCode !== 0) throw new Error(CAP_ID + \": exit \" + exitCode + \" — \" + String(r.stderr || \"\").slice(0, 300));");
+  out.push("  const stdout = String(r.stdout || \"\").trim();");
+  out.push("  if (!stdout) throw new Error(CAP_ID + \": no stdout\");");
+  out.push("  let parsed;");
+  out.push("  try { parsed = JSON.parse(stdout); }");
+  out.push("  catch (e) { throw new Error(CAP_ID + \": stdout not JSON — \" + e.message); }");
+  out.push("  return { output: parsed };");
+  out.push("}");
+  out.push("");
+  out.push("export async function accept(deps, opts = {}) {");
+  out.push("  // Verification happened during DSH synthesis; this is a no-op pass.");
+  out.push("  return { ok: true };");
+  out.push("}");
+  out.push("");
+  out.push("export default run;");
+  out.push("");
+  return out.join("\n");
+}
+
+export function rewriteCjsToEsm(code) {
+  // v0.56.29 — deterministic ESM enforcement. If DSH writes require() in
+  // test_script or code_body despite the prompt, rewrite before pretest.
+  // Covers the two patterns that account for ~all DSH output:
+  //   const X = require('y')        → const X = (await import('y')).default
+  //   const { a, b } = require('y') → const { a, b } = await import('y')
+  if (typeof code !== "string" || !code) return code;
+  let out = code;
+  // Destructure first (more specific pattern)
+  out = out.replace(
+    /(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    "const {$1} = await import('$2')"
+  );
+  // Simple assignment
+  out = out.replace(
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    "const $1 = (await import('$2')).default"
+  );
+  // Bare require('y') statement — replace with await import noop
+  out = out.replace(
+    /(^|[^\w.])require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    "$1(await import('$2'))"
+  );
+  return out;
+}
+
+function parseDshSpec(text) {
+  if (!text) return null;
+  let s = String(text).trim();
+  // v0.52.30 — prior version used `/```(?:json)?\s*([\s\S]*?)```/` (lazy).
+  // If DSH's JSON contains ``` inside a code-fence *inside a string value*
+  // (e.g. test_script with ```javascript), the lazy match grabbed the
+  // INNER backticks and truncated the JSON to garbage. That's why v0.52.29
+  // returned no_spec with a valid 1708-char JSON that we mangled.
+  // Fix: only strip fence if it wraps the ENTIRE string. Use anchored
+  // greedy match. If content starts with `{`, treat as raw JSON — never
+  // fence-strip.
+  if (!s.startsWith("{")) {
+    const wholeFence = s.match(/^```(?:json)?\s*\n?([\s\S]*)\n?```\s*$/);
+    if (wholeFence) s = wholeFence[1].trim();
+  }
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first === -1 || last <= first) return null;
+  s = s.slice(first, last + 1);
+  try { return JSON.parse(s); } catch (e) {
+    // Log detailed parse failure for future debugging
+    if (typeof globalThis !== "undefined") globalThis.__LAST_DSH_PARSE_ERR = {
+      error: e.message,
+      len: s.length,
+      head: s.slice(0, 200),
+      tail: s.slice(-200),
+    };
+    return null;
+  }
+}
+
+function verifyArtifactMagic(buf, expectedExt) {
+  // Minimal magic-byte check. Returns { ok, magic, expected_magic }.
+  if (!buf || buf.length < 8) return { ok: false, magic: null, expected_magic: null, reason: "too_small" };
+  const hex = Buffer.from(buf.slice(0, 16)).toString("hex");
+  const MAGIC = {
+    pdf: "25504446",
+    png: "89504e470d0a1a0a",
+    jpg: "ffd8ff",
+    jpeg: "ffd8ff",
+    gif: "474946",
+    webp: null, // special: RIFF....WEBP, check positions
+    avif: null, // special: ftypavif
+    bmp: "424d",
+    zip: "504b",
+    mp4: null,
+    txt: null,
+    json: null,
+    csv: null,
+    yaml: null,
+    yml: null,
+    toml: null,
+    md: null,
+  };
+  const ext = String(expectedExt || "").toLowerCase().replace(/^\./, "");
+  if (ext === "webp") {
+    const ok = hex.startsWith("52494646") && hex.slice(16, 24) === "57454250";
+    return { ok, magic: hex.slice(0, 16), expected_magic: "52494646...57454250" };
+  }
+  if (ext === "avif") {
+    const ok = hex.slice(8, 20).indexOf("66747970") >= 0 && /61766966|61766973/.test(hex);
+    return { ok, magic: hex.slice(0, 20), expected_magic: "ftypavif" };
+  }
+  const expected = MAGIC[ext];
+  if (expected === null) {
+    // text formats — accept any non-empty content
+    return { ok: true, magic: hex.slice(0, 16), expected_magic: "(text)" };
+  }
+  if (!expected) {
+    return { ok: true, magic: hex.slice(0, 16), expected_magic: "(unknown ext, accepting)" };
+  }
+  return {
+    ok: hex.startsWith(expected),
+    magic: hex.slice(0, 16),
+    expected_magic: expected,
+  };
+}
+
+function formatTraceEmail(t) {
+  const L = [];
+  L.push("**Trace: " + t.capability_id + "**");
+  // v0.56.34 — enriched. Prep timeline + handler preview before building body.
+  if (t.event_timeline && t.event_timeline.length > 0) {
+    const _t0 = t.event_timeline[0].at || 0;
+    const _lines = [];
+    for (const _e of t.event_timeline) {
+      const _rel = _e.at ? (_e.at - _t0) : 0;
+      // v0.56.35 — show the most specific id available (capability_id > capId > session)
+      const _idLabel = _e.capability_id || _e.capId || _e.session || "";
+      _lines.push("+" + _rel + "ms  " + (_e.kind || "?") + (_idLabel ? "  " + _idLabel : ""));
+    }
+    t._event_lines = _lines;
+  }
+  if (t.handler_source_preview) {
+    t._handler_preview = String(t.handler_source_preview).slice(0, 2500);
+  }
+  L.push("");
+  L.push("- intent: " + (t.intent || "?"));
+  L.push("- kind: " + (t.wanted_kind || "tool"));
+  L.push("- trace_id: " + t.trace_id);
+  L.push("- total_ms: " + t.total_ms);
+  L.push("- outcome: " + (t.outcome && t.outcome.verified ? "verified" : "failed"));
+  L.push("");
+  L.push("**References shown:** " + (t.references_shown && t.references_shown.length ? t.references_shown.join(", ") : "(none)"));
+  L.push("");
+  L.push("**Spec summary:**");
+  L.push("- package_name: " + (t.spec_summary.package_name || "?"));
+  L.push("- packages: " + ((t.spec_summary.packages || []).join(", ") || "?"));
+  L.push("- accepts: " + ((t.spec_summary.accepts_keys || []).join(", ") || "?"));
+  L.push("- produces: " + ((t.spec_summary.produces_keys || []).join(", ") || "?"));
+  L.push("- test_script_len: " + t.spec_summary.test_script_len);
+  L.push("- code_body_len: " + t.spec_summary.code_body_len);
+  L.push("");
+  L.push("**DSH internals:**");
+  L.push("- prompt_len: " + t.dsh_internals.prompt_len);
+  L.push("- tool_calls: " + ((t.dsh_internals.tool_calls || []).length));
+  for (const tc of (t.dsh_internals.tool_calls || []).slice(0, 10)) {
+    L.push("  - " + (tc.tool || "?") + " (" + (tc.status || "?") + "): " + String(tc.input_preview || "").slice(0, 100));
+  }
+  L.push("- thinking_blocks: " + ((t.dsh_internals.thinking || []).length));
+  for (const th of (t.dsh_internals.thinking || []).slice(0, 3)) {
+    L.push("  - " + String(th).slice(0, 300));
+  }
+  L.push("");
+  L.push("**Final output (DSH):**");
+  L.push("```");
+  L.push(String(t.dsh_internals.final_preview || "").slice(0, 800));
+  L.push("```");
+  L.push("");
+  if (t._handler_preview) {
+    L.push("**Handler source (first 2500 chars):**");
+    L.push("```js");
+    L.push(t._handler_preview);
+    L.push("```");
+    L.push("");
+  }
+  if (t._event_lines && t._event_lines.length > 0) {
+    L.push("**Full event timeline (" + t._event_lines.length + " events):**");
+    L.push("```");
+    for (const _ln of t._event_lines) L.push(_ln);
+    L.push("```");
+    L.push("");
+  }
+  L.push("_Full JSON trace in events.jsonl under kind=dsh_synth.trace, trace_id=" + t.trace_id + "_");
+  return L.join("\n");
+}
+
+export default async function agentrySynthesizeViaDsh(input, ctx) {
+  const { capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, timeout_ms } = input || {};
+  if (!capability_id) throw new Error("agentry.synthesize_via_dsh requires capability_id");
+  if (typeof ctx.invoke !== "function") throw new Error("agentry.synthesize_via_dsh requires ctx.invoke");
+
+  const started = Date.now();
+  const events = ctx.events;
+  const graph = ctx.graph;
+  const timeoutMs = Math.max(30000, Math.min(300000, Number(timeout_ms) || 180000));
+  const safeId = sanitizeId(capability_id);
+
+  events.emit("dsh_synth.started", { capability_id, intent, wanted_kind, timeout_ms: timeoutMs });
+
+  // ── 1. Ask DSH for a spec ──
+  const _refs = pickReferenceHandlers(String(intent || capability_id), wanted_kind || "tool", 2);
+  events.emit("dsh_synth.references_picked", { capability_id, count: _refs.length, ids: _refs.map(r => r.id) });
+  const _recordFailure = (stage, specMaybe) => {
+    try {
+      recordOutcome({
+        capability_id, intent, kind: wanted_kind || "tool",
+        refs_shown: _refs.map(r => r.id),
+        packages: (specMaybe && specMaybe.packages) || [],
+        trial_ok: false, elapsed_ms: Date.now() - started,
+        error_class: stage, used_composition: false,
+      });
+    } catch {}
+  };
+
+  const prompt = buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, references: formatReferences(_refs) });
+  let dshRes;
+  try {
+    dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: timeoutMs },
+      { tenant: "local", by: "agentry.synthesize_via_dsh" });
+  } catch (e) {
+    _recordFailure("dsh_threw", null);
+    events.emit("dsh_synth.dsh_threw", { capability_id, error: e.message });
+    return { output: { verified: false, capability_id, reason: "dsh_threw: " + e.message }, cost: { time_ms: Date.now() - started } };
+  }
+  if (!dshRes.ok) {
+    _recordFailure("dsh_failed", null);
+    events.emit("dsh_synth.dsh_failed", { capability_id, error: dshRes.error?.message });
+    return { output: { verified: false, capability_id, reason: "dsh_failed: " + (dshRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
+  }
+  const finalText = String(dshRes.output?.final || "");
+  const spec = extractJson(finalText);
+  if (!spec) {
+    // v0.52.27 — log the full DSH result shape so next debug doesn't need
+    // a separate probe. Prior version only logged final_preview which was
+    // empty when DSH timed out with no final event.
+    const _tc = dshRes.output?.tool_calls || [];
+    events.emit("dsh_synth.no_spec", {
+      capability_id,
+      final_preview: finalText.slice(0, 300),
+      final_len: finalText.length,
+      exit_code: dshRes.output?.exit_code ?? null,
+      timed_out: dshRes.output?.timed_out === true,
+      duration_ms: dshRes.output?.duration_ms ?? null,
+      tool_calls_count: _tc.length,
+      tool_calls: _tc.map(t => t.tool).slice(0, 20),
+      messages_count: (dshRes.output?.messages || []).length,
+      stderr_preview: String(dshRes.output?.stderr || "").slice(0, 300),
+      parse_error: (typeof globalThis !== "undefined" && globalThis.__LAST_DSH_PARSE_ERR) || null,
+    });
+    if (typeof globalThis !== "undefined") delete globalThis.__LAST_DSH_PARSE_ERR;
+    _recordFailure("no_spec_in_dsh_output", spec);
+    return { output: { verified: false, capability_id, reason: "no_spec_in_dsh_output" }, cost: { time_ms: Date.now() - started } };
+  }
+  if (spec.error) {
+    events.emit("dsh_synth.spec_error", { capability_id, error: String(spec.error).slice(0, 200) });
+    _recordFailure("dsh_reported_error", spec);
+    return { output: { verified: false, capability_id, reason: "dsh_reported_error: " + String(spec.error).slice(0, 200) }, cost: { time_ms: Date.now() - started } };
+  }
+  if (!spec.package_name || !spec.code_body) {
+    events.emit("dsh_synth.incomplete_spec", { capability_id, has_pkg: !!spec.package_name, has_code: !!spec.code_body });
+    _recordFailure("incomplete_spec", spec);
+    return { output: { verified: false, capability_id, reason: "incomplete_spec" }, cost: { time_ms: Date.now() - started } };
+  }
+
+  // v0.54.2 — DSH returns "takumi-js sharp" as a single string when a task
+  // needs 2 packages. Spec schema says package_name is singular; DSH improvised.
+  const _pkgs = String(spec.package_name || "").split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  spec.packages = _pkgs.length > 0 ? _pkgs : [spec.package_name];
+  if (spec.packages.length > 1) {
+    events.emit("dsh_synth.multi_package_spec", { capability_id, packages: spec.packages });
+  }
+  // v0.52.28 — require test_script. This is what we run BEFORE rendering the
+  // handler. If the package's API doesn't work in this environment, test_script
+  // fails and we abort early instead of producing a broken handler.
+  if (!spec.test_script) {
+    events.emit("dsh_synth.missing_test_script", { capability_id, package_name: spec.package_name });
+    _recordFailure("missing_test_script", spec);
+    return { output: { verified: false, capability_id, reason: "missing_test_script" }, cost: { time_ms: Date.now() - started } };
+  }
+  // v0.56.29 — deterministic ESM enforcement. Rewrite require() in spec
+  // before pretest, whether or not the prompt was respected.
+  {
+    const _tsBefore = String(spec.test_script || "");
+    const _cbBefore = String(spec.code_body || "");
+    spec.test_script = rewriteCjsToEsm(_tsBefore);
+    spec.code_body = rewriteCjsToEsm(_cbBefore);
+    const _tsChanged = _tsBefore !== spec.test_script;
+    const _cbChanged = _cbBefore !== spec.code_body;
+    if (_tsChanged || _cbChanged) {
+      events.emit("dsh_synth.esm_rewritten", {
+        capability_id,
+        test_script_rewritten: _tsChanged,
+        code_body_rewritten: _cbChanged,
+        require_count_before: (_tsBefore.match(/require\s*\(/g) || []).length + (_cbBefore.match(/require\s*\(/g) || []).length,
+      });
+    }
+  }
+  const _composed = Array.isArray(spec.requires && spec.requires.capability) ? spec.requires.capability : [];
+  for (const _cap of _composed) {
+    if (!graph.getCapability(_cap)) {
+      events.emit("dsh_synth.composed_cap_missing", { capability_id, missing: _cap });
+      _recordFailure("composed_cap_missing", spec);
+      return { output: { verified: false, capability_id, reason: "composed_cap_missing: " + _cap }, cost: { time_ms: Date.now() - started } };
+    }
+  }
+
+  // v0.54.5 — derive requires.npm from what the code actually imports.
+  // DSH's spec.package_name is unreliable in BOTH directions: it claims packages
+  // the code never imports (prune handles that) AND it omits packages the code
+  // does import (this fix handles that). The code is the only source of truth.
+  {
+    const _importRe = /(?:from\s+['"]|import\s*\(\s*['"]|require\s*\(\s*['"])([^'")\s]+)/g;
+    const _extracted = new Set();
+    for (const _src of [String(spec.test_script || ""), String(spec.code_body || "")]) {
+      for (const _m of _src.matchAll(_importRe)) {
+        const _p = _m[1];
+        if (!_p || _p.startsWith(".") || _p.startsWith("/") || _p.startsWith("node:")) continue;
+        const _top = _p.startsWith("@") ? _p.split("/").slice(0, 2).join("/") : _p.split("/")[0];
+        _extracted.add(_top);
+      }
+    }
+    const _truth = [..._extracted];
+    if (_truth.length > 0) {
+      const _claimed = spec.packages || [spec.package_name];
+      const _missing = _truth.filter(p => !_claimed.includes(p));
+      const _extra = _claimed.filter(p => !_truth.includes(p));
+      if (_missing.length > 0 || _extra.length > 0) {
+        events.emit("dsh_synth.packages_reconciled", {
+          capability_id,
+          claimed: _claimed,
+          imported: _truth,
+          missing: _missing,
+          extra: _extra,
+        });
+      }
+      spec.packages = _truth;
+    }
+  }
+
+  // ── 1.5 v0.52.29 — run test_script FIRST ──
+  // v0.52.28 asked DSH to provide a test_script field but never ran it.
+  // That made the field a suggestion, not a constraint. This block actually
+  // executes test_script against the real package (installed fresh), verifies
+  // the output file appears with >0 bytes, and only THEN proceeds to render
+  // the handler. If test_script fails, we return early with a specific reason
+  // so the caller knows it's a package/API issue (e.g. markdown-pdf@11 uses
+  // Promise not stream) — not a handler-render issue.
+  const preTestSession = "dsh_synth_preverify_" + safeId + "_" + Date.now().toString(36);
+  try {
+    await ctx.invoke("agentry.os", { action: "session.create", id: preTestSession });
+
+    const installRes = await ctx.invoke("agentry.os", {
+      action: "node.install", session: preTestSession, packages: spec.packages,
+    }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+    if (!installRes.ok) {
+      events.emit("dsh_synth.pretest_install_failed", { capability_id, package_name: spec.package_name, error: installRes.error?.message });
+      _recordFailure("pretest_install_failed", spec);
+      return { output: { verified: false, capability_id, reason: "pretest_install_failed: " + (installRes.error?.message || "unknown") }, cost: { time_ms: Date.now() - started } };
+    }
+
+    const fixtureCmd = String(spec.test_fixture || "");
+    if (fixtureCmd) {
+      const fixRes = await ctx.invoke("agentry.os", { action: "shell.spawn", session: preTestSession, cmd: "sh", args: ["-c", fixtureCmd], timeout_ms: 30000 });
+      const fixPid = fixRes.output?.result?.pid;
+      if (fixPid) {
+        await ctx.invoke("agentry.os", { action: "shell.read", session: preTestSession, pid: fixPid, wait_ms: 30000 });
+      }
+    }
+
+    const testEnv = {
+      INPUT_PATH: spec.test_input_path || "/tmp/dsh_test_input",
+      OUTPUT_PATH: spec.test_output_path || "/tmp/dsh_test_output",
+    };
+    const testRes = await ctx.invoke("agentry.os", {
+      action: "node.run", session: preTestSession, code: String(spec.test_script),
+      env: testEnv, timeout_ms: 45000,
+    }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+    const testStderr = String(testRes.output?.result?.stderr || "");
+    const testExitCode = testRes.output?.result?.exit_code;
+    if (!testRes.ok || (testExitCode !== 0 && testExitCode !== null && testExitCode !== undefined)) {
+      events.emit("dsh_synth.pretest_failed", {
+        capability_id, package_name: spec.package_name,
+        exit_code: testExitCode,
+        stderr: testStderr.slice(0, 500),
+      });
+      _recordFailure("pretest_failed", spec);
+      return { output: { verified: false, capability_id, reason: "pretest_failed: exit " + testExitCode + " — " + testStderr.slice(0, 200) }, cost: { time_ms: Date.now() - started } };
+    }
+
+    const outCheck = await ctx.invoke("agentry.os", {
+      action: "shell.spawn", session: preTestSession, cmd: "sh",
+      args: ["-c", "test -s '" + testEnv.OUTPUT_PATH + "' && stat -c %s '" + testEnv.OUTPUT_PATH + "'"],
+      timeout_ms: 5000,
+    });
+    const outPid = outCheck.output?.result?.pid;
+    let outBytes = 0;
+    if (outPid) {
+      const outRead = await ctx.invoke("agentry.os", { action: "shell.read", session: preTestSession, pid: outPid, wait_ms: 5000 });
+      outBytes = parseInt(String(outRead.output?.result?.stdout || "0").trim(), 10);
+    }
+    if (!outBytes || outBytes <= 0) {
+      events.emit("dsh_synth.pretest_no_output", { capability_id, package_name: spec.package_name, output_path: testEnv.OUTPUT_PATH });
+      _recordFailure("pretest_no_output", spec);
+      return { output: { verified: false, capability_id, reason: "pretest_no_output: " + testEnv.OUTPUT_PATH }, cost: { time_ms: Date.now() - started } };
+    }
+
+    events.emit("dsh_synth.pretest_passed", { capability_id, package_name: spec.package_name, output_bytes: outBytes });
+  } catch (e) {
+    events.emit("dsh_synth.pretest_threw", { capability_id, error: e.message });
+    _recordFailure("pretest_threw", spec);
+    return { output: { verified: false, capability_id, reason: "pretest_threw: " + e.message }, cost: { time_ms: Date.now() - started } };
+  }
+
+  // ── 2. Render handler ──
+  mkdirSync(HANDLERS_DIR, { recursive: true });
+  mkdirSync(SEEDS_DIR, { recursive: true });
+  const handlerPath = join(HANDLERS_DIR, safeId + ".mjs");
+  const seedPath = join(SEEDS_DIR, safeId + ".json");
+
+  try {
+    writeFileSync(handlerPath, renderHandler(spec, capability_id));
+  } catch (e) {
+    events.emit("dsh_synth.render_failed", { capability_id, error: e.message });
+    _recordFailure("render_failed", spec);
+    return { output: { verified: false, capability_id, reason: "render_failed: " + e.message }, cost: { time_ms: Date.now() - started } };
+  }
+
+  // ── 3. Syntax check ──
+  const check = spawnSync("node", ["--check", handlerPath], { encoding: "utf8", timeout: 15000 });
+  if (check.status !== 0) {
+    events.emit("dsh_synth.syntax_error", { capability_id, stderr: String(check.stderr || "").slice(0, 400) });
+    try { unlinkSync(handlerPath); } catch {}
+    _recordFailure("syntax_error", spec);
+    return { output: { verified: false, capability_id, reason: "syntax_error: " + String(check.stderr || "").slice(0, 200) }, cost: { time_ms: Date.now() - started } };
+  }
+
+  // ── 4. Write trial graph node (verification target) ──
+  const trialCapId = "_trial_" + safeId + "_" + Date.now().toString(36);
+  graph.putCapability({
+    id: trialCapId, kind: "tool",
+    invoked_via: "invoker.in_process_js",
+    handler: safeId,
+    handler_file: handlerPath,
+    accepts: spec.accepts || {},
+    produces: spec.produces || {},
+    requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
+    source: "dsh_synth:trial",
+    trial: true,
+  });
+
+  // ── 5. Verify via real execution ──
+  // v0.56.22 — reuse pretest session for verify. Same session, packages
+  // already installed there. Saves 5-10s per synthesis on install-heavy
+  // packages and halves session churn (was 2 sessions per synthesis).
+  const testSession = preTestSession;
+  let verified = false;
+  let reason = "unknown";
+  try {
+    await ctx.invoke("agentry.os", { action: "session.create", id: testSession });
+
+    const fixtureCmd = String(spec.test_fixture || "");
+    if (fixtureCmd) {
+      const fixtureRes = await ctx.invoke("agentry.os", { action: "shell.spawn", session: testSession, cmd: "sh", args: ["-c", fixtureCmd], timeout_ms: 30000 });
+      const fixturePid = fixtureRes.output?.result?.pid;
+      if (fixturePid) {
+        const read = await ctx.invoke("agentry.os", { action: "shell.read", session: testSession, pid: fixturePid, wait_ms: 30000 });
+        const ec = read.output?.result?.exit_code;
+        if (ec !== 0 && ec !== null && ec !== undefined) {
+          throw new Error("fixture_cmd_failed: exit " + ec + " — " + String(read.output?.result?.stderr || "").slice(0, 200));
+        }
+      }
+    }
+
+    const testInput = {};
+    for (const k of Object.keys(spec.accepts || {})) {
+      if (k === "input_path" || k.endsWith("_path") || k.endsWith("_file")) {
+        testInput[k] = spec.test_input_path || "/tmp/dsh_test_input";
+      } else if (k === "output_path") {
+        testInput[k] = spec.test_output_path || "/tmp/dsh_test_output";
+      } else {
+        testInput[k] = "test";
+      }
+    }
+    testInput.session = testSession;
+
+    const invRes = await ctx.invoke(trialCapId, testInput, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+    if (!invRes.ok) throw new Error("invoke_failed: " + (invRes.error?.message || "unknown"));
+
+    const outPath = spec.test_output_path;
+    if (outPath) {
+      const statRes = await ctx.invoke("agentry.os", { action: "shell.spawn", session: testSession, cmd: "sh", args: ["-c", "test -s '" + outPath + "' && stat -c %s '" + outPath + "'"], timeout_ms: 5000 });
+      const statPid = statRes.output?.result?.pid;
+      if (statPid) {
+        const read = await ctx.invoke("agentry.os", { action: "shell.read", session: testSession, pid: statPid, wait_ms: 5000 });
+        const bytes = parseInt(String(read.output?.result?.stdout || "0").trim(), 10);
+        if (!bytes || bytes <= 0) throw new Error("output_file_empty_or_missing: " + outPath);
+      }
+    }
+    verified = true;
+  } catch (e) {
+    reason = e.message;
+    events.emit("dsh_synth.verify_failed", { capability_id, reason });
+  }
+
+  try {
+    const _tg = graph.getCapability("gap:" + trialCapId);
+    if (_tg && !_tg.retired_at) graph.retireCapability(_tg.id, "trial_ephemeral_failed");
+  } catch {}
+
+  try { graph.retireCapability(trialCapId, "trial verification complete"); } catch {}
+
+  if (!verified) {
+    try { unlinkSync(handlerPath); } catch {}
+    events.emit("dsh_synth.failed", { capability_id, reason, ms: Date.now() - started });
+    _recordFailure("verify_failed", spec);
+    return { output: { verified: false, capability_id, reason }, cost: { time_ms: Date.now() - started } };
+  }
+
+  // ── 6. Write real graph node + seed ──
+  // v0.56.24 — set trial_passed_at + adopted_from so DSH caps are visible
+  // to chat fast path tie-break. Prior version left these null, so when
+  // multiple caps matched the same intent, DSH-verified ones (the working
+  // ones) lost tie-breaks to mechanical caps with real timestamps.
+  const seedContent = {
+    id: capability_id, kind: "tool", invoked_via: "invoker.in_process_js",
+    handler: safeId, handler_file: handlerPath,
+    accepts: spec.accepts, produces: spec.produces,
+    requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
+    source: "dsh_synth:verified",
+    trial: false,
+    trial_passed_at: Date.now(),
+    trial_session: testSession,
+    adopted_from: {
+      candidate_id: "_dsh_synth_" + safeId,
+      candidate_kind: "dsh_synth",
+      synthesized_at: Date.now(),
+      handler_path: handlerPath,
+      seed_path: seedPath,
+      package_name: spec.package_name,
+      packages: spec.packages || [spec.package_name],
+      trial_session: testSession,
+    },
+  };
+  try { writeFileSync(seedPath, JSON.stringify(seedContent, null, 2)); } catch {}
+  graph.putCapability(seedContent);
+
+  try {
+    const gapKey = "gap:" + capability_id;
+    const gapNode = graph.getCapability(gapKey);
+    if (gapNode && !gapNode.retired_at) {
+      graph.retireCapability(gapKey, "resolved_by_dsh_synthesis");
+      events.emit("dsh_synth.gap_retired", { capability_id, gap_id: gapKey });
+    }
+  } catch (e) {
+    events.emit("dsh_synth.gap_retire_failed", { capability_id, error: e.message });
+  }
+
+  // v0.55.0 — write-only observation. Two files per synthesis:
+  // 1. outcomes.jsonl (structured) — one append per attempt
+  // 2. references/<id>.json (free-form) — DSH-authored notes + trial result
+  // Neither is read yet. Data accumulates for v0.55.1.
+  const _outRec = {
+    capability_id,
+    intent,
+    kind: wanted_kind || "tool",
+    refs_shown: _refs.map(r => r.id),
+    packages: spec.packages || [spec.package_name],
+    trial_ok: verified,
+    elapsed_ms: Date.now() - started,
+    error_class: verified ? null : String(reason || "unknown").split(":")[0],
+    used_composition: Object.keys((spec.glue && spec.glue.pre_invoke) || {}).length > 0,
+  };
+  recordOutcome(_outRec);
+  writeReference({ ..._outRec, spec_notes: spec.notes ?? null, error: verified ? null : reason });
+
+  // v0.56.8 — trace capture. Runs in parallel via setImmediate so the
+  // response returns before the trace lands. Set AGENTRY_TRACE_EMAIL=0
+  // to disable the email. Trace JSON always lands in events.jsonl.
+  {
+    const _traceId = "trace_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
+    const _tracePayload = {
+      trace_id: _traceId,
+      capability_id,
+      intent,
+      wanted_kind: wanted_kind || "tool",
+      references_shown: _refs.map(r => r.id),
+      dsh_internals: {
+        prompt_len: prompt.length,
+        prompt_preview: prompt.slice(0, 1500),
+        thinking: (dshRes.output?.messages || []).filter(m => m.role === "thinking").map(m => String(m.text || "").slice(0, 800)),
+        tool_calls: (dshRes.output?.tool_calls || []).map(tc => ({
+          tool: tc.tool, status: tc.status,
+          input_preview: JSON.stringify(tc.input || {}).slice(0, 400),
+        })),
+        usage: dshRes.output?.usage || {},
+        turn_count: dshRes.output?.turn_count || 0,
+        step_count: dshRes.output?.step_count || 0,
+        final_preview: finalText.slice(0, 1000),
+        duration_ms: dshRes.output?.duration_ms || 0,
+      },
+      spec_summary: {
+        package_name: spec.package_name,
+        packages: spec.packages,
+        accepts_keys: Object.keys(spec.accepts || {}),
+        produces_keys: Object.keys(spec.produces || {}),
+        test_script_len: String(spec.test_script || "").length,
+        code_body_len: String(spec.code_body || "").length,
+      },
+      outcome: { verified: true },
+      total_ms: Date.now() - started,
+    };
+    // v0.56.34 — attach handler source + event timeline for enriched email
+    try {
+      const _fsTrace = await import("node:fs");
+      if (_fsTrace.existsSync(handlerPath)) {
+        _tracePayload.handler_source_preview = _fsTrace.readFileSync(handlerPath, "utf8");
+      }
+      const _all = events.all();
+      const _tStart = started - 2000;
+      const _tEnd = Date.now() + 5000;
+      // v0.56.35 — broaden filter. Prior version matched only capability_id ===
+      // capability_id || gap_id ~ safeId, catching 3 events out of ~20. Installer
+      // events use capId, kernel/session events use session (which contains safeId),
+      // synthesize events use candidate_id. Match all of them.
+      const _matchId = (_v) => typeof _v === "string" && _v.length > 0 && (_v === capability_id || _v.indexOf(safeId) >= 0);
+      _tracePayload.event_timeline = _all.filter(_e =>
+        (_matchId(_e.capability_id) || _matchId(_e.capId) || _matchId(_e.session) || _matchId(_e.gap_id) || _matchId(_e.candidate_id) || _matchId(_e.ksess)) &&
+        _e.at >= _tStart && _e.at <= _tEnd
+      ).sort((a, b) => (a.at || 0) - (b.at || 0)).map(_e => ({
+        at: _e.at,
+        kind: _e.kind,
+        capability_id: _e.capability_id || null,
+        capId: _e.capId || null,
+        session: _e.session || null,
+        gap_id: _e.gap_id || null,
+      }));
+    } catch {}
+    setImmediate(() => {
+      try { events.emit("dsh_synth.trace", _tracePayload); } catch {}
+      if (String(process.env.AGENTRY_TRACE_EMAIL || "1") !== "0") {
+        (async () => {
+          try {
+            const _body = formatTraceEmail(_tracePayload);
+            await ctx.invoke("notify.fallback", {
+              subject: "[agentry] trace: " + capability_id,
+              body_markdown: _body,
+              primary: "notify.email.gmail",
+              fallback: "notify.console",
+            }, { tenant: "local", by: "agentry.synthesize_via_dsh" });
+          } catch (e) {
+            try { events.emit("dsh_synth.trace_email_failed", { capability_id, error: String(e.message || "").slice(0, 200) }); } catch {}
+          }
+        })();
+      }
+    });
+  }
+
+  events.emit("dsh_synth.completed", {
+    capability_id, handler_path: handlerPath, package: spec.package_name,
+    ms: Date.now() - started,
+  });
+
+  return {
+    output: {
+      verified: true, capability_id, handler_path: handlerPath,
+      seed_path: seedPath, package_name: spec.package_name,
+      accepts: spec.accepts, produces: spec.produces,
+    },
+    cost: { time_ms: Date.now() - started },
+  };
+}

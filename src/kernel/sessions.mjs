@@ -5,8 +5,8 @@
 // are shared under /work by default; a session can be scoped to a
 // subdirectory if the caller wants stronger isolation.
 
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve, normalize, relative, isAbsolute } from "node:path";
+import { mkdirSync, existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { join, resolve, normalize, relative, isAbsolute, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const SESSION_DIR_NAME = "sessions";
@@ -40,7 +40,9 @@ export class SessionStore {
   }
 
   get(id) {
-    return this._cache.get(id) || null;
+    const s = this._cache.get(id) || null;
+    if (s) s.last_used_at = Date.now();
+    return s;
   }
 
   list() {
@@ -146,6 +148,26 @@ export class SessionStore {
       e.code = "NOT_FOUND";
       throw e;
     }
+    // v0.60.0-phase2 — symlink escape prevention.
+    try {
+      let _rp = normalizedAbs;
+      let _depth = 0;
+      while (!existsSync(_rp) && _depth++ < 50) {
+        const _parent = dirname(_rp);
+        if (_parent === _rp) break;
+        _rp = _parent;
+      }
+      if (existsSync(_rp)) {
+        const _real = realpathSync(_rp);
+        const _realRoot = realpathSync(normalizedRoot);
+        const _realRel = relative(_realRoot, _real);
+        if (_realRel.startsWith("..") || isAbsolute(_realRel)) {
+          const e = new Error(`symlink escape detected: ${path}`);
+          e.code = "NOT_FOUND";
+          throw e;
+        }
+      }
+    } catch (e) { if (e.code === "NOT_FOUND") throw e; }
     return normalizedAbs;
   }
 }

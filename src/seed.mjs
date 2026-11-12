@@ -15,6 +15,15 @@ export function loadSeed({ graph, events, seedDir }) {
   const files = readdirSync(seedDir).filter(f => f.endsWith(".json")).sort();
   let loaded = 0, skipped = 0;
 
+  // v0.60.0-phase2 — single read of capabilities.jsonl.
+  const _everExisted = new Set();
+  if (existsSync(graph.capsFile)) {
+    for (const line of readFileSync(graph.capsFile, "utf8").split("\n")) {
+      if (!line) continue;
+      try { const o = JSON.parse(line); if (o.id) _everExisted.add(o.id); } catch {}
+    }
+  }
+
   for (const file of files) {
     const path = join(seedDir, file);
     let spec;
@@ -29,27 +38,12 @@ export function loadSeed({ graph, events, seedDir }) {
       continue;
     }
 
-    // v0.45.1 — check raw history (including retired) so a retired seed
-    // cap isn't re-added on every boot. getCapability() returns only live
-    // caps, so a retired seed cap looked "missing" and got resurrected,
-    // undoing any deliberate retirement of a seed-file capability.
-    let everExisted = false;
-    if (existsSync(graph.capsFile)) {
-      const raw = readFileSync(graph.capsFile, "utf8");
-      for (const line of raw.split("\n")) {
-        if (!line) continue;
-        try {
-          const o = JSON.parse(line);
-          if (o.id === spec.id) { everExisted = true; break; }
-        } catch {}
-      }
-    }
-    if (everExisted) { skipped++; continue; }
+    if (_everExisted.has(spec.id)) { skipped++; continue; }
     const existing = graph.getCapability(spec.id);
     if (existing) { skipped++; continue; }
 
     try {
-      const node = graph.putCapability({ ...spec, source: spec.source || `seed:${file}` });
+      const node = graph.putCapability({ ...spec, tier: spec.tier || "bootstrap", source: spec.source || `seed:${file}` });
       events.emit("seed.loaded", { file, capability_id: node.id, version: node.version });
       loaded++;
     } catch (e) {

@@ -52,10 +52,18 @@ function rpcError(id, code, message, data) {
 }
 
 async function readBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // v0.60.0-phase2 — size cap to prevent OOM.
     let b = "";
-    req.on("data", c => b += c);
+    let _size = 0;
+    const _MAX = 10 * 1024 * 1024;
+    req.on("data", c => {
+      _size += c.length;
+      if (_size > _MAX) { req.destroy(); return reject(new Error("request body exceeds 10MB")); }
+      b += c;
+    });
     req.on("end", () => resolve(b));
+    req.on("error", reject);
   });
 }
 

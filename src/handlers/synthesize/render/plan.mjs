@@ -227,7 +227,8 @@ export function renderHandler(spec) {
   out.push("");
   out.push("async function run(input, ctx, opts = {}) {");
   out.push("  const session = opts.session || input.session || (CAP_ID + \"-default\");");
-  out.push("  const timeout_ms = input.timeout_ms || DEFAULT_TIMEOUT_MS;");
+  out.push("  const _reqTimeout = Number(input.timeout_ms) || DEFAULT_TIMEOUT_MS;");
+  out.push("  const timeout_ms = Math.max(5000, Math.min(_reqTimeout, 600000));");
   out.push("");
   out.push("  if (typeof ctx.invoke !== \"function\") {");
   out.push("    throw new Error(CAP_ID + \" requires ctx.invoke\");");
@@ -320,7 +321,7 @@ export function renderHandler(spec) {
   out.push("  if (artifact && PATHKEY) output[PATHKEY] = artifact.path;");
   out.push("  if (artifact) { output.bytes = artifact.bytes; output.artifact_magic = artifact.magic; }");
   out.push("  if (output.status === undefined) output.status = \"complete\";");
-  out.push("  else if (output.bytes === undefined) {");
+  out.push("  if (output.bytes === undefined) {");
   out.push("    output.bytes = typeof raw === \"string\" ? Buffer.byteLength(raw) : JSON.stringify(raw).length;");
   out.push("  }");
   out.push("  output.captured_at = Date.now();");

@@ -33,7 +33,9 @@ export function pickReferenceHandlers(intent, kind, max = 2) {
     let seed;
     try { seed = JSON.parse(readFileSync(join(SEEDS_DIR, f), "utf8")); } catch { continue; }
     if (!seed.id || !seed.handler_file) continue;
-    if (seed.source !== "dsh_synth:verified" && seed.source !== "synthesized:agentry.synthesize") continue;
+    // v0.60.0-phase2 — accept all synthesized sources.
+    const _srcSource = String(seed.source || "");
+    if (!/^(dsh_synth:|synthesized:|matured:)/.test(_srcSource)) continue;
     if (!existsSync(seed.handler_file)) continue;
     let _src = "";
     try { _src = readFileSync(seed.handler_file, "utf8"); } catch { continue; }

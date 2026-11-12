@@ -33,7 +33,10 @@ export class ProcStore {
 
     const id = `proc_${randomBytes(6).toString("hex")}`;
     const absCwd = cwd ? sessions.resolvePath(session, cwd) : sessions.resolvePath(session, ".");
-    const mergedEnv = { ...process.env, ...s.env, ...env };
+    const _BLOCKED_ENV = new Set(["LD_PRELOAD","LD_LIBRARY_PATH","NODE_OPTIONS","PYTHONSTARTUP","BASH_ENV","ENV","PERL5OPT","RUBYOPT"]);
+    const _rawEnv = { ...process.env, ...s.env, ...env };
+    const mergedEnv = {};
+    for (const [k, v] of Object.entries(_rawEnv)) { if (_BLOCKED_ENV.has(k)) continue; mergedEnv[k] = v; }
 
     const rec = {
       id, session, name: name || cmd,

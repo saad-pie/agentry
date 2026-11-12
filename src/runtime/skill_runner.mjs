@@ -137,15 +137,25 @@ async function execToolCall(ctx, session, capId, call) {
       if (!r.ok) return { error: r.error.code + ": " + r.error.message };
       const pid = r.output?.result?.pid;
       if (!pid) return { error: "shell.spawn returned no pid" };
-      const read = await ctx.invoke("agentry.os", {
-        action: "shell.read", session, pid, wait_ms: Math.min(Number(args.timeout_ms) || 60000, 120000),
-      }, { tenant: "local", by: capId });
-      if (!read.ok) return { error: read.error.code + ": " + read.error.message };
-      const out = read.output?.result || {};
+      const _deadline = Date.now() + Math.min(Number(args.timeout_ms) || 60000, 120000);
+      let _accOut = "", _accErr = "", _exit = null, _done = false;
+      while (Date.now() < _deadline) {
+        const read = await ctx.invoke("agentry.os", {
+          action: "shell.read", session, pid, wait_ms: 25000,
+        }, { tenant: "local", by: capId });
+        if (!read.ok) return { error: read.error.code + ": " + read.error.message };
+        const snap = read.output?.result || {};
+        _accOut += String(snap.stdout || "");
+        _accErr += String(snap.stderr || "");
+        if (snap.done === true || (snap.exit_code !== null && snap.exit_code !== undefined)) {
+          _exit = snap.exit_code; _done = true; break;
+        }
+      }
       return {
-        stdout: String(out.stdout || "").slice(0, 20000),
-        stderr: String(out.stderr || "").slice(0, 4000),
-        exit_code: out.exit_code ?? 0,
+        stdout: _accOut.slice(0, 20000),
+        stderr: _accErr.slice(0, 4000),
+        exit_code: _done ? _exit : null,
+        timed_out: !_done,
       };
     }
     if (name === "run_node") {
@@ -158,7 +168,8 @@ async function execToolCall(ctx, session, capId, call) {
       return {
         stdout: String(out.stdout || "").slice(0, 20000),
         stderr: String(out.stderr || "").slice(0, 4000),
-        exit_code: out.exit_code ?? 0,
+        exit_code: out.exit_code ?? (out.signal ? -1 : null),
+        signal: out.signal || null,
       };
     }
     if (name === "run_python") {
@@ -171,7 +182,8 @@ async function execToolCall(ctx, session, capId, call) {
       return {
         stdout: String(out.stdout || "").slice(0, 20000),
         stderr: String(out.stderr || "").slice(0, 4000),
-        exit_code: out.exit_code ?? 0,
+        exit_code: out.exit_code ?? (out.signal ? -1 : null),
+        signal: out.signal || null,
       };
     }
     return { error: "unknown tool: " + name };

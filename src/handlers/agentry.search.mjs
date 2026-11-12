@@ -4,22 +4,9 @@
 
 import { runAdapters } from "../adapters/_registry.mjs";
 
+import { simplifyQuery, SEARCH_FILLER } from "../util/text.mjs";
+
 const DEFAULT_ADAPTERS = ["npm","pypi","crates","gomod","maven","nuget","agentskills_code","clawhub","hermes_atlas","dsh_plugins","github","web","mcp"];
-
-// v0.58.7 — filler words that don't help maven/nuget search. They index
-// package/artifact names, not natural-language queries. "convert json to
-// yaml" returns 0, but "json yaml" returns hundreds.
-const SEARCH_FILLER = new Set([
-  "convert","change","transform","turn","make","create","generate",
-  "to","into","from","with","and","or","the","a","an",
-  "file","files","using","please","via","through","for","of",
-]);
-
-function simplifyQuery(q) {
-  const tokens = String(q || "").toLowerCase().split(/[^a-z0-9]+/)
-    .filter(t => t.length >= 3 && !SEARCH_FILLER.has(t));
-  return tokens.slice(0, 3).join(" ");
-}
 
 export default async function agentrySearch(input, ctx) {
   const { query, adapters, limit } = input || {};

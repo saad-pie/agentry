@@ -51,7 +51,7 @@ const REPAIR_PROVIDER = process.env.AGENTRY_REPAIR_PROVIDER || "google";
 const REPAIR_MODEL = process.env.AGENTRY_REPAIR_MODEL || "gemini-2.5-flash";
 
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
-const MAX_CAP_LIST = 60;
+const MAX_CAP_LIST = 300;
 
 const TOOLS = [
   {

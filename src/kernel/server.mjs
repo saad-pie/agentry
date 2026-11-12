@@ -24,13 +24,21 @@ sessions.create({ id: "default" });
 
 async function readBody(req) {
   return new Promise((resolve, reject) => {
+    // v0.60.0-phase2 — size cap.
     let body = "";
-    req.on("data", c => body += c);
+    let _size = 0;
+    const _MAX = 10 * 1024 * 1024;
+    req.on("data", c => {
+      _size += c.length;
+      if (_size > _MAX) { req.destroy(); return reject(new Error("request body exceeds 10MB")); }
+      body += c;
+    });
     req.on("end", () => {
       if (!body) return resolve({});
       try { resolve(JSON.parse(body)); }
       catch (e) { reject(new Error(`invalid JSON body: ${e.message}`)); }
     });
+    req.on("error", reject);
   });
 }
 function send(res, status, body) {

@@ -19,6 +19,11 @@ export function javaRun(sessions, { session, code, file, args = [], cwd, env = {
 
   let scriptPath;
   let mainClass = class_name || "Main";
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(mainClass)) {
+    const e = new Error(`java.run: invalid class_name: ${mainClass}`);
+    e.code = "INVALID_REQUEST";
+    throw e;
+  }
   if (code) {
     const dir = sessions.resolvePath(session, ".agentry_scripts");
     mkdirSync(dir, { recursive: true });

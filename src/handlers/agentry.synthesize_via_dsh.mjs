@@ -708,6 +708,8 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     accepts: spec.accepts, produces: spec.produces,
     requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
     source: "dsh_synth:verified",
+    tier: "ephemeral",
+    seed_path: seedPath,
     trial: false,
     trial_passed_at: Date.now(),
     trial_session: testSession,

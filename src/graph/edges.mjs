@@ -122,5 +122,5 @@ export function capabilitiesSatisfying(graph, gapId) {
   const edges = findEdges(graph, { relation: RELATIONS.CAPABILITY_SATISFIES_GAP, to: gapId });
   return edges
     .map(e => graph.getCapability(e.from))
-    .filter(c => c && c.kind !== "edge" && !c.retired_at);
+    .filter(c => c && c.kind !== "edge" && c.kind !== "proposal" && !c.retired_at);
 }

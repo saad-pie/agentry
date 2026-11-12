@@ -16,7 +16,7 @@
 import { recordGap } from "./agentry.capability_gap.mjs";
 
 const INTERNAL_KINDS = new Set(["invoker", "agentry", "service"]);
-const MAX_CAP_LIST = 60;
+const MAX_CAP_LIST = 300;
 
 function buildModelChain(input) {
   const chain = [];

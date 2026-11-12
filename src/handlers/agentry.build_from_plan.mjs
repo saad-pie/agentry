@@ -252,6 +252,8 @@ export default async function agentryBuildFromPlan(input, ctx) {
     produces: spec.capability.produces,
     requires: spec.capability.requires,
     source: "dsh_plan:verified",
+    tier: "ephemeral",
+    seed_path: seedPath,
     trial_passed_at: Date.now(),
     trial_session: trialResult.output.session,
   });

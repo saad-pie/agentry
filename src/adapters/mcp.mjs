@@ -9,13 +9,7 @@ const MCP_REGISTRY_CANDIDATES = [
   "https://registry.modelcontextprotocol.io/v1/servers",
 ];
 
-const FILLER = new Set(["convert","change","transform","turn","make","create","generate","to","into","from","with","and","or","the","a","an","file","files","using","please","via","through","for","of"]);
-
-function simplifyQuery(q) {
-  const tokens = String(q || "").toLowerCase().split(/[^a-z0-9]+/)
-    .filter(t => t.length >= 3 && !FILLER.has(t));
-  return tokens.slice(0, 3).join(" ");
-}
+import { simplifyQuery } from "../util/text.mjs";
 
 async function searchOnce(query, limit) {
   const q = encodeURIComponent(query);

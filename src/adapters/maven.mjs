@@ -7,6 +7,7 @@
 // response — the reasoner will see name + coords.
 
 import { httpJson } from "./_registry.mjs";
+import { simplifyQuery } from "../util/text.mjs";
 
 export const meta = {
   name: "maven",
@@ -18,8 +19,7 @@ export const meta = {
 export async function search({ query, limit = 10 }) {
   // v0.58.7b — retry simplified. Maven Solr searches artifact names,
   // not natural-language queries. "convert json to yaml" returns 0, "yaml" returns 855.
-  const _FILLER = new Set(["convert","change","transform","turn","make","create","generate","to","into","from","with","and","or","the","a","an","file","files","using","please","via","through","for","of"]);
-  const _simple = String(query).toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !_FILLER.has(t)).slice(0, 3).join(" ");
+  const _simple = simplifyQuery(query);
   const _queries = _simple && _simple !== String(query).toLowerCase().trim() ? [query, _simple] : [query];
   let docs = [];
   for (const _q of _queries) {

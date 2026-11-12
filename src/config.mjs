@@ -166,6 +166,16 @@ export function loadConfig(overrides = {}) {
         .split(",").map(s => s.trim()).filter(Boolean),
     },
 
+    // v0.60.0-phase2 — promotion loop config.
+    promotion: {
+      enabled: env("AGENTRY_PROMOTION", "true") === "true",
+      intervalMs: Number(env("AGENTRY_PROMOTION_MS", "60000")),
+      maxAttempts: Number(env("AGENTRY_PROMOTION_MAX_ATTEMPTS", "3")),
+      maxPerTick: Number(env("AGENTRY_PROMOTION_MAX_PER_TICK", "2")),
+      dshTimeoutMs: Number(env("AGENTRY_PROMOTION_DSH_TIMEOUT_MS", "180000")),
+      staleLockMs: Number(env("AGENTRY_PROMOTION_STALE_MS", "600000")),
+    },
+
     ...overrides,
   };
 }

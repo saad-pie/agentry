@@ -69,6 +69,7 @@ export class Runtime {
       "agentry.message.send",
       "agentry.message.read",
       "agentry.chat",
+      "agentry.approval_http",
     ]) {
       try {
         const _cap = this.graph.getCapability(_legacyId);
@@ -175,6 +176,9 @@ export class Runtime {
       const last = Number(cap.last_poll_at) || 0;
       if (now - last >= interval) due.push(cap);
     }
+    // v0.60.0-phase2 — Pass 4: promote tick (gated by config.promotion).
+    await this._maybePromoteTick();
+
     if (!due.length) return;
 
     const max = this.config.runtime.watchMaxConcurrent;

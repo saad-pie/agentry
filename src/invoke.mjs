@@ -131,6 +131,12 @@ export async function invoke(deps, capabilityId, input = {}, context = {}) {
     events.emit("invoke.run_record_failed", { capability_id: capabilityId, error: e.message });
   }
 
+  // v0.60.0-phase2 — mark ephemeral caps on first success.
+  if (result.ok && cap.tier === "ephemeral" && !cap.first_succeeded_at) {
+    try { graph.putCapability({ id: capabilityId, first_succeeded_at: Date.now() }); }
+    catch (e) { events.emit("invoke.first_success_mark_failed", { capability_id: capabilityId, error: String(e.message || "").slice(0, 200) }); }
+  }
+
   // 6. Emit finish event
   events.emit(result.ok ? "invoke.succeeded" : "invoke.failed", {
     capability_id: capabilityId,
