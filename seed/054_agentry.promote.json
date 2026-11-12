@@ -1,0 +1,18 @@
+{
+  "id": "agentry.promote",
+  "kind": "agent",
+  "invoked_via": "invoker.in_process_js",
+  "handler": "agentry.promote",
+  "accepts": { "capability_id": "string" },
+  "produces": {
+    "ok": "boolean",
+    "promoted": "boolean",
+    "reason": "string",
+    "capability_id": "string",
+    "attempts": "number"
+  },
+  "cost": { "money_usd": 0, "time_ms": 180000 },
+  "limits": {},
+  "source": "seeded:agentry",
+  "notes": "v0.60.0-phase2 — DSH hardens an ephemeral cap, trials the improved version, promotes to durable on pass. Fires from invoke.mjs (setImmediate) and from runtime._tick (60s backstop). 3 strike cap on promote_attempts."
+}
