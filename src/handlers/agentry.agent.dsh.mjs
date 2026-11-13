@@ -160,7 +160,11 @@ function _tierFirstChain(tierChain) {
   // Providers like coarena/crowllm work for agentry's llm.openai_compat
   // (direct HTTPS) but NOT for the DSH subprocess (NO_ADAPTER error).
   // Filter them out here so agent.dsh never routes a tier model DSH can't call.
-  const _DSH_SUPPORTED = new Set(["groq", "ollama", "orcarouter", "requesty", "anyrouter"]);
+  // v0.60.0-phase2.3.4 — empirical DSH-supported providers from the
+  // headless cordis.patch.yml that agent.dsh writes: requesty, unorouter,
+  // groq. Everything else returns NO_ADAPTER (coarena, crowllm, orcarouter,
+  // google, anyrouter, ollama).
+  const _DSH_SUPPORTED = new Set(["groq", "requesty", "unorouter"]);
   const seen = new Set();
   const out = [];
   for (const m of tierChain) {
@@ -171,10 +175,18 @@ function _tierFirstChain(tierChain) {
     out.push(m);
   }
   for (const m of DSH_FALLBACK_CHAIN) {
+    // v0.60.0-phase2.3.4 — filter the append loop too. Prior version
+    // appended DSH_FALLBACK_CHAIN entries unfiltered, so unorouter
+    // (not in _DSH_SUPPORTED) still got routed and failed NO_ADAPTER.
+    if (!_DSH_SUPPORTED.has(m.provider)) continue;
     const k = m.provider + "/" + m.model;
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(m);
+  }
+  if (out.length === 0) {
+    // Absolute fallback: filter DSH_FALLBACK_CHAIN
+    return DSH_FALLBACK_CHAIN.filter(m => _DSH_SUPPORTED.has(m.provider));
   }
   return out;
 }
