@@ -162,7 +162,11 @@ export default async function agentryPromote(input, ctx) {
   // v0.60.0-phase2.3 — retry once on silent-empty (exit 0, no timeout).
   // Prior version struck an attempt on any empty final, burning strikes on
   // transient model failures that a retry would have fixed.
-  if (!rawFinal.trim() && dshRes.output?.exit_code === 0 && dshRes.output?.timed_out !== true) {
+  // v0.60.0-phase2.3.3 — retry on any empty final, not just exit_code 0.
+  // Prior version only retried on exit_code===0. DSH exiting non-zero with
+  // empty content (crashed model, provider 503) skipped retry, causing
+  // immediate promote.failed with dsh_empty_final.
+  if (!rawFinal.trim() && dshRes.output?.timed_out !== true) {
     events.emit("promote.retry_empty_final", { capability_id, tier: _tier });
     const _retryPrompt = prompt + "\n\nIMPORTANT: Your previous response was empty. Return ONLY the JSON object with improved_handler_code — no prose, no fences, no explanation.";
     try {

@@ -156,9 +156,15 @@ const DSH_FALLBACK_CHAIN = _buildFallbackChain();
 // in front of the default chain. Deduped by (provider, model).
 function _tierFirstChain(tierChain) {
   if (!Array.isArray(tierChain) || tierChain.length === 0) return DSH_FALLBACK_CHAIN;
+  // v0.60.0-phase2.3.3 — DSH only has adapters for a fixed provider set.
+  // Providers like coarena/crowllm work for agentry's llm.openai_compat
+  // (direct HTTPS) but NOT for the DSH subprocess (NO_ADAPTER error).
+  // Filter them out here so agent.dsh never routes a tier model DSH can't call.
+  const _DSH_SUPPORTED = new Set(["groq", "ollama", "orcarouter", "requesty", "anyrouter"]);
   const seen = new Set();
   const out = [];
   for (const m of tierChain) {
+    if (!_DSH_SUPPORTED.has(m.provider)) continue;
     const k = m.provider + "/" + m.model;
     if (seen.has(k)) continue;
     seen.add(k);
@@ -227,13 +233,16 @@ function _buildHeadlessPatch(provider, model) {
 
 function _isFallbackableStderr(stderr, exit_code = null, final_text = null) {
   const s = String(stderr || "");
-  // v0.52.24 — empty stderr + non-zero exit + no final = silent provider
-  // failure (max-tokens cut, timeout, unreachable). Fall back. Prior version
-  // returned false on empty stderr, so a silent unorouter failure stopped
-  // the chain and groq keys were never tried.
-  if (!s) {
+  // v0.60.0-phase2.3.3 — broader empty-final fallback. Prior version only
+  // fell back on non-zero exit + empty final. Silent model refusal
+  // (reasoning_content returned, content empty, exit_code 0) stopped the
+  // chain. Now: any empty final triggers fallback, regardless of exit_code.
+  {
     const _hasFinal = final_text !== null && String(final_text || "").trim().length > 0;
-    if (exit_code !== null && exit_code !== 0 && !_hasFinal) return true;
+    if (!_hasFinal && exit_code !== null) return true;
+  }
+  if (!s) {
+    if (exit_code !== null && exit_code !== 0) return true;
     return false;
   }
   if (/PI_AI_ERROR/.test(s) && /40[0-9]/.test(s)) return true;
