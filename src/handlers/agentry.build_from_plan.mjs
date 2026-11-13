@@ -172,7 +172,14 @@ export default async function agentryBuildFromPlan(input, ctx) {
     plan,
     accept_spec: plan_spec.accept_spec || { input: {}, min_bytes: 0 },
     kernel_language: plan_spec.kernel_language || "node",
-    glue: plan_spec.glue || { env_map: deriveEnvMap(plan_spec.accepts) },
+    // v0.60.0-phase2.3.2 — default output_map from produces keys.
+    // Prior version left output_map empty, so produces fields with no
+    // path-shaped key (e.g. {y: "string"}) never got populated from raw
+    // stdout → accept's produces check failed with "y: undefined".
+    glue: plan_spec.glue || {
+      env_map: deriveEnvMap(plan_spec.accepts),
+      output_map: Object.fromEntries(Object.keys(plan_spec.produces || {}).map(k => [k, k])),
+    },
   };
 
   mkdirSync(HANDLERS_DIR, { recursive: true });

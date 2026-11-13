@@ -43,12 +43,16 @@ export default async function agentryTrial(input, ctx) {
     catch (e) { events.emit("trial.seed_read_failed", { seed_path, error: e.message }); }
   }
 
+  // v0.60.0-phase2.3.2 — preserve existing handler_file. Prior version
+  // overwrote it with handler_path, which during promote points to the
+  // STAGED file (deleted after promote commits). Cap became unusable.
+  const _existingForTrial = graph.getCapability(capability_id);
   const trialNode = {
     id: capability_id,
     kind: seedSpec?.kind || "unknown",
     invoked_via: "invoker.in_process_js",
     handler: capability_id,
-    handler_file: handler_path,
+    handler_file: (_existingForTrial && _existingForTrial.handler_file) || handler_path,
     accepts: seedSpec?.accepts || null,
     produces: seedSpec?.produces || null,
     requires: seedSpec?.requires || {},
