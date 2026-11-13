@@ -152,6 +152,27 @@ function _buildFallbackChain() {
 }
 const DSH_FALLBACK_CHAIN = _buildFallbackChain();
 
+// v0.60.0-phase2.3.1 — tier-aware chain resolution. Prefixes tier models
+// in front of the default chain. Deduped by (provider, model).
+function _tierFirstChain(tierChain) {
+  if (!Array.isArray(tierChain) || tierChain.length === 0) return DSH_FALLBACK_CHAIN;
+  const seen = new Set();
+  const out = [];
+  for (const m of tierChain) {
+    const k = m.provider + "/" + m.model;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(m);
+  }
+  for (const m of DSH_FALLBACK_CHAIN) {
+    const k = m.provider + "/" + m.model;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(m);
+  }
+  return out;
+}
+
 // v0.52.24 — defaultMaxTokens raised from 2048 to 8192. Prior value was
 // DSH's default chat response budget; way too small for agentic reasoning
 // where each turn produces thinking + tool_calls. Symptom: model hits
@@ -228,20 +249,26 @@ export default async function agentryAgentDsh(input, ctx) {
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     throw new Error("agentry.agent.dsh requires prompt (non-empty string)");
   }
-  const _tier = model_tier || "balanced";
-  const _tierDefaultTimeouts = { fast: 90000, balanced: 180000, strong: 360000 };
+  const { resolveTier } = await import("../model_tiers.mjs");
+  const _tierCfg = resolveTier(model_tier, { prompt });
+  const _tierName = _tierCfg.label || "agentry-medium";
+  const _tierDefaultTimeouts = { "agentry-weak": 90000, "agentry-medium": 180000, "agentry-strong": 360000, "agentry-frontier": 480000, fast: 90000, balanced: 180000, strong: 360000 };
+  const _tierKey = _tierCfg === (await import("../model_tiers.mjs")).TIERS["agentry-weak"] ? "agentry-weak"
+    : _tierCfg === (await import("../model_tiers.mjs")).TIERS["agentry-strong"] ? "agentry-strong"
+    : _tierCfg === (await import("../model_tiers.mjs")).TIERS["agentry-frontier"] ? "agentry-frontier"
+    : "agentry-medium";
   let _tierPrompt = prompt;
-  if (_tier === "fast") {
-    _tierPrompt = "[Quality tier: FAST. Be concise. Act directly. Return the final answer as JSON — no plan preamble.]\n\n" + prompt;
-  } else if (_tier === "strong") {
-    _tierPrompt = "[Quality tier: STRONG. Before acting: (1) read all relevant files, (2) write a short plan (3-5 bullets) in your first response, (3) execute step by step verifying each step, (4) if a step fails think about why before retrying, (5) return only the final answer as JSON.]\n\n" + prompt;
+  if (_tierCfg.dsh_prefix && _tierCfg.dsh_prefix.trim()) {
+    _tierPrompt = _tierCfg.dsh_prefix + "\n\n" + prompt;
   }
+  // Tier-aware model chain: build from _tierCfg.models first, then default fallback
+  const _tierChain = (_tierCfg.models || []).slice(0, 3).map(m => ({ provider: m.provider, model: m.model }));
   if (typeof ctx.invoke !== "function") throw new Error("agentry.agent.dsh requires ctx.invoke");
 
   const events_out = ctx.events;
   const started = Date.now();
   const ksess = genSessionId();
-  const _defaultTimeoutForTier = _tierDefaultTimeouts[_tier] || DEFAULT_TIMEOUT_MS;
+  const _defaultTimeoutForTier = _tierDefaultTimeouts[_tierKey] || _tierCfg.timeout || DEFAULT_TIMEOUT_MS;
   const timeout = Math.max(5000, Math.min(600000, Number(timeout_ms) || _defaultTimeoutForTier));
 
   events_out.emit("agent.dsh.started", { ksess, prompt_len: prompt.length, timeout_ms: timeout });
@@ -365,10 +392,11 @@ export default async function agentryAgentDsh(input, ctx) {
   let _final_timed_out = false;
   let _prev_stderr = "";
 
-  for (let _ai = 0; _ai < DSH_FALLBACK_CHAIN.length; _ai++) {
-    const _att = DSH_FALLBACK_CHAIN[_ai];
+  const _effectiveChain = _tierFirstChain(_tierChain);
+  for (let _ai = 0; _ai < _effectiveChain.length; _ai++) {
+    const _att = _effectiveChain[_ai];
     events_out.emit("agent.dsh.attempt_started", {
-      attempt: _ai + 1, total: DSH_FALLBACK_CHAIN.length,
+      attempt: _ai + 1, total: _effectiveChain.length, tier: _tierKey,
       provider: _att.provider, model: _att.model,
       previous_error: _prev_stderr.slice(-300),
     });
@@ -481,7 +509,7 @@ export default async function agentryAgentDsh(input, ctx) {
       stderr_preview: acc_err.slice(-200),
     });
 
-    if (_fb && _ai + 1 < DSH_FALLBACK_CHAIN.length) {
+    if (_fb && _ai + 1 < _effectiveChain.length) {
       _prev_stderr = acc_err;
       continue;
     }

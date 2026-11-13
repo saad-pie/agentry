@@ -133,9 +133,29 @@ export function loadConfig(overrides = {}) {
         },
         // v0.60.0-phase2.1 — Coarena free tier (18 models, OpenAI-compatible).
         // Limits: $5/day, 30 rpm, 2 concurrent. Prompts retained forever.
+        // v0.60.0-phase2.3.1 — Coarena 4-key pool. Rotated on 429.
         coarena: {
           baseUrl: env("COARENA_BASE_URL", "https://coarena.ai/api/v1"),
           apiKey: env("COARENA_API_KEY", null),
+          keys: [
+            env("COARENA_API_KEY", null),
+            env("COARENA_API_KEY_2", null),
+            env("COARENA_API_KEY_3", null),
+            env("COARENA_API_KEY_4", null),
+          ].filter(Boolean),
+        },
+        // v0.60.0-phase2.3.1 — CrowLLM 6-key pool. Rotated on 429.
+        crowllm: {
+          baseUrl: env("CROWLLM_BASE_URL", "https://crowllm.com/v1"),
+          apiKey: env("CROWLLM_API_KEY", null),
+          keys: [
+            env("CROWLLM_API_KEY", null),
+            env("CROWLLM_API_KEY_2", null),
+            env("CROWLLM_API_KEY_3", null),
+            env("CROWLLM_API_KEY_4", null),
+            env("CROWLLM_API_KEY_5", null),
+            env("CROWLLM_API_KEY_6", null),
+          ].filter(Boolean),
         },
         ollama: {
           baseUrl: env("OLLAMA_BASE_URL", "https://ollama.com/v1"),

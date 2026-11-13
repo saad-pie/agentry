@@ -120,7 +120,10 @@ function renderHandlerFromPlan(spec) {
 
 export default async function agentryBuildFromPlan(input, ctx) {
   const { gap_id, capability_id, plan_spec, candidate, model_tier } = input || {};
-  const _tierHint = model_tier || (plan_spec && plan_spec.model_tier) || "balanced";
+  const { resolveTier: _resolveBFP } = await import("../model_tiers.mjs");
+  const _tierOrAuto = model_tier || (plan_spec && plan_spec.model_tier) || "auto";
+  const _tierCfgBFP = _resolveBFP(_tierOrAuto, { prompt: JSON.stringify(plan_spec || {}).slice(0, 500) });
+  const _tierHint = _tierCfgBFP.label || "agentry-medium";
   if (!plan_spec || typeof plan_spec !== "object") throw new Error("agentry.build_from_plan requires plan_spec");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.build_from_plan requires ctx.invoke");
 

@@ -276,7 +276,8 @@ function renderV2Handler({ v2Id, v1Cap, spec }) {
 
 export default async function agentryMature(input, ctx) {
   const { capability_id, rubric, probe_input, model_tier } = input || {};
-  const _tierChain = resolveTier(model_tier || "balanced");
+  const _tierCfg = resolveTier(model_tier || "auto", { prompt: rubric });
+  const _tierChain = _tierCfg.models;
   if (!capability_id) throw new Error("agentry.mature requires capability_id");
   if (!rubric || String(rubric).trim().length < 20) {
     throw new Error("agentry.mature requires a rubric of at least 20 chars");

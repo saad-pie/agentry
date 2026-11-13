@@ -38,8 +38,10 @@ import { resolveTier, DEFAULT_TIER as _DEFAULT_MODEL_TIER } from "../../model_ti
 
 export default async function agentrySynthesize(input, ctx) {
   const { proposal_id, candidate_id, id_override, model_tier } = input || {};
-  const _tier = model_tier || _DEFAULT_MODEL_TIER;
-  const _chain = resolveTier(_tier);
+  const _tierOrAuto = model_tier || _DEFAULT_MODEL_TIER;
+  const _tierCfg = resolveTier(_tierOrAuto, { prompt: input && input.intent });
+  const _tier = _tierCfg.label || _tierOrAuto;
+  const _chain = _tierCfg.models;
   if (!proposal_id) throw new Error("agentry.synthesize requires proposal_id");
   if (!candidate_id) throw new Error("agentry.synthesize requires candidate_id");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.synthesize requires ctx.invoke");

@@ -145,9 +145,11 @@ export default async function agentryPromote(input, ctx) {
     try { seed = JSON.parse(readFileSync(cap.seed_path, "utf8")); } catch {}
   }
 
-  const _tier = (input && input.model_tier) || cap.tier_hint || "balanced";
-  const _tierTimeouts = { fast: 90000, balanced: 180000, strong: 360000 };
-  const _effectiveTimeout = Number(cfg.dshTimeoutMs) > 0 ? cfg.dshTimeoutMs : (_tierTimeouts[_tier] || 180000);
+  const { resolveTier } = await import("../model_tiers.mjs");
+  const _tierOrAuto = (input && input.model_tier) || cap.tier_hint || "auto";
+  const _tierCfg = resolveTier(_tierOrAuto, { cap });
+  const _tier = _tierCfg.label || "agentry-medium";
+  const _effectiveTimeout = Number(cfg.dshTimeoutMs) > 0 ? cfg.dshTimeoutMs : (_tierCfg.timeout || 180000);
 
   const prompt = buildHardenPrompt({ src: origSrc, capability: cap, seed });
   let dshRes;
