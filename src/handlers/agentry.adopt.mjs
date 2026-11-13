@@ -399,6 +399,7 @@ async function tryRepairAndRetrial(ctx, { proposal_id, proposal, candidate, synt
     notes: candidate.url || null,
     trial: false,
     tier: "ephemeral",
+    tier_hint: proposal.model_tier || "balanced",
     seed_path: synthesis.seed_path,
     trial_passed_at: Date.now(),
     repaired_at: Date.now(),
@@ -730,7 +731,8 @@ export default async function agentryAdopt(input, ctx) {
     // ── Synthesis path ──
     let synthesis = null;
     try {
-      const _synthInput = { proposal_id, candidate_id: candidateId };
+      const _tierForSynth = proposal.model_tier || "balanced";
+      const _synthInput = { proposal_id, candidate_id: candidateId, model_tier: _tierForSynth };
       if (id_override) _synthInput.id_override = id_override;
       const synRes = await ctx.invoke("agentry.synthesize", _synthInput, { tenant: "local", by: "agentry.adopt" });
 
@@ -877,6 +879,7 @@ export default async function agentryAdopt(input, ctx) {
       notes: candidate.url || null,
       trial: false,
       tier: "ephemeral",
+      tier_hint: proposal.model_tier || "balanced",
       seed_path: synthesis.seed_path,
       trial_passed_at: Date.now(),
       adopted_from: {

@@ -89,6 +89,7 @@ export function registerAgentryTools(deps) {
         gap_id: { type: "string", description: "The gap_id from check() when exists was false." },
         candidate: { type: "object", description: "Full candidate object from search()." },
         wanted_kind: { type: "string", description: "Optional kind hint." },
+        model_tier: { type: "string", enum: ["fast", "balanced", "strong"], description: "Quality tier. Default 'balanced'. Matches the user's [fast]/[balanced]/[strong] prefix." },
       },
       required: ["gap_id", "candidate"],
     },
@@ -108,6 +109,7 @@ export function registerAgentryTools(deps) {
         gap_id: { type: "string", description: "Gap id from check(). Optional if capability_id provided." },
         capability_id: { type: "string", description: "Desired capability id. Optional if gap_id provided." },
         candidate: { type: "object", description: "Candidate object from search(). Used for kind/source hints." },
+        model_tier: { type: "string", enum: ["fast", "balanced", "strong"], description: "Quality tier hint. Stored on the capability for downstream promotion. Default 'balanced'. Matches the user's [fast]/[balanced]/[strong] prefix." },
         plan_spec: {
           type: "object",
           description: "The plan. Shape: { accepts, produces, requires, plan:[{verb, code}], accept_spec }",

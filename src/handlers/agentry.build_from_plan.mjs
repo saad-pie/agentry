@@ -119,7 +119,8 @@ function renderHandlerFromPlan(spec) {
 }
 
 export default async function agentryBuildFromPlan(input, ctx) {
-  const { gap_id, capability_id, plan_spec, candidate } = input || {};
+  const { gap_id, capability_id, plan_spec, candidate, model_tier } = input || {};
+  const _tierHint = model_tier || (plan_spec && plan_spec.model_tier) || "balanced";
   if (!plan_spec || typeof plan_spec !== "object") throw new Error("agentry.build_from_plan requires plan_spec");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.build_from_plan requires ctx.invoke");
 
@@ -253,6 +254,7 @@ export default async function agentryBuildFromPlan(input, ctx) {
     requires: spec.capability.requires,
     source: "dsh_plan:verified",
     tier: "ephemeral",
+    tier_hint: _tierHint,
     seed_path: seedPath,
     trial_passed_at: Date.now(),
     trial_session: trialResult.output.session,

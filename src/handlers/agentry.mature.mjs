@@ -15,6 +15,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scoreOutput } from "../runtime/quality.mjs";
+import { resolveTier } from "../model_tiers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HANDLERS_DIR = process.env.AGENTRY_HANDLERS_DIR || "/tmp/home/.dsh/agentry-synthesized/handlers";
@@ -274,7 +275,8 @@ function renderV2Handler({ v2Id, v1Cap, spec }) {
 }
 
 export default async function agentryMature(input, ctx) {
-  const { capability_id, rubric, probe_input } = input || {};
+  const { capability_id, rubric, probe_input, model_tier } = input || {};
+  const _tierChain = resolveTier(model_tier || "balanced");
   if (!capability_id) throw new Error("agentry.mature requires capability_id");
   if (!rubric || String(rubric).trim().length < 20) {
     throw new Error("agentry.mature requires a rubric of at least 20 chars");
@@ -333,7 +335,7 @@ export default async function agentryMature(input, ctx) {
   const prompt = buildMutationPrompt({ cap, v1Plan, v1Seed, v1Quality, rubric: String(rubric) });
   let mutationResponse = null, llmUsed = null;
   const attempts = [];
-  for (const { provider, model } of MODEL_CHAIN) {
+  for (const { provider, model } of _tierChain) {
     try {
       const r = await invoke("llm.openai_compat", {
         provider, model,

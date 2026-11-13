@@ -224,16 +224,25 @@ function _isFallbackableStderr(stderr, exit_code = null, final_text = null) {
 }
 
 export default async function agentryAgentDsh(input, ctx) {
-  const { prompt, timeout_ms, session_id } = input || {};
+  const { prompt, timeout_ms, session_id, model_tier } = input || {};
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     throw new Error("agentry.agent.dsh requires prompt (non-empty string)");
+  }
+  const _tier = model_tier || "balanced";
+  const _tierDefaultTimeouts = { fast: 90000, balanced: 180000, strong: 360000 };
+  let _tierPrompt = prompt;
+  if (_tier === "fast") {
+    _tierPrompt = "[Quality tier: FAST. Be concise. Act directly. Return the final answer as JSON — no plan preamble.]\n\n" + prompt;
+  } else if (_tier === "strong") {
+    _tierPrompt = "[Quality tier: STRONG. Before acting: (1) read all relevant files, (2) write a short plan (3-5 bullets) in your first response, (3) execute step by step verifying each step, (4) if a step fails think about why before retrying, (5) return only the final answer as JSON.]\n\n" + prompt;
   }
   if (typeof ctx.invoke !== "function") throw new Error("agentry.agent.dsh requires ctx.invoke");
 
   const events_out = ctx.events;
   const started = Date.now();
   const ksess = genSessionId();
-  const timeout = Math.max(5000, Math.min(600000, Number(timeout_ms) || DEFAULT_TIMEOUT_MS));
+  const _defaultTimeoutForTier = _tierDefaultTimeouts[_tier] || DEFAULT_TIMEOUT_MS;
+  const timeout = Math.max(5000, Math.min(600000, Number(timeout_ms) || _defaultTimeoutForTier));
 
   events_out.emit("agent.dsh.started", { ksess, prompt_len: prompt.length, timeout_ms: timeout });
 
@@ -277,7 +286,7 @@ export default async function agentryAgentDsh(input, ctx) {
   // ── 3. Spawn dsh ──
   const args = ["--profile", DSH_PROFILE, "--json"];
   if (session_id) args.push("--session-id", String(session_id));
-  args.push(prompt);
+  args.push(_tierPrompt);
 
   // v0.48.2 — inline env prefix on sh -c to guarantee propagation
   const requestyKey = process.env.REQUESTYAI_API_KEY || "";

@@ -16,7 +16,11 @@
       "type": "object",
       "optional": true
     },
-    "plan_spec": "object"
+    "plan_spec": "object",
+    "model_tier": {
+      "type": "string",
+      "optional": true
+    }
   },
   "produces": {
     "ok": "boolean",

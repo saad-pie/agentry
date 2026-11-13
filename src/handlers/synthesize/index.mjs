@@ -34,9 +34,12 @@ import { extractJson } from "./validate/json.mjs";
 import { validatePlan } from "./validate/plan.mjs";
 import { validateSpecConsistency } from "./validate/spec.mjs";
 import { recordOutcome } from "./outcomes.mjs";
+import { resolveTier, DEFAULT_TIER as _DEFAULT_MODEL_TIER } from "../../model_tiers.mjs";
 
 export default async function agentrySynthesize(input, ctx) {
-  const { proposal_id, candidate_id, id_override } = input || {};
+  const { proposal_id, candidate_id, id_override, model_tier } = input || {};
+  const _tier = model_tier || _DEFAULT_MODEL_TIER;
+  const _chain = resolveTier(_tier);
   if (!proposal_id) throw new Error("agentry.synthesize requires proposal_id");
   if (!candidate_id) throw new Error("agentry.synthesize requires candidate_id");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.synthesize requires ctx.invoke");
@@ -224,7 +227,7 @@ export default async function agentrySynthesize(input, ctx) {
   let llmUsed = null;
   const attempts = [];
 
-  for (const { provider, model } of MODEL_CHAIN) {
+  for (const { provider, model } of _chain) {
     let r;
     try {
       r = await ctx.invoke("llm.openai_compat", {
@@ -629,6 +632,7 @@ export default async function agentrySynthesize(input, ctx) {
       kind: spec.capability.kind,
       handler_path: handlerPath,
       seed_path: seedPath,
+      model_tier: _tier,
       repo_session: facts.session,
       repo_dir: facts.repo_dir,
       repo_read: facts.cloned,

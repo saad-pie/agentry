@@ -4,7 +4,7 @@
 // missing capability in its plan and returns immediately.
 
 export default async function agentryBuild(input, ctx) {
-  const { gap_id, capability_id } = input || {};
+  const { gap_id, capability_id, model_tier } = input || {};
   if (!gap_id && !capability_id) throw new Error("agentry.build requires gap_id or capability_id");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.build requires ctx.invoke");
 
@@ -48,7 +48,7 @@ export default async function agentryBuild(input, ctx) {
   let proposalId = null;
   try {
     const prop = await ctx.invoke("agentry.proposal", {
-      gap, candidates, notify: "notify.console",
+      gap, candidates, notify: "notify.console", model_tier,
     }, { tenant: "local", by: "agentry.build" });
     if (prop.ok && prop.output && prop.output.proposal_id) proposalId = prop.output.proposal_id;
   } catch (e) {

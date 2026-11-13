@@ -11,6 +11,10 @@
     "capability_id": {
       "type": "string",
       "optional": true
+    },
+    "model_tier": {
+      "type": "string",
+      "optional": true
     }
   },
   "produces": {

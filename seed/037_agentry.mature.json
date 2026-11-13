@@ -7,7 +7,8 @@
   "accepts": {
     "capability_id": "string",
     "rubric": "string",
-    "probe_input": { "type": "object", "optional": true }
+    "probe_input": { "type": "object", "optional": true },
+    "model_tier": { "type": "string", "optional": true }
   },
   "produces": {
     "matured": "boolean",

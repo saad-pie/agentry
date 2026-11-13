@@ -145,13 +145,29 @@ export default async function agentryPromote(input, ctx) {
     try { seed = JSON.parse(readFileSync(cap.seed_path, "utf8")); } catch {}
   }
 
+  const _tier = (input && input.model_tier) || cap.tier_hint || "balanced";
+  const _tierTimeouts = { fast: 90000, balanced: 180000, strong: 360000 };
+  const _effectiveTimeout = Number(cfg.dshTimeoutMs) > 0 ? cfg.dshTimeoutMs : (_tierTimeouts[_tier] || 180000);
+
   const prompt = buildHardenPrompt({ src: origSrc, capability: cap, seed });
   let dshRes;
-  try { dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: cfg.dshTimeoutMs }, { tenant: "local", by: "agentry.promote" }); }
-  catch (e) { return _fail("dsh_threw: " + String(e.message || "").slice(0, 200)); }
+  try {
+    dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: _effectiveTimeout, model_tier: _tier }, { tenant: "local", by: "agentry.promote" });
+  } catch (e) { return _fail("dsh_threw: " + String(e.message || "").slice(0, 200)); }
   if (!dshRes.ok) return _fail("dsh_not_ok: " + String(dshRes.error?.message || "").slice(0, 200));
 
-  const rawFinal = String(dshRes.output?.final || "");
+  let rawFinal = String(dshRes.output?.final || "");
+  // v0.60.0-phase2.3 — retry once on silent-empty (exit 0, no timeout).
+  // Prior version struck an attempt on any empty final, burning strikes on
+  // transient model failures that a retry would have fixed.
+  if (!rawFinal.trim() && dshRes.output?.exit_code === 0 && dshRes.output?.timed_out !== true) {
+    events.emit("promote.retry_empty_final", { capability_id, tier: _tier });
+    const _retryPrompt = prompt + "\n\nIMPORTANT: Your previous response was empty. Return ONLY the JSON object with improved_handler_code — no prose, no fences, no explanation.";
+    try {
+      dshRes = await ctx.invoke("agentry.agent.dsh", { prompt: _retryPrompt, timeout_ms: _effectiveTimeout, model_tier: _tier }, { tenant: "local", by: "agentry.promote" });
+    } catch (e) { return _fail("dsh_retry_threw: " + String(e.message || "").slice(0, 200)); }
+    rawFinal = String(dshRes.output?.final || "");
+  }
   if (!rawFinal.trim()) return _fail("dsh_empty_final");
 
   const { code: improved, meta: improvedMeta } = extractImproved(rawFinal);
@@ -212,6 +228,7 @@ export default async function agentryPromote(input, ctx) {
       id: capability_id,
       tier: "durable",
       promoted_at: Date.now(),
+      promote_tier: _tier,
       promote_attempts: priorAttempts + 1,
       promoted_from: ephemeralPath,
       promote_changes: Array.isArray(improvedMeta?.changes) ? improvedMeta.changes.slice(0, 20) : null,

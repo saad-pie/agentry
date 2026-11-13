@@ -6,7 +6,8 @@
   "accepts": {
     "prompt": "string",
     "timeout_ms": { "type": "number", "optional": true },
-    "session_id": { "type": "string", "optional": true }
+    "session_id": { "type": "string", "optional": true },
+    "model_tier": { "type": "string", "optional": true }
   },
   "produces": {
     "ok": "boolean",

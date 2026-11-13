@@ -366,7 +366,8 @@ function formatTraceEmail(t) {
 }
 
 export default async function agentrySynthesizeViaDsh(input, ctx) {
-  const { capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, timeout_ms } = input || {};
+  const { capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, timeout_ms, model_tier } = input || {};
+  const _tier = model_tier || "balanced";
   if (!capability_id) throw new Error("agentry.synthesize_via_dsh requires capability_id");
   if (typeof ctx.invoke !== "function") throw new Error("agentry.synthesize_via_dsh requires ctx.invoke");
 
@@ -396,7 +397,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
   const prompt = buildDshPrompt({ capability_id, intent, wanted_kind, wanted_description, accepts_hint, produces_hint, references: formatReferences(_refs) });
   let dshRes;
   try {
-    dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: timeoutMs },
+    dshRes = await ctx.invoke("agentry.agent.dsh", { prompt, timeout_ms: timeoutMs, model_tier: _tier },
       { tenant: "local", by: "agentry.synthesize_via_dsh" });
   } catch (e) {
     _recordFailure("dsh_threw", null);
@@ -709,6 +710,7 @@ export default async function agentrySynthesizeViaDsh(input, ctx) {
     requires: { npm: spec.packages || [spec.package_name], pip: [], post_install: null, capability: [] },
     source: "dsh_synth:verified",
     tier: "ephemeral",
+    tier_hint: _tier,
     seed_path: seedPath,
     trial: false,
     trial_passed_at: Date.now(),

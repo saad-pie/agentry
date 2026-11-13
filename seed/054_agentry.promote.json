@@ -3,7 +3,7 @@
   "kind": "agent",
   "invoked_via": "invoker.in_process_js",
   "handler": "agentry.promote",
-  "accepts": { "capability_id": "string" },
+  "accepts": { "capability_id": "string", "model_tier": { "type": "string", "optional": true } },
   "produces": {
     "ok": "boolean",
     "promoted": "boolean",
